@@ -3,6 +3,12 @@
 Endpoint joining, scheme and SSRF validation, redirect and credential rules,
 and the reserved-authentication-header rule live here so that configuration
 validation and the LiteLLM binding apply exactly one policy.
+
+These checks screen configuration; they are not by themselves a guarantee of
+SSRF prevention. The transport that performs the outbound request must pin the
+validated address and disable automatic redirect following, so that every hop
+passes through ``evaluate_redirect``. See the transport contract in
+``model_gateway.security.url_policy``.
 """
 
 from model_gateway.security.url_policy import (
