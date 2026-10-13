@@ -18,6 +18,7 @@ venv/
 # Environment
 .env
 .env.*
+!.env.example
 
 # OS / editors
 .DS_Store
