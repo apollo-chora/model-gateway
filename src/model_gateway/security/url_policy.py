@@ -9,9 +9,10 @@ setting is refused unless the route opts in explicitly.
 Every URL the gateway is about to contact is validated first: the scheme must
 be HTTPS unless insecure transport is explicitly enabled for development, and
 every address a host resolves to must be publicly routable (PRD sections 9.2
-and 14). Redirects are revalidated, and a route's credentials never cross an
-origin change (PRD section 7). Credentials must arrive through route
-configuration; a URL that embeds userinfo is refused.
+and 14). Redirects are revalidated; a redirect that stays within one origin
+proceeds, a cross-origin redirect is refused unless the caller opts in, and a
+route's credentials never cross an origin change (PRD section 7). Credentials
+must arrive through route configuration; a URL that embeds userinfo is refused.
 
 Transport contract
 ------------------
@@ -23,7 +24,8 @@ performs the outbound request is required to:
 - connect to the address that was validated (DNS pinning) instead of
   re-resolving the hostname and connecting wherever it now points, and
 - disable automatic redirect following, so that every hop passes through
-  :func:`evaluate_redirect` and a cross-origin hop cannot carry credentials.
+  :func:`evaluate_redirect`, which refuses a cross-origin hop unless the caller
+  opted in and never carries credentials across one.
 
 Without both obligations met, this module is advisory only.
 """
@@ -204,15 +206,23 @@ def evaluate_redirect(
     source_url: str,
     target_url: str,
     *,
+    allow_cross_origin: bool = False,
     allow_insecure_transport: bool = False,
     resolver: Resolver = system_resolver,
 ) -> RedirectDecision:
     """Decide whether a redirect from ``source_url`` to ``target_url`` may proceed.
 
     The destination is revalidated as a fresh upstream URL, so a redirect can
-    never reach a blocked address or downgrade to plain HTTP. Credentials are
-    forwarded only within one origin: a redirect that changes scheme, host or
-    port follows without them (PRD sections 7 and 14).
+    never reach a blocked address or downgrade to plain HTTP. A redirect that
+    stays within one origin proceeds and keeps the route's credentials.
+
+    A redirect that changes scheme, host or port is refused unless
+    ``allow_cross_origin`` is set. The request being redirected is a POST that
+    may carry custom authentication headers, provider or account headers, and a
+    body holding private prompts and tool payloads, so deciding which of those
+    may cross an origin is riskier than refusing the hop. When the opt-in is set
+    the hop proceeds, but credentials are never forwarded across the origin
+    change (PRD sections 7 and 14).
 
     This helper only has an effect when the transport disables automatic
     redirect following; a transport that follows redirects on its own never
@@ -231,6 +241,12 @@ def evaluate_redirect(
 
     if target.origin == source.origin:
         return RedirectDecision(allowed=True, forward_credentials=True, reason="same origin")
+    if not allow_cross_origin:
+        return RedirectDecision(
+            allowed=False,
+            forward_credentials=False,
+            reason="redirect changes origin; cross-origin redirects require an explicit opt-in",
+        )
     return RedirectDecision(
         allowed=True,
         forward_credentials=False,
