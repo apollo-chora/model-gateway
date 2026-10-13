@@ -1,0 +1,28 @@
+{
+  "invocation_id": "inv-9b21c4",
+  "model": "image-default",
+  "upstream_model": "primary-image-model",
+  "text": "",
+  "tool_calls": [],
+  "images": [
+    {
+      "type": "image",
+      "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "url": null,
+      "media_type": "image/png"
+    }
+  ],
+  "finish_reason": "stop",
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": null,
+    "total_tokens": 12,
+    "cached_tokens": null,
+    "source": "estimate"
+  },
+  "estimated_cost": null,
+  "cost_currency": null,
+  "attempt_count": 1,
+  "fallback_used": false,
+  "idempotency_status": "not_applicable"
+}

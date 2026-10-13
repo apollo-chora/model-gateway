@@ -1,0 +1,162 @@
+{
+  "invocation_id": "inv-7f3c1a90",
+  "tenant_id": "acme",
+  "actor_id": "svc-support-bot",
+  "agent_id": "triage-agent",
+  "model": "text-default",
+  "messages": [
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "text",
+          "text": "You are a helpful assistant."
+        }
+      ],
+      "name": null,
+      "tool_calls": [],
+      "tool_call_id": null
+    },
+    {
+      "role": "developer",
+      "content": [
+        {
+          "type": "text",
+          "text": "Answer in British English."
+        }
+      ],
+      "name": null,
+      "tool_calls": [],
+      "tool_call_id": null
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What is the weather in Paris?"
+        }
+      ],
+      "name": null,
+      "tool_calls": [],
+      "tool_call_id": null
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Let me look that up."
+        }
+      ],
+      "name": null,
+      "tool_calls": [
+        {
+          "id": "call_01",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris",
+            "units": "metric",
+            "days": 1
+          }
+        }
+      ],
+      "tool_call_id": null
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"city\": \"Paris\", \"temp_c\": 18}"
+        }
+      ],
+      "name": "get_weather",
+      "tool_calls": [],
+      "tool_call_id": "call_01"
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Thanks. Does this photo look like Paris?"
+        },
+        {
+          "type": "image",
+          "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+          "url": null,
+          "media_type": "image/png"
+        },
+        {
+          "type": "image",
+          "data": null,
+          "url": "https://images.example/paris.jpg",
+          "media_type": "image/jpeg"
+        }
+      ],
+      "name": null,
+      "tool_calls": [],
+      "tool_call_id": null
+    }
+  ],
+  "system_instruction": "Answer concisely.",
+  "generation_config": {
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "max_output_tokens": 512,
+    "stop_sequences": [
+      "\n\nHuman:"
+    ],
+    "seed": 7,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.5
+  },
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Look up the current weather for a city.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "units": {
+            "type": "string",
+            "enum": [
+              "metric",
+              "imperial"
+            ]
+          },
+          "days": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "city"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "tool_choice": {
+    "mode": "specific",
+    "name": "get_weather"
+  },
+  "response_modality": "multimodal",
+  "fallback_models": [],
+  "idempotency_key": "idem-42",
+  "metadata": {
+    "request_source": "console",
+    "trace": {
+      "sampled": true,
+      "attempt": 1,
+      "tags": [
+        "chat",
+        "tools"
+      ]
+    }
+  }
+}
