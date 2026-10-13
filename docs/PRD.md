@@ -1,7 +1,7 @@
 # Product Requirements Document
 # Vendor-Neutral AI Model Gateway
 
-**Version:** 1.2  
+**Version:** 1.3  
 **Status:** Implementation-ready specification  
 **Implementation language:** Python  
 **Architecture:** Standalone, self-hostable, multi-provider AI gateway  
@@ -12,6 +12,7 @@
 
 **Revision history:**
 
+- **1.3** — Corrections from architecture review: additional routes now carry their own authentication configuration plus only the credentials that configuration requires; drops the impossible duplicate-route-index rejection while keeping duplicate route identity and identical endpoint+model rejections; allows `*_EXTRA_HEADERS_JSON` on any route and replaces the unenforceable credential-injection wording with a reserved-authentication-header rule enforced at startup; tightens the §9 extensibility wording to "can be added through LiteLLM".
 - **1.2** — Makes the LiteLLM boundary and ownership split explicit; collapses multi-route configuration to one schema (a singleton primary block plus `<CAPABILITY>_ROUTES_JSON`); assigns retry and fallback ownership solely to the gateway core with LiteLLM retry and fallback disabled; restricts an absolute-URL override in `*_PATH` to explicit opt-in.
 - **1.1** — Removes grounded search and configurable model aliases; delegates all upstream inference to the LiteLLM library.
 - **1.0** — Initial specification.
@@ -41,7 +42,7 @@ The gateway must not require a specific cloud provider, proprietary SDK, managed
 5. **Optional infrastructure:** Persistence, caching, distributed coordination, and observability integrations are configurable.
 6. **Security by default:** Authentication, credential protection, request validation, and network restrictions are first-class requirements.
 7. **Deterministic behavior:** Retries, routing, errors, and fallback behavior must be predictable and testable.
-8. **Extensibility:** Additional upstream providers are supported through LiteLLM without modifying the gateway's core business logic.
+8. **Extensibility:** Additional upstream providers can be added through LiteLLM without modifying the gateway's core business logic.
 
 ---
 
@@ -535,9 +536,11 @@ The gateway decides which credential configuration applies to a route and suppli
 
 1. **Native provider authentication is the default.** The gateway supplies `api_key` for the route and normally lets LiteLLM construct the provider's native header — for example the OpenAI-compatible `Authorization: Bearer` header.
 2. **`*_AUTH_TYPE` applies only when a custom endpoint needs a non-native header.** It exists for endpoints that are not the provider's native endpoint and require `x-api-key`, `api-key`, or a named custom header. A value that matches the provider's native scheme (for example `bearer` for an OpenAI-compatible endpoint) is a no-op and equivalent to leaving the variable unset.
-3. **`*_EXTRA_HEADERS_JSON` applies only to the same custom-endpoint case.** It is not a general override of provider authentication.
+3. **`*_EXTRA_HEADERS_JSON` may be used on any route.** It carries non-authentication headers a route legitimately needs — provider routing headers, organisation or project identifiers, proxy-required headers, and feature or version headers — and is independent of the route's authentication configuration.
 
-Extra headers merge with the headers LiteLLM generates for the request. The gateway's configured headers are applied last, so a configured header name wins over a LiteLLM-generated header with the same name, and LiteLLM's remaining generated headers are preserved. The merge is deterministic and must not be used to inject a credential that the route's own credential configuration does not supply.
+Extra headers merge with the headers LiteLLM generates for the request. The gateway's configured headers are applied last, so a configured header name wins over a LiteLLM-generated header with the same name, and LiteLLM's remaining generated headers are preserved.
+
+Reserved authentication headers must not be supplied through `*_EXTRA_HEADERS_JSON`: `Authorization`, `x-api-key`, `api-key`, and any header the route's own authentication configuration owns. Supplying a reserved header requires an explicit custom-auth configuration for the route; otherwise startup must reject the configuration. The reserved-header rule is the enforceable form of the constraint, because the headers a route's authentication owns follow from its `*_AUTH_TYPE` and credential configuration and can therefore be checked at startup, whereas "must not inject a credential" describes an intent that no configuration check can decide.
 
 Credentials are bound to one origin. The gateway must never forward a route's credentials to a different origin, and must never re-send them across a redirect that changes scheme, host, or port (§14).
 
@@ -619,7 +622,7 @@ The gateway owns policy, lifecycle, validation, identity, reliability policy, an
 
 In particular, LiteLLM does not own error normalisation or authentication decisions. It may raise provider-shaped exceptions, and it may construct a provider-native authentication header from credentials the gateway supplies (§7), but the gateway decides which error category a caller sees and which credential configuration applies to a route.
 
-This satisfies the extensibility principle: additional upstream providers are supported by LiteLLM without changing the gateway's core business logic.
+This satisfies the extensibility principle: additional upstream providers can be added through LiteLLM without changing the gateway's core business logic.
 
 The binding must not own:
 
@@ -736,12 +739,12 @@ How the singleton block and `*_ROUTES_JSON` combine:
 - The singleton block always defines the primary route (index 0). It is the only place the primary route is defined.
 - `*_ROUTES_JSON` entries are additional routes, appended in array order (index 1, 2, ...).
 - An absent or empty array means the capability has exactly one route.
-- Precedence is positional, not field-merged. An entry never overrides a field of the singleton block, and no field is inherited from one route to another: each entry is self-contained and must specify its own endpoint, model ID, format, and credentials. Credentials are never carried across routes, because a fallback route may point at a different origin (§7).
+- Precedence is positional, not field-merged. An entry never overrides a field of the singleton block, and no field is inherited from one route to another: each entry is self-contained and must specify its own endpoint, model ID, format, and authentication configuration, plus any credentials that configuration requires. Credentials are never carried across routes, because a fallback route may point at a different origin (§7).
 - A capability is enabled only when its singleton block is configured. `*_ROUTES_JSON` alone, with the singleton block unset, is ambiguous and must be rejected at startup.
 
 The indexed form (`TEXT_LLM_1_*`, `TEXT_LLM_2_*`) does not exist. It is not a supported configuration, and its presence must be rejected at startup.
 
-Ambiguous configuration must be rejected at startup rather than resolved by guessing. This includes a malformed JSON array, an entry missing a required field, a duplicate route index, and two entries naming the same endpoint and model.
+Ambiguous configuration must be rejected at startup rather than resolved by guessing. This includes a malformed JSON array, an entry missing a required field, duplicate route identity (two entries presenting themselves as the same route), and two entries naming the same endpoint and model.
 
 ## 11.2 Fallback selection
 
