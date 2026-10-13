@@ -16,4 +16,3 @@ class Capability(StrEnum):
     EMBEDDINGS = "embeddings"
     GENERATION = "generation"
     EDITING = "editing"
-    SEARCH = "search"
