@@ -31,7 +31,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import NamedTuple
+from typing import NamedTuple, NoReturn, Self
 
 from model_gateway.auth import AuthType
 from model_gateway.capabilities import Capability
@@ -65,10 +65,15 @@ class Route:
 
     ``endpoint`` is the base URL exactly as configured and ``base_url`` is that
     endpoint resolved under the URL policy, which is the value handed to the
-    inference binding as its base URL (PRD sections 8 and 9.4). ``api_key`` and
-    ``auth_type`` are the route's own authentication configuration, and
-    ``extra_headers`` holds only non-authentication headers, because a reserved
-    authentication header is refused at parse time (PRD section 7).
+    inference binding as its base URL (PRD sections 8 and 9.4). ``api_key`` is the
+    route's credential and ``auth_type`` its authentication override: ``None``
+    means the provider's native authentication, which is the default and the only
+    honest reading of a route such as ``vertex_ai`` that authenticates through
+    ambient credentials, while an explicit member means the route was configured
+    with a non-native header (PRD section 7). ``extra_headers`` holds only
+    non-authentication headers, because a reserved authentication header is
+    refused at parse time, and it is immutable so that a validated route cannot
+    acquire one afterwards.
     """
 
     operation: Operation
@@ -78,15 +83,43 @@ class Route:
     model_id: str
     format: str
     api_key: str
-    auth_type: AuthType
     capabilities: frozenset[Capability]
     extra_headers: Mapping[str, str]
     allow_absolute_path_url: bool
+    auth_type: AuthType | None = None
 
     @property
     def litellm_model(self) -> str:
         """The provider-prefixed model string handed to LiteLLM (PRD section 9.4)."""
         return f"{self.format}/{self.model_id}"
+
+
+class _ImmutableHeaders(dict[str, str]):
+    """A route's extra headers, frozen once the route has been validated (PRD section 7).
+
+    A plain ``dict`` inside a frozen dataclass is only a shallow freeze: assigning
+    to it would let a validated route acquire a reserved authentication header the
+    parser had refused. Every ordinary mutator raises instead, which is the same
+    strength of freeze the dataclass itself provides. Being a ``dict`` subclass
+    keeps ``dataclasses.asdict``, equality and JSON serialisation working; the
+    ``__reduce__`` hook keeps the frozen type across copying and pickling.
+    """
+
+    __slots__ = ()
+
+    def __setitem__(self, *args: object, **kwargs: object) -> NoReturn:
+        raise TypeError("a route's extra headers are immutable")
+
+    __delitem__ = __setitem__
+    __ior__ = __setitem__
+    clear = __setitem__
+    pop = __setitem__
+    popitem = __setitem__
+    setdefault = __setitem__
+    update = __setitem__
+
+    def __reduce__(self) -> tuple[type[Self], tuple[dict[str, str]]]:
+        return (type(self), (dict(self),))
 
 
 class _Block(NamedTuple):
@@ -112,6 +145,10 @@ _PATH = "PATH"
 _EXTRA_HEADERS_JSON = "EXTRA_HEADERS_JSON"
 _CAPABILITIES = "CAPABILITIES"
 _ALLOW_ABSOLUTE_PATH_URL = "ALLOW_ABSOLUTE_PATH_URL"
+_CONTEXT_WINDOW = "CONTEXT_WINDOW"
+_MAX_OUTPUT_TOKENS = "MAX_OUTPUT_TOKENS"
+_DIMENSIONS = "DIMENSIONS"
+_SUPPORTS_DIMENSIONS_PARAM = "SUPPORTS_DIMENSIONS_PARAM"
 _ROUTES_JSON = "ROUTES_JSON"
 
 _IDENTITY_SUFFIXES = (_ENDPOINT, _MODEL_ID, _FORMAT)
@@ -268,19 +305,20 @@ def _inert_object(variable: str, raw: str) -> bool:
 def _inert_flag(variable: str, raw: str) -> bool:
     if not raw:
         return True
-    try:
-        return not _parse_bool(variable, raw)
-    except ConfigurationError:
-        return False
+    return not _parse_bool(variable, raw)
 
 
 _INERT_SETTINGS: tuple[tuple[str, Callable[[str, str], bool]], ...] = (
     (_API_KEY, _inert_text),
+    (_AUTH_TYPE, _inert_text),
     (_PATH, _inert_text),
     (_EXTRA_HEADERS_JSON, _inert_object),
     (_CAPABILITIES, _inert_text),
     (_ALLOW_ABSOLUTE_PATH_URL, _inert_flag),
-    (_AUTH_TYPE, _inert_text),
+    (_CONTEXT_WINDOW, _inert_text),
+    (_MAX_OUTPUT_TOKENS, _inert_text),
+    (_DIMENSIONS, _inert_text),
+    (_SUPPORTS_DIMENSIONS_PARAM, _inert_flag),
 )
 
 
@@ -449,29 +487,39 @@ def _capability(where: str, token: str) -> Capability:
         ) from error
 
 
-def _parse_auth_type(where: str, raw: str) -> AuthType:
+def _parse_auth_type(where: str, raw: str) -> AuthType | None:
+    """Parse an authentication override; ``None`` means the provider's native scheme.
+
+    An absent value is not the same as ``bearer``: PRD section 7 makes native
+    provider authentication the default and scopes ``*_AUTH_TYPE`` to custom
+    endpoints, so collapsing the two would tell the credential rules that a
+    ``vertex_ai`` route presents a bearer token when it actually uses ADC.
+    """
     if not raw:
-        return AuthType.BEARER
+        return None
     try:
         return AuthType(raw.lower())
     except ValueError as error:
         supported = ", ".join(repr(member.value) for member in AuthType)
-        raise ConfigurationError(f"{where} must be one of {supported}, got {raw!r}") from error
+        raise ConfigurationError(
+            f"{where} must be one of {supported}, got {raw!r}; omit it to use the provider's "
+            f"native authentication"
+        ) from error
 
 
-def _entry_auth_type(where: str, value: object) -> AuthType:
+def _entry_auth_type(where: str, value: object) -> AuthType | None:
     label = f"{where} {_ENTRY_AUTH_TYPE!r}"
     if value is None:
-        return AuthType.BEARER
+        return None
     if not isinstance(value, str):
         raise ConfigurationError(f"{label} must be a string, got {_json_type(value)}")
     return _parse_auth_type(label, value.strip())
 
 
-def _singleton_extra_headers(block: _Block, raw: str) -> dict[str, str]:
+def _singleton_extra_headers(block: _Block, raw: str) -> _ImmutableHeaders:
     variable = _variable(block, _EXTRA_HEADERS_JSON)
     if not raw:
-        return {}
+        return _ImmutableHeaders()
 
     parsed = _parse_json(variable, raw, "a JSON object of string values")
     if not isinstance(parsed, dict):
@@ -481,10 +529,10 @@ def _singleton_extra_headers(block: _Block, raw: str) -> dict[str, str]:
     return _headers_from(variable, parsed)
 
 
-def _entry_extra_headers(where: str, value: object) -> dict[str, str]:
+def _entry_extra_headers(where: str, value: object) -> _ImmutableHeaders:
     label = f"{where} {_ENTRY_EXTRA_HEADERS!r}"
     if value is None:
-        return {}
+        return _ImmutableHeaders()
     if not isinstance(value, dict):
         raise ConfigurationError(
             f"{label} must be a JSON object of string values, got {_json_type(value)}"
@@ -492,7 +540,7 @@ def _entry_extra_headers(where: str, value: object) -> dict[str, str]:
     return _headers_from(label, value)
 
 
-def _headers_from(where: str, parsed: Mapping[str, object]) -> dict[str, str]:
+def _headers_from(where: str, parsed: Mapping[str, object]) -> _ImmutableHeaders:
     headers: dict[str, str] = {}
     for name, value in parsed.items():
         if not isinstance(value, str):
@@ -505,7 +553,7 @@ def _headers_from(where: str, parsed: Mapping[str, object]) -> dict[str, str]:
                 f"own authentication configuration owns that header"
             )
         headers[name] = value
-    return headers
+    return _ImmutableHeaders(headers)
 
 
 def _entry_required_text(where: str, entry: Mapping[str, object], key: str) -> str:
