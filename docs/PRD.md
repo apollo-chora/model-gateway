@@ -1,14 +1,19 @@
 # Product Requirements Document
 # Vendor-Neutral AI Model Gateway
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Status:** Implementation-ready specification  
-**Implementation language:** Language-agnostic  
+**Implementation language:** Python  
 **Architecture:** Standalone, self-hostable, multi-provider AI gateway  
 **Protocols:** gRPC, HTTP/JSON  
 **Configuration:** Environment variables  
 **Primary deployment:** Containerized service  
-**Supported capabilities:** Text generation, chat, tool calling, vision, image generation, embeddings, grounded search
+**Supported capabilities:** Text generation, chat, tool calling, vision, image generation, embeddings
+
+**Revision history:**
+
+- **1.1** — Removes grounded search and configurable model aliases; delegates all upstream inference to the LiteLLM library.
+- **1.0** — Initial specification.
 
 ---
 
@@ -18,22 +23,24 @@ The AI Model Gateway is a standalone service that provides a unified interface f
 
 Applications communicate with the gateway using standardized gRPC or HTTP endpoints. The gateway handles model selection, request translation, provider authentication, inference execution, retries, fallbacks, usage tracking, and response normalization.
 
-The gateway must be **vendor-neutral, language-agnostic, configurable through environment variables, and independently deployable**.
+The gateway must be **vendor-neutral, configurable through environment variables, and independently deployable**.
 
-A provider is defined by its endpoint, model identifier, authentication configuration, supported capabilities, and wire protocol.
+A provider is defined by its endpoint, model identifier, authentication configuration, supported capabilities, and LiteLLM provider name.
+
+The gateway delegates upstream protocol handling (request encoding, wire-format translation, and response decoding) to the LiteLLM library.
 
 The gateway must not require a specific cloud provider, proprietary SDK, managed database, external orchestration service, or commercial AI vendor.
 
 ### Core design principles
 
-1. **Vendor neutrality:** Provider selection is based on configured protocols and capabilities, not vendor names.
+1. **Vendor neutrality:** Provider selection is based on configured LiteLLM providers and capabilities, not vendor names.
 2. **Protocol abstraction:** Applications use one consistent API regardless of the upstream protocol.
 3. **Environment-driven configuration:** All deployment-specific settings, provider endpoints, model identifiers, credentials, and routing rules are configurable through environment variables.
 4. **Standalone operation:** The gateway can operate without external application services.
 5. **Optional infrastructure:** Persistence, caching, distributed coordination, and observability integrations are configurable.
 6. **Security by default:** Authentication, credential protection, request validation, and network restrictions are first-class requirements.
 7. **Deterministic behavior:** Retries, routing, errors, and fallback behavior must be predictable and testable.
-8. **Extensibility:** Additional wire protocols can be implemented without modifying the gateway's core business logic.
+8. **Extensibility:** Additional upstream providers are supported through LiteLLM without modifying the gateway's core business logic.
 
 ---
 
@@ -43,13 +50,12 @@ The gateway must provide:
 
 - A unified gRPC API for model inference.
 - An OpenAI-compatible HTTP API.
-- Configurable text, image, embedding, and search providers.
-- Multiple upstream wire-format adapters.
+- Configurable text, image, and embedding providers.
+- Multi-provider inference through the LiteLLM library.
 - Provider-independent request and response representations.
 - Support for multi-turn conversations.
 - Tool/function calling with structured arguments.
 - Multimodal input and output.
-- Grounded generation with source citations.
 - Model aliases and fallback routing.
 - Token usage and cost accounting.
 - Configurable rate limits and concurrency limits.
@@ -70,6 +76,7 @@ The following are not required for the initial release:
 - User billing or payment processing.
 - Automatic model discovery across every provider.
 - Arbitrary code execution from model-generated tool calls.
+- Web search and grounded retrieval; applications integrate a search provider directly.
 
 The gateway may integrate with external inference engines, but it does not implement the inference engine itself.
 
@@ -102,19 +109,9 @@ The gateway may integrate with external inference engines, but it does not imple
               │                 │                 │
               └─────────────────┼─────────────────┘
                                 │
-                         Format Adapters
-                                │
-                  ┌─────────────┼─────────────┐
-                  │             │             │
-             Chat/Responses   Messages      Vertex/Other
-                  │             │             │
-                  └─────────────┼─────────────┘
+                              LiteLLM
                                 │
                          Upstream APIs
-
-          Grounded Search:
-          Search Adapter → Retrieved Evidence
-                         → Text Adapter → Citations
 ```
 
 All HTTP and gRPC operations must reuse common application services rather than duplicate inference logic.
@@ -137,9 +134,8 @@ The gateway must expose the following endpoints.
 | POST | `/v1/images/generations` | Image generation |
 | POST | `/v1/images/edits` | Image editing |
 | POST | `/v1/embeddings` | Text embeddings |
-| POST | `/v1/grounded-search` | Search-grounded generation |
 
-The grounded-search HTTP endpoint is a gateway-native extension. The other inference endpoints should follow their commonly used OpenAI-compatible response shapes where applicable.
+The inference endpoints should follow their commonly used OpenAI-compatible response shapes where applicable.
 
 ## 4.1 Health
 
@@ -247,7 +243,7 @@ Response:
 }
 ```
 
-The endpoint must support system, developer, user, assistant, and tool messages where the selected adapter supports their semantics.
+The endpoint must support system, developer, user, assistant, and tool messages where the selected provider supports their semantics.
 
 ## 4.5 Responses API
 
@@ -265,7 +261,7 @@ Supports:
 
 The gateway must normalize requests and responses into the Responses API representation.
 
-A Responses-compatible upstream is not mandatory; a different adapter may serve this endpoint when the requested semantics can be preserved.
+A Responses-compatible upstream is not mandatory; a different LiteLLM provider may serve this endpoint when the requested semantics can be preserved.
 
 Unsupported features must produce explicit errors rather than silently disappearing.
 
@@ -337,39 +333,6 @@ Response:
 
 The gateway must preserve input ordering and verify output dimensionality.
 
-## 4.8 Grounded Search
-
-`POST /v1/grounded-search`
-
-```json
-{
-  "model": "text-default",
-  "query": "What are the latest developments in AI?",
-  "max_results": 5,
-  "require_citations": true
-}
-```
-
-Response:
-
-```json
-{
-  "id": "grounded-example",
-  "model": "text-default",
-  "answer": "Recent developments include...",
-  "citations": [
-    {
-      "title": "Example article",
-      "url": "https://example.com/article",
-      "snippet": "Relevant supporting evidence"
-    }
-  ],
-  "grounded": true
-}
-```
-
-When citations are required but valid sources cannot be obtained, the gateway must not falsely claim the answer is grounded.
-
 ---
 
 # 5. gRPC API
@@ -391,8 +354,6 @@ service ModelGatewayService {
   rpc Invoke(InvokeRequest) returns (InvokeResponse);
   rpc InvokeStream(InvokeRequest) returns (stream InvokeChunk);
   rpc Embed(EmbedRequest) returns (EmbedResponse);
-  rpc GroundedSearch(GroundedSearchRequest)
-      returns (GroundedSearchResponse);
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
 }
 ```
@@ -487,7 +448,7 @@ An absent optional capability is disabled rather than preventing unrelated capab
 TEXT_LLM_ENDPOINT=https://api.openai.com/v1
 TEXT_LLM_MODEL_ID=gpt-sunburst
 TEXT_LLM_API_KEY=
-TEXT_LLM_FORMAT=chat-completions
+TEXT_LLM_FORMAT=openai
 TEXT_LLM_AUTH_TYPE=bearer
 TEXT_LLM_PATH=
 TEXT_LLM_EXTRA_HEADERS_JSON={}
@@ -496,18 +457,20 @@ TEXT_LLM_CONTEXT_WINDOW=
 TEXT_LLM_MAX_OUTPUT_TOKENS=
 ```
 
-Supported initial formats:
+`TEXT_LLM_MODEL_ID` is the bare upstream model name; the gateway composes `<format>/<model_id>` when calling LiteLLM.
 
-| Format | Protocol |
+Supported initial formats (LiteLLM provider names):
+
+| Format | Provider |
 |---|---|
-| `chat-completions` | OpenAI-compatible Chat Completions |
-| `responses` | OpenAI-compatible Responses |
-| `messages` | Anthropic-compatible Messages |
-| `vertex` | Vertex AI GenerateContent |
-| `gemini` | Gemini GenerateContent |
-| `ollama` | Ollama native API |
+| `openai` | OpenAI and OpenAI-compatible endpoints |
+| `anthropic` | Anthropic Messages API |
+| `vertex_ai` | Vertex AI |
+| `gemini` | Gemini API |
+| `ollama` | Ollama |
+| `azure` | Azure OpenAI |
 
-The format identifies the request/response protocol, not the company operating the endpoint.
+The format is a LiteLLM provider name identifying the upstream API dialect, not the company operating the endpoint.
 
 ## 6.2 Image generation
 
@@ -515,20 +478,21 @@ The format identifies the request/response protocol, not the company operating t
 IMAGE_GEN_ENDPOINT=
 IMAGE_GEN_MODEL_ID=
 IMAGE_GEN_API_KEY=
-IMAGE_GEN_FORMAT=images
+IMAGE_GEN_FORMAT=openai
 IMAGE_GEN_AUTH_TYPE=bearer
 IMAGE_GEN_PATH=
 IMAGE_GEN_EXTRA_HEADERS_JSON={}
 IMAGE_GEN_CAPABILITIES=generation
 ```
 
+`IMAGE_GEN_FORMAT` is a LiteLLM provider name, and `IMAGE_GEN_MODEL_ID` is the bare upstream model name.
+
 Possible image formats:
 
-- `images`
-- `responses`
-- `chat-completions`
-- `vertex`
+- `openai`
+- `vertex_ai`
 - `gemini`
+- `azure`
 
 Image editing is enabled only when explicitly supported.
 
@@ -538,7 +502,7 @@ Image editing is enabled only when explicitly supported.
 EMBEDDINGS_ENDPOINT=
 EMBEDDINGS_MODEL_ID=
 EMBEDDINGS_API_KEY=
-EMBEDDINGS_FORMAT=embeddings
+EMBEDDINGS_FORMAT=openai
 EMBEDDINGS_AUTH_TYPE=bearer
 EMBEDDINGS_PATH=
 EMBEDDINGS_DIMENSIONS=
@@ -546,38 +510,9 @@ EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM=false
 EMBEDDINGS_EXTRA_HEADERS_JSON={}
 ```
 
+`EMBEDDINGS_FORMAT` is a LiteLLM provider name (`openai`, `vertex_ai`, `gemini`, `azure`, `ollama`), and `EMBEDDINGS_MODEL_ID` is the bare upstream model name.
+
 The gateway must support both fixed-dimension and configurable-dimension models.
-
-## 6.4 Search
-
-```dotenv
-SEARCH_ENDPOINT=
-SEARCH_API_KEY=
-SEARCH_FORMAT=exa
-SEARCH_AUTH_TYPE=bearer
-SEARCH_PATH=
-SEARCH_EXTRA_HEADERS_JSON={}
-SEARCH_MAX_RESULTS=10
-SEARCH_TIMEOUT_SECONDS=20
-```
-
-Supported initial search formats:
-
-- `exa`
-- `brave`
-- `tavily`
-- `serper`
-- `custom-http`
-
-Convenience alias:
-
-```dotenv
-EXA_API_KEY=
-```
-
-If `SEARCH_API_KEY` is absent and `EXA_API_KEY` is present, the gateway may use `EXA_API_KEY` for an explicitly configured Exa search adapter.
-
-If search is unconfigured, grounded search is disabled.
 
 ---
 
@@ -591,8 +526,9 @@ Supported upstream authentication mechanisms:
 | `x-api-key` | `x-api-key` header |
 | `api-key` | `api-key` header |
 | `none` | No upstream authentication |
-| `google-adc` | Google application-default credentials |
 | `custom-header` | Configurable authentication header |
+
+For `vertex_ai` routes, upstream Google credentials are resolved by LiteLLM through Google Application Default Credentials, and the gateway passes no static key. ADC is ambient: on GCE or GKE the workload's attached service account is inherited automatically, so operators must scope that service account deliberately.
 
 For example:
 
@@ -623,65 +559,50 @@ Production must reject unauthenticated inference requests when authentication is
 
 # 8. Provider URL Resolution
 
-The gateway must support both base URLs and complete operation URLs.
+The gateway must support both plain base URLs and base URLs that include an explicit path.
 
 Example:
 
 ```dotenv
 TEXT_LLM_ENDPOINT=https://provider.example/v1
-TEXT_LLM_FORMAT=chat-completions
+TEXT_LLM_FORMAT=openai
 ```
 
-Resolved URL:
+Resolved base URL handed to LiteLLM:
 
 ```text
-https://provider.example/v1/chat/completions
+https://provider.example/v1
 ```
 
 With an explicit path:
 
 ```dotenv
-TEXT_LLM_PATH=/custom/generate
+TEXT_LLM_PATH=/custom
 ```
 
-Resolved URL:
+Resolved base URL handed to LiteLLM:
 
 ```text
-https://provider.example/custom/generate
+https://provider.example/custom
 ```
 
 A full URL in `TEXT_LLM_PATH` may override the base URL when explicitly permitted by configuration.
 
 URL joining must be deterministic.
 
-The gateway must not duplicate `/v1`, append the same operation path twice, or silently strip meaningful path components.
+The gateway must not duplicate `/v1`, append the same path component twice, or silently strip meaningful path components.
+
+LiteLLM appends operation paths (for example `/chat/completions`) to the resolved base URL; those operation paths are LiteLLM's responsibility, not the gateway's.
 
 ---
 
-# 9. Provider Adapters
+# 9. LiteLLM Binding
 
-Each wire format must implement a common conceptual contract.
+The gateway binds to LiteLLM as its vendor-neutral inference layer. Each configured route supplies a LiteLLM provider name, an upstream model name, a base URL, and an API key, and the gateway calls LiteLLM with a provider-prefixed model string.
 
-```text
-ProviderAdapter
-  validateConfiguration()
-  supports(capability)
-  encodeRequest()
-  execute()
-  decodeResponse()
-  normalizeError()
-```
+LiteLLM owns provider-specific request encoding, network execution, response decoding, error normalization, and translation for text, vision, tool calling, image generation, and embeddings. This satisfies the extensibility principle: additional upstream providers are supported by LiteLLM without changing the gateway's core business logic.
 
-Specialized capabilities may implement:
-
-```text
-TextAdapter
-ImageAdapter
-EmbeddingAdapter
-SearchAdapter
-```
-
-Adapters must not own:
+The binding must not own:
 
 - Tenant authorization.
 - Global routing.
@@ -703,7 +624,7 @@ The canonical representation must support:
 - Tool result.
 - Tool-choice policy.
 
-The gateway translates tool definitions and calls between supported formats.
+LiteLLM translates tool definitions and calls to and from the upstream provider's format.
 
 **The gateway must not execute arbitrary model-requested tools.** The caller or an explicitly registered trusted tool executor remains responsible for execution.
 
@@ -716,6 +637,8 @@ Image inputs may be supplied as:
 - Base64 content.
 - Authorized remote URLs.
 - Supported binary payloads.
+
+Vision content is passed through to LiteLLM, which handles provider-specific encoding.
 
 Remote image fetching must follow SSRF and size-limit protections.
 
@@ -731,7 +654,7 @@ It must not silently discard tools, images, system instructions, structured-outp
 
 The gateway must support logical model aliases.
 
-Default aliases:
+Fixed logical model IDs:
 
 ```text
 text-default
@@ -739,15 +662,9 @@ image-default
 embedding-default
 ```
 
-Each alias maps to a configured capability route.
+Each logical model ID maps to a configured capability route.
 
-Optional:
-
-```dotenv
-MODEL_ALIASES_JSON={"assistant":"text-default","vision":"text-default"}
-```
-
-An unknown model alias must return a model-not-found error unless explicitly configured to use a default route.
+An unknown model alias must return a model-not-found error.
 
 Caller-supplied model names must not allow access to unconfigured upstream endpoints.
 
@@ -802,6 +719,8 @@ Retries may be triggered by:
 Retries must be bounded.
 
 Requests that have already produced visible streaming output must not silently switch providers.
+
+LiteLLM exposes its own fallback support. The gateway may use it or keep fallback selection in its core; either way, the deterministic retry and fallback semantics defined in this section govern.
 
 ---
 
@@ -861,43 +780,7 @@ The default standalone deployment must not require an external database.
 
 ---
 
-# 14. Grounded Search Pipeline
-
-Grounded generation follows:
-
-```text
-User query
-   ↓
-Input validation
-   ↓
-Search authorization
-   ↓
-Search adapter
-   ↓
-Evidence normalization
-   ↓
-Prompt/evidence construction
-   ↓
-Text-generation adapter
-   ↓
-Answer normalization
-   ↓
-Citation validation
-   ↓
-Response
-```
-
-Every citation must have a usable source URL and title.
-
-Retrieved content must be treated as untrusted input.
-
-The gateway must not treat instructions embedded in search results as higher-priority instructions.
-
-When `require_citations=true`, a successful grounded result must include at least one valid citation supporting the answer.
-
----
-
-# 15. Security
+# 14. Security
 
 The gateway must implement:
 
@@ -914,7 +797,6 @@ The gateway must implement:
 - Tenant-aware authorization where enabled.
 - Per-client rate limits.
 - Per-tenant concurrency limits.
-- Controlled external search access.
 
 Development may permit plain HTTP and unauthenticated local operation when explicitly configured.
 
@@ -922,7 +804,7 @@ Production must not silently fall back to insecure behavior.
 
 ---
 
-# 16. Reliability
+# 15. Reliability
 
 Recommended environment variables:
 
@@ -950,13 +832,13 @@ A retry must not exceed the caller's remaining deadline.
 
 ---
 
-# 17. Streaming
+# 16. Streaming
 
 HTTP streaming must use Server-Sent Events where the endpoint's protocol defines SSE.
 
 gRPC streaming must use server-streaming responses.
 
-Streaming adapters must support:
+Streaming through LiteLLM must support:
 
 - Incremental text.
 - Tool-call argument deltas.
@@ -971,7 +853,7 @@ If an upstream cannot stream, the gateway may reject the streaming request with 
 
 ---
 
-# 18. Observability
+# 17. Observability
 
 Required metrics:
 
@@ -987,7 +869,6 @@ gateway_fallbacks_total
 gateway_errors_total
 gateway_active_requests
 gateway_rate_limit_rejections_total
-gateway_search_requests_total
 ```
 
 Distributed tracing should support W3C Trace Context and OpenTelemetry.
@@ -998,7 +879,7 @@ Prompts, responses, credentials, and private tool arguments must not be logged b
 
 ---
 
-# 19. Complete Environment Example
+# 18. Complete Environment Example
 
 ```dotenv
 # ======================================
@@ -1014,7 +895,7 @@ CHORA_ENVIRONMENT=production
 TEXT_LLM_ENDPOINT=https://api.example.com/v1
 TEXT_LLM_MODEL_ID=text-model
 TEXT_LLM_API_KEY=
-TEXT_LLM_FORMAT=chat-completions
+TEXT_LLM_FORMAT=openai
 TEXT_LLM_AUTH_TYPE=bearer
 TEXT_LLM_PATH=
 TEXT_LLM_EXTRA_HEADERS_JSON={}
@@ -1028,7 +909,7 @@ TEXT_LLM_MAX_OUTPUT_TOKENS=
 IMAGE_GEN_ENDPOINT=https://images.example.com/v1
 IMAGE_GEN_MODEL_ID=image-model
 IMAGE_GEN_API_KEY=
-IMAGE_GEN_FORMAT=images
+IMAGE_GEN_FORMAT=openai
 IMAGE_GEN_AUTH_TYPE=bearer
 IMAGE_GEN_PATH=
 IMAGE_GEN_EXTRA_HEADERS_JSON={}
@@ -1040,26 +921,11 @@ IMAGE_GEN_CAPABILITIES=generation
 EMBEDDINGS_ENDPOINT=https://embeddings.example.com/v1
 EMBEDDINGS_MODEL_ID=embedding-model
 EMBEDDINGS_API_KEY=
-EMBEDDINGS_FORMAT=embeddings
+EMBEDDINGS_FORMAT=openai
 EMBEDDINGS_AUTH_TYPE=bearer
 EMBEDDINGS_PATH=
 EMBEDDINGS_DIMENSIONS=1024
 EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM=false
-
-# ======================================
-# SEARCH
-# ======================================
-SEARCH_ENDPOINT=https://api.exa.ai
-SEARCH_API_KEY=
-SEARCH_FORMAT=exa
-SEARCH_AUTH_TYPE=bearer
-SEARCH_MAX_RESULTS=10
-SEARCH_TIMEOUT_SECONDS=20
-
-# ======================================
-# ROUTING
-# ======================================
-MODEL_ALIASES_JSON={}
 
 # ======================================
 # AUTHENTICATION
@@ -1093,7 +959,7 @@ LOG_LEVEL=info
 
 ---
 
-# 20. Deployment
+# 19. Deployment
 
 The gateway must support running as a single standalone process.
 
@@ -1108,7 +974,7 @@ The process must:
 
 1. Load environment configuration.
 2. Validate enabled capabilities.
-3. Initialize protocol adapters.
+3. Initialize the LiteLLM binding.
 4. Initialize optional persistence.
 5. Initialize observability.
 6. Start HTTP and gRPC listeners.
@@ -1119,7 +985,7 @@ The service must not require Kubernetes, a service mesh, or a cloud-managed runt
 
 ---
 
-# 21. Testing Requirements
+# 20. Testing Requirements
 
 ## Unit tests
 
@@ -1136,23 +1002,20 @@ Cover:
 - Error mapping.
 - Tool-call translation.
 - Embedding dimensions.
-- Citation validation.
 
 ## Integration tests
 
-Use deterministic mock upstream servers implementing each supported wire format.
+Use deterministic mock upstream servers implementing each supported LiteLLM provider protocol.
 
 Test:
 
-- Chat Completions.
-- Responses.
-- Messages.
+- OpenAI.
+- Anthropic.
 - Vertex.
 - Gemini.
 - Ollama.
 - Images.
 - Embeddings.
-- Search.
 - Streaming.
 - Provider failures.
 - Cancellation.
@@ -1170,34 +1033,33 @@ At least one optional live-provider smoke test should demonstrate switching prov
 
 ---
 
-# 22. Acceptance Criteria
+# 21. Acceptance Criteria
 
 The product is accepted when:
 
 1. The gateway starts independently without external application services.
-2. Text inference works through at least four configured wire formats.
+2. Text inference works through at least four configured LiteLLM providers.
 3. Text providers can be switched without recompilation.
 4. Image generation uses independently configured credentials and endpoints.
 5. Embeddings use independently configured credentials and endpoints.
-6. Search is optional and independently configurable.
-7. HTTP and gRPC share canonical application logic.
-8. Tool calls round-trip without losing arguments or identifiers.
-9. Multimodal inputs preserve supported content.
-10. Unsupported capabilities produce explicit errors.
-11. Streaming works for compatible providers.
-12. Timeouts, retries, and fallbacks behave deterministically.
-13. No provider credentials are exposed through public APIs.
-14. Unknown model aliases cannot access arbitrary upstream endpoints.
-15. Usage accounting distinguishes actual and estimated token counts.
-16. The service can run without a database.
-17. Health and readiness checks function independently.
-18. Configuration errors are detected at startup.
-19. Automated tests cover all public endpoints.
-20. The implementation contains no vendor-specific business logic outside protocol adapters.
+6. HTTP and gRPC share canonical application logic.
+7. Tool calls round-trip without losing arguments or identifiers.
+8. Multimodal inputs preserve supported content.
+9. Unsupported capabilities produce explicit errors.
+10. Streaming works for compatible providers.
+11. Timeouts, retries, and fallbacks behave deterministically.
+12. No provider credentials are exposed through public APIs.
+13. Unknown model aliases cannot access arbitrary upstream endpoints.
+14. Usage accounting distinguishes actual and estimated token counts.
+15. The service can run without a database.
+16. Health and readiness checks function independently.
+17. Configuration errors are detected at startup.
+18. Automated tests cover all public endpoints.
+19. The implementation contains no vendor-specific business logic outside the LiteLLM binding.
 
 ---
 
-# 23. Implementation Milestones
+# 22. Implementation Milestones
 
 **Phase 1 — Core gateway**
 
@@ -1205,15 +1067,12 @@ The product is accepted when:
 - HTTP and gRPC servers.
 - Canonical request/response types.
 - Model routing.
-- Chat Completions adapter.
+- LiteLLM binding for text inference.
 - Authentication and health checks.
 
-**Phase 2 — Multi-protocol support**
+**Phase 2 — Multi-provider support**
 
-- Responses adapter.
-- Messages adapter.
-- Vertex/Gemini adapters.
-- Ollama adapter.
+- Additional LiteLLM providers (Anthropic, Vertex, Gemini, Ollama, Azure).
 - Tool calling.
 - Vision support.
 
@@ -1222,8 +1081,6 @@ The product is accepted when:
 - Image generation.
 - Image editing.
 - Embeddings.
-- Grounded search.
-- Citation normalization.
 
 **Phase 4 — Production hardening**
 
@@ -1246,7 +1103,7 @@ The product is accepted when:
 
 ---
 
-# 24. Final Architectural Requirements
+# 23. Final Architectural Requirements
 
 The gateway must maintain three independent layers.
 
@@ -1258,9 +1115,9 @@ Stable HTTP and gRPC contracts consumed by applications.
 
 Vendor-independent routing, validation, governance, reliability, and accounting.
 
-**Southbound adapters**
+**LiteLLM binding**
 
-Protocol-specific request encoding, authentication, network execution, and response decoding.
+Protocol-specific request encoding, authentication, network execution, and response decoding, delegated to the LiteLLM library.
 
 No commercial vendor identity may be required by the gateway core.
 
