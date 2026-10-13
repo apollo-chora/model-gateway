@@ -511,10 +511,31 @@ def test_redirect_to_an_explicit_default_port_is_still_the_same_origin():
         "http://provider.example/v1/models",
     ],
 )
-def test_redirect_across_an_origin_change_drops_credentials(target):
+def test_redirect_across_an_origin_change_is_refused_by_default(target):
     decision = evaluate_redirect(
         "https://provider.example/v1",
         target,
+        allow_insecure_transport=True,
+        resolver=public_resolver,
+    )
+    assert decision.allowed is False
+    assert decision.forward_credentials is False
+    assert "opt-in" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://other.example/v1/models",
+        "https://provider.example:8443/v1/models",
+        "http://provider.example/v1/models",
+    ],
+)
+def test_redirect_across_an_origin_change_needs_the_opt_in_and_still_drops_credentials(target):
+    decision = evaluate_redirect(
+        "https://provider.example/v1",
+        target,
+        allow_cross_origin=True,
         allow_insecure_transport=True,
         resolver=public_resolver,
     )
@@ -523,14 +544,28 @@ def test_redirect_across_an_origin_change_drops_credentials(target):
     assert "origin changed" in decision.reason
 
 
-def test_redirect_refuses_an_insecure_downgrade():
+def test_redirect_to_a_new_host_with_the_opt_in_does_not_forward_credentials():
+    decision = evaluate_redirect(
+        "https://provider.example/v1",
+        "https://other.example/v1/models",
+        allow_cross_origin=True,
+        resolver=public_resolver,
+    )
+    assert decision.allowed is True
+    assert decision.forward_credentials is False
+
+
+@pytest.mark.parametrize("allow_cross_origin", [False, True])
+def test_redirect_refuses_an_insecure_downgrade(allow_cross_origin):
     decision = evaluate_redirect(
         "https://provider.example/v1",
         "http://provider.example/v1/models",
+        allow_cross_origin=allow_cross_origin,
         resolver=public_resolver,
     )
     assert decision.allowed is False
     assert decision.forward_credentials is False
+    assert "insecure transport" in decision.reason
 
 
 def test_redirect_revalidates_the_destination_host():
