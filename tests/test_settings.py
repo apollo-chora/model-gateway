@@ -5,7 +5,7 @@ import importlib
 
 import pytest
 
-from model_gateway.config import ConfigurationError, Settings, UsageStorage
+from model_gateway.config import ConfigurationError, Environment, Settings, UsageStorage
 
 BOOLEAN_VARIABLES = [
     "GATEWAY_AUTH_ENABLED",
@@ -15,14 +15,25 @@ BOOLEAN_VARIABLES = [
     "OTEL_ENABLED",
 ]
 
-POSITIVE_NUMERIC_VARIABLES = [
-    "CHORA_HTTP_PORT",
-    "CHORA_GRPC_PORT",
+PORT_VARIABLES = {
+    "CHORA_HTTP_PORT": "http_port",
+    "CHORA_GRPC_PORT": "grpc_port",
+}
+
+DECIMAL_VARIABLES = [
     "PROVIDER_TIMEOUT_SECONDS",
     "PROVIDER_CONNECT_TIMEOUT_SECONDS",
-    "PROVIDER_RETRY_BACKOFF_MS",
-    "PROVIDER_MAX_CONCURRENT_REQUESTS",
     "GATEWAY_SHUTDOWN_TIMEOUT_SECONDS",
+]
+
+NON_NEGATIVE_INTEGER_VARIABLES = {
+    "PROVIDER_RETRY_COUNT": "provider_retry_count",
+    "PROVIDER_RETRY_BACKOFF_MS": "provider_retry_backoff_ms",
+}
+
+STRICTLY_POSITIVE_VARIABLES = [
+    "PROVIDER_MAX_CONCURRENT_REQUESTS",
+    *DECIMAL_VARIABLES,
 ]
 
 
@@ -35,7 +46,7 @@ def test_settings_is_importable_from_the_config_package():
 def test_defaults_match_the_prd_example_environment():
     settings = Settings.from_env({})
 
-    assert settings.environment == "development"
+    assert settings.environment is Environment.DEVELOPMENT
     assert settings.http_port == 8080
     assert settings.grpc_port == 9090
     assert settings.log_level == "INFO"
@@ -91,7 +102,7 @@ def test_every_deployment_variable_is_loaded():
         }
     )
 
-    assert settings.environment == "production"
+    assert settings.environment is Environment.PRODUCTION
     assert settings.http_port == 9080
     assert settings.grpc_port == 9091
     assert settings.log_level == "DEBUG"
@@ -111,8 +122,57 @@ def test_every_deployment_variable_is_loaded():
     assert settings.otel_exporter_otlp_endpoint == "http://collector:4317"
 
 
-def test_log_level_is_normalised_to_upper_case():
-    assert Settings.from_env({"LOG_LEVEL": "warning"}).log_level == "WARNING"
+@pytest.mark.parametrize("value", ["debug", "Debug", "INFO", "warning", "Error", "critical"])
+def test_log_level_accepts_supported_levels_case_insensitively(value):
+    settings = Settings.from_env({"LOG_LEVEL": value})
+
+    assert settings.log_level == value.upper()
+
+
+@pytest.mark.parametrize("value", ["potato", "verbose", "warn", "10", "info!"])
+def test_log_level_rejects_an_unknown_level(value):
+    with pytest.raises(ConfigurationError) as error:
+        Settings.from_env({"LOG_LEVEL": value})
+
+    assert str(error.value) == (
+        "LOG_LEVEL must be one of 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL', "
+        f"got {value!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("development", Environment.DEVELOPMENT),
+        ("Development", Environment.DEVELOPMENT),
+        ("DEVELOPMENT", Environment.DEVELOPMENT),
+        ("test", Environment.TEST),
+        ("TEST", Environment.TEST),
+        ("production", Environment.PRODUCTION),
+        ("Production", Environment.PRODUCTION),
+        ("PRODUCTION", Environment.PRODUCTION),
+    ],
+)
+def test_environment_accepts_supported_values_case_insensitively(value, expected):
+    settings = Settings.from_env(
+        {
+            "CHORA_ENVIRONMENT": value,
+            "GATEWAY_AUTH_ENABLED": "true",
+            "GATEWAY_API_KEYS": "key-a",
+        }
+    )
+
+    assert settings.environment is expected
+
+
+@pytest.mark.parametrize("value", ["prodution", "PROD", "banana", "staging", "production-1"])
+def test_environment_rejects_unknown_values(value):
+    with pytest.raises(ConfigurationError) as error:
+        Settings.from_env({"CHORA_ENVIRONMENT": value})
+
+    assert str(error.value) == (
+        f"CHORA_ENVIRONMENT must be one of 'development', 'test', 'production', got {value!r}"
+    )
 
 
 def test_environment_must_not_be_empty():
@@ -120,6 +180,103 @@ def test_environment_must_not_be_empty():
         Settings.from_env({"CHORA_ENVIRONMENT": "  "})
 
     assert str(error.value) == "CHORA_ENVIRONMENT must not be empty"
+
+
+def test_environment_is_validated_on_direct_construction():
+    settings = Settings.from_env({})
+
+    with pytest.raises(ConfigurationError, match="CHORA_ENVIRONMENT must be one of"):
+        dataclasses.replace(settings, environment="banana")
+
+    production = dataclasses.replace(
+        settings,
+        environment="PRODUCTION",
+        auth_enabled=True,
+        api_keys=("key-a",),
+    )
+
+    assert production.environment is Environment.PRODUCTION
+
+
+@pytest.mark.parametrize("value", ["development", "test", "DEVELOPMENT", "Test"])
+def test_non_production_environments_allow_authentication_to_be_disabled(value):
+    settings = Settings.from_env({"CHORA_ENVIRONMENT": value, "GATEWAY_AUTH_ENABLED": "false"})
+
+    assert settings.auth_enabled is False
+
+
+def test_production_requires_authentication():
+    with pytest.raises(ConfigurationError) as error:
+        Settings.from_env({"CHORA_ENVIRONMENT": "production"})
+
+    assert str(error.value) == (
+        "CHORA_ENVIRONMENT is production but GATEWAY_AUTH_ENABLED is false; "
+        "production must not serve unauthenticated inference. Set "
+        "GATEWAY_AUTH_ENABLED=true with GATEWAY_API_KEYS, or set "
+        "CHORA_ENVIRONMENT=development"
+    )
+
+
+def test_production_requires_authentication_even_when_it_is_disabled_explicitly():
+    with pytest.raises(ConfigurationError, match="CHORA_ENVIRONMENT is production"):
+        Settings.from_env(
+            {"CHORA_ENVIRONMENT": "production", "GATEWAY_AUTH_ENABLED": "false"}
+        )
+
+
+def test_the_production_invariant_is_enforced_on_direct_construction():
+    settings = Settings.from_env({})
+
+    with pytest.raises(ConfigurationError, match="CHORA_ENVIRONMENT is production"):
+        dataclasses.replace(settings, environment="production")
+
+
+def test_production_with_authentication_is_accepted():
+    settings = Settings.from_env(
+        {
+            "CHORA_ENVIRONMENT": "production",
+            "GATEWAY_AUTH_ENABLED": "true",
+            "GATEWAY_API_KEYS": "key-a",
+        }
+    )
+
+    assert settings.environment is Environment.PRODUCTION
+    assert settings.auth_enabled is True
+
+
+def test_production_with_authentication_but_no_keys_reports_the_missing_keys():
+    with pytest.raises(ConfigurationError, match="GATEWAY_API_KEYS is empty"):
+        Settings.from_env({"CHORA_ENVIRONMENT": "production", "GATEWAY_AUTH_ENABLED": "true"})
+
+
+@pytest.mark.parametrize("name", list(PORT_VARIABLES))
+@pytest.mark.parametrize("value", ["1", "8080", "65535"])
+def test_port_variables_accept_valid_ports(name, value):
+    settings = Settings.from_env({name: value})
+
+    assert getattr(settings, PORT_VARIABLES[name]) == int(value)
+
+
+@pytest.mark.parametrize("name", list(PORT_VARIABLES))
+@pytest.mark.parametrize("value", ["0", "-1", "65536", "999999"])
+def test_port_variables_reject_out_of_range_ports(name, value):
+    with pytest.raises(ConfigurationError) as error:
+        Settings.from_env({name: value})
+
+    assert str(error.value) == (
+        f"{name} must be a port number between 1 and 65535, got {value!r}"
+    )
+
+
+@pytest.mark.parametrize("name", list(PORT_VARIABLES))
+@pytest.mark.parametrize("value", ["abc", "80.5", "", "http"])
+def test_port_variables_reject_malformed_values(name, value):
+    with pytest.raises(ConfigurationError) as error:
+        Settings.from_env({name: value})
+
+    assert str(error.value) == (
+        f"{name} must be a port number between 1 and 65535, got {value!r}"
+    )
 
 
 @pytest.mark.parametrize("value", ["true", "TRUE", "True", "1", "yes", "on", " true "])
@@ -165,6 +322,12 @@ def test_numeric_variables_accept_integers_and_decimals():
     assert settings.provider_retry_count == 3
 
 
+@pytest.mark.parametrize("name", STRICTLY_POSITIVE_VARIABLES)
+def test_strictly_positive_variables_reject_zero(name):
+    with pytest.raises(ConfigurationError, match=name):
+        Settings.from_env({name: "0"})
+
+
 @pytest.mark.parametrize("value", ["abc", "2.5", "", "10s"])
 def test_an_integer_variable_rejects_a_malformed_value(value):
     with pytest.raises(ConfigurationError) as error:
@@ -175,59 +338,75 @@ def test_an_integer_variable_rejects_a_malformed_value(value):
     )
 
 
-@pytest.mark.parametrize("value", ["0", "-1"])
-def test_an_integer_variable_rejects_a_non_positive_value(value):
+def test_an_integer_variable_rejects_a_negative_value():
     with pytest.raises(ConfigurationError) as error:
-        Settings.from_env({"PROVIDER_MAX_CONCURRENT_REQUESTS": value})
+        Settings.from_env({"PROVIDER_MAX_CONCURRENT_REQUESTS": "-1"})
 
     assert str(error.value) == (
-        f"PROVIDER_MAX_CONCURRENT_REQUESTS must be a positive integer, got {value!r}"
+        "PROVIDER_MAX_CONCURRENT_REQUESTS must be a positive integer, got '-1'"
     )
 
 
+@pytest.mark.parametrize("name", list(NON_NEGATIVE_INTEGER_VARIABLES))
 @pytest.mark.parametrize("value", ["0", "1", "5"])
-def test_provider_retry_count_accepts_zero_and_above(value):
-    settings = Settings.from_env({"PROVIDER_RETRY_COUNT": value})
+def test_non_negative_integer_variables_accept_zero_and_above(name, value):
+    settings = Settings.from_env({name: value})
 
-    assert settings.provider_retry_count == int(value)
+    assert getattr(settings, NON_NEGATIVE_INTEGER_VARIABLES[name]) == int(value)
 
 
+@pytest.mark.parametrize("name", list(NON_NEGATIVE_INTEGER_VARIABLES))
 @pytest.mark.parametrize("value", ["-1", "-100"])
-def test_provider_retry_count_rejects_a_negative_value(value):
+def test_non_negative_integer_variables_reject_negative_values(name, value):
     with pytest.raises(ConfigurationError) as error:
-        Settings.from_env({"PROVIDER_RETRY_COUNT": value})
+        Settings.from_env({name: value})
 
-    assert str(error.value) == f"PROVIDER_RETRY_COUNT must be a non-negative integer, got {value!r}"
+    assert str(error.value) == f"{name} must be a non-negative integer, got {value!r}"
 
 
+@pytest.mark.parametrize("name", list(NON_NEGATIVE_INTEGER_VARIABLES))
 @pytest.mark.parametrize("value", ["abc", "2.5", "", "3 retries"])
-def test_provider_retry_count_rejects_a_malformed_value(value):
+def test_non_negative_integer_variables_reject_malformed_values(name, value):
     with pytest.raises(ConfigurationError) as error:
-        Settings.from_env({"PROVIDER_RETRY_COUNT": value})
+        Settings.from_env({name: value})
 
-    assert str(error.value) == f"PROVIDER_RETRY_COUNT must be a non-negative integer, got {value!r}"
+    assert str(error.value) == f"{name} must be a non-negative integer, got {value!r}"
 
 
+@pytest.mark.parametrize("name", DECIMAL_VARIABLES)
 @pytest.mark.parametrize("value", ["soon", "", "12,5"])
-def test_a_decimal_variable_rejects_a_malformed_value(value):
+def test_a_decimal_variable_rejects_a_malformed_value(name, value):
     with pytest.raises(ConfigurationError) as error:
-        Settings.from_env({"PROVIDER_TIMEOUT_SECONDS": value})
+        Settings.from_env({name: value})
 
-    assert str(error.value) == f"PROVIDER_TIMEOUT_SECONDS must be a positive number, got {value!r}"
+    assert str(error.value) == f"{name} must be a positive number, got {value!r}"
 
 
+@pytest.mark.parametrize("name", DECIMAL_VARIABLES)
 @pytest.mark.parametrize("value", ["0", "-0.5"])
-def test_a_decimal_variable_rejects_a_non_positive_value(value):
+def test_a_decimal_variable_rejects_a_non_positive_value(name, value):
     with pytest.raises(ConfigurationError) as error:
-        Settings.from_env({"PROVIDER_TIMEOUT_SECONDS": value})
+        Settings.from_env({name: value})
 
-    assert str(error.value) == f"PROVIDER_TIMEOUT_SECONDS must be a positive number, got {value!r}"
+    assert str(error.value) == f"{name} must be a positive number, got {value!r}"
 
 
-@pytest.mark.parametrize("name", POSITIVE_NUMERIC_VARIABLES)
-def test_every_strictly_positive_numeric_variable_rejects_zero(name):
-    with pytest.raises(ConfigurationError, match=name):
-        Settings.from_env({name: "0"})
+@pytest.mark.parametrize("name", DECIMAL_VARIABLES)
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "Infinity", "1e999"])
+def test_a_decimal_variable_rejects_a_non_finite_value(name, value):
+    with pytest.raises(ConfigurationError) as error:
+        Settings.from_env({name: value})
+
+    assert str(error.value) == f"{name} must be a finite number, got {value!r}"
+
+
+def test_a_decimal_variable_accepts_a_finite_value():
+    settings = Settings.from_env(
+        {"PROVIDER_TIMEOUT_SECONDS": "0.5", "GATEWAY_SHUTDOWN_TIMEOUT_SECONDS": "1e3"}
+    )
+
+    assert settings.provider_timeout_seconds == 0.5
+    assert settings.shutdown_timeout_seconds == 1000.0
 
 
 def test_api_keys_are_split_on_commas_and_trimmed():
