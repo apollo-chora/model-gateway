@@ -1,7 +1,7 @@
 # Product Requirements Document
 # Vendor-Neutral AI Model Gateway
 
-**Version:** 1.5  
+**Version:** 1.6  
 **Status:** Implementation-ready specification  
 **Implementation language:** Python  
 **Architecture:** Standalone, self-hostable, multi-provider AI gateway  
@@ -12,6 +12,7 @@
 
 **Revision history:**
 
+- **1.6** — Replaces §8's stale path-joining prohibition with a rule against stripping, deduplicating, reordering or reinterpreting configured path components, so configured repetition is preserved; rewrites §14.1's network-level fallback as a compensating control that must block the prohibited address classes rather than claim equivalence to exact address pinning; and requires cross-origin redirects to be rejected by default unless a route opts in explicitly (§7, §14.1).
 - **1.5** — Adds §14.1, which states that configuration-time URL screening alone is not SSRF prevention and requires the outbound transport to pin the connection to a validated address and to disable automatic redirect following, with a network-level egress restriction as the fallback where the binding cannot provide those controls; cross-references the obligation from §9 and narrows the SSRF wording in §9.2 and §14.
 - **1.4** — Documents additive path joining in §8 (`*_PATH` is appended to the base path and never replaces it, so a provider prefix is never dropped) and sets `OTEL_ENABLED=false` in the §18 example to match the shipped environment templates.
 - **1.3** — Corrections from architecture review: additional routes now carry their own authentication configuration plus only the credentials that configuration requires; drops the impossible duplicate-route-index rejection while keeping duplicate route identity and identical endpoint+model rejections; allows `*_EXTRA_HEADERS_JSON` on any route and replaces the unenforceable credential-injection wording with a reserved-authentication-header rule enforced at startup; tightens the §9 extensibility wording to "can be added through LiteLLM".
@@ -544,7 +545,7 @@ Extra headers merge with the headers LiteLLM generates for the request. The gate
 
 Reserved authentication headers must not be supplied through `*_EXTRA_HEADERS_JSON`: `Authorization`, `x-api-key`, `api-key`, and any header the route's own authentication configuration owns. Supplying a reserved header requires an explicit custom-auth configuration for the route; otherwise startup must reject the configuration. The reserved-header rule is the enforceable form of the constraint, because the headers a route's authentication owns follow from its `*_AUTH_TYPE` and credential configuration and can therefore be checked at startup, whereas "must not inject a credential" describes an intent that no configuration check can decide.
 
-Credentials are bound to one origin. The gateway must never forward a route's credentials to a different origin, and must never re-send them across a redirect that changes scheme, host, or port (§14).
+Credentials are bound to one origin. The gateway must never forward a route's credentials to a different origin, and must never re-send them across a redirect that changes scheme, host, or port. A cross-origin redirect is rejected by default for that reason, and is permitted only through an explicit per-route opt-in (§14.1).
 
 For `vertex_ai` routes, upstream Google credentials are resolved by LiteLLM through Google Application Default Credentials, and the gateway passes no static key. ADC is ambient: on GCE or GKE the workload's attached service account is inherited automatically, so operators must scope that service account deliberately.
 
@@ -610,7 +611,7 @@ A full URL in `TEXT_LLM_PATH` must not override the base URL by default. Determi
 
 URL joining must be deterministic.
 
-The gateway must not duplicate `/v1`, append the same path component twice, or silently strip meaningful path components.
+The gateway must not silently strip, deduplicate, reorder, or otherwise reinterpret configured path components. Repetition produced by the literal configuration is preserved: an endpoint of `https://provider.example/v1` with `TEXT_LLM_PATH=/v1/custom` resolves to `https://provider.example/v1/v1/custom`.
 
 The resolved value is handed to the inference binding as its base URL. LiteLLM appends operation paths (for example `/chat/completions`) to that base URL; those operation paths are LiteLLM's responsibility, not the gateway's.
 
@@ -856,7 +857,7 @@ The gateway must implement:
 - Request-body size limits.
 - Provider timeouts.
 - SSRF screening of configured upstream URLs and remote image URLs, backed by the transport-level controls in §14.1.
-- Redirect restrictions; automatic redirect following is disabled at the transport, so the gateway evaluates each redirect (§14.1).
+- Redirect restrictions; automatic redirect following is disabled at the transport, so the gateway evaluates each redirect, and cross-origin redirects are rejected by default (§14.1).
 - Host and scheme validation.
 - Optional upstream hostname allowlists.
 - Safe error normalization.
@@ -875,9 +876,16 @@ Configuration-time screening alone does not constitute SSRF prevention. The gate
 Whatever transport performs the outbound request must therefore supply the controls that close that gap:
 
 - **Address pinning (DNS pinning).** The connection must be pinned to an address that passed the gateway's policy, so the socket terminates at a validated destination rather than at whatever the hostname resolves to at connect time.
-- **No automatic redirect following.** Automatic redirect following must be disabled, so that every redirect is evaluated by the gateway's redirect policy instead: the destination is revalidated under the same rules, and credentials are never forwarded across an origin change (§7).
+- **No automatic redirect following.** Automatic redirect following must be disabled, so that every redirect is evaluated by the gateway's redirect policy instead. A same-origin redirect may proceed once its destination is revalidated under the same rules. A cross-origin redirect must be rejected by default and permitted only through an explicit per-route opt-in, because an inference request is a POST that may carry custom authentication headers, provider or account headers, and a body containing private prompts and tool payloads; deciding which of those pieces may cross an origin is riskier than refusing the hop. Credentials are never forwarded across an origin change (§7).
 
-These obligations fall on the binding and its transport, not on the configuration loader. Where the binding cannot provide transport-level control — because its HTTP client exposes no address pinning or redirect handling — the deployment must enforce an equivalent network-level egress restriction instead, such as a firewall, forward proxy, or egress gateway that permits only validated destinations. A deployment in that position must document the restriction; it must not rely on configuration-time screening alone.
+These obligations fall on the binding and its transport, not on the configuration loader. The two guarantees are not interchangeable:
+
+- **Transport pinning** binds the request to the exact address the application validated, so the socket terminates where policy was checked.
+- **Network enforcement** prevents reaching the prohibited address classes regardless of how DNS changes between validation and connection.
+
+Where application-level address pinning cannot be enforced, deployment-level egress controls must independently prevent access to every address class the gateway policy prohibits — loopback, private, link-local and metadata, unique-local, and other non-global destinations. Any proxy used as that control must enforce equivalent destination validation itself. This is a compensating control, not literal address pinning: a firewall does not share the gateway's validated DNS answer, and a proxy that re-resolves the hostname independently recreates the same time-of-check to time-of-use gap.
+
+A deployment relying on that compensating control must document it; it must not rely on configuration-time screening alone.
 
 The controls must be proven by integration tests that exercise the rebinding and redirect cases against the transport actually used, not by unit tests of the URL validator alone.
 
