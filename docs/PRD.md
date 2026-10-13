@@ -1,7 +1,7 @@
 # Product Requirements Document
 # Vendor-Neutral AI Model Gateway
 
-**Version:** 1.3  
+**Version:** 1.4  
 **Status:** Implementation-ready specification  
 **Implementation language:** Python  
 **Architecture:** Standalone, self-hostable, multi-provider AI gateway  
@@ -12,6 +12,7 @@
 
 **Revision history:**
 
+- **1.4** — Documents additive path joining in §8 (`*_PATH` is appended to the base path and never replaces it, so a provider prefix is never dropped) and sets `OTEL_ENABLED=false` in the §18 example to match the shipped environment templates.
 - **1.3** — Corrections from architecture review: additional routes now carry their own authentication configuration plus only the credentials that configuration requires; drops the impossible duplicate-route-index rejection while keeping duplicate route identity and identical endpoint+model rejections; allows `*_EXTRA_HEADERS_JSON` on any route and replaces the unenforceable credential-injection wording with a reserved-authentication-header rule enforced at startup; tightens the §9 extensibility wording to "can be added through LiteLLM".
 - **1.2** — Makes the LiteLLM boundary and ownership split explicit; collapses multi-route configuration to one schema (a singleton primary block plus `<CAPABILITY>_ROUTES_JSON`); assigns retry and fallback ownership solely to the gateway core with LiteLLM retry and fallback disabled; restricts an absolute-URL override in `*_PATH` to explicit opt-in.
 - **1.1** — Removes grounded search and configurable model aliases; delegates all upstream inference to the LiteLLM library.
@@ -584,7 +585,7 @@ TEXT_LLM_ENDPOINT=https://provider.example/v1
 TEXT_LLM_FORMAT=openai
 ```
 
-Resolved base URL handed to LiteLLM:
+Resolved base URL handed to the inference binding:
 
 ```text
 https://provider.example/v1
@@ -593,22 +594,24 @@ https://provider.example/v1
 With an explicit path:
 
 ```dotenv
-TEXT_LLM_PATH=/custom
+TEXT_LLM_PATH=/custom/generate
 ```
 
-Resolved base URL handed to LiteLLM:
+Resolved base URL handed to the inference binding:
 
 ```text
-https://provider.example/custom
+https://provider.example/v1/custom/generate
 ```
 
-A full URL in `TEXT_LLM_PATH` must not override the base URL by default. Deterministic joining governs: the value is treated as a path and joined to the base URL. An absolute-URL override requires an explicit opt-in for the route, for example `TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL=true`; without that opt-in, an absolute URL in `*_PATH` is invalid configuration and startup must reject it rather than resolve it silently.
+A relative path in `*_PATH` is appended to the base path and never replaces it, so a configured provider prefix such as `/v1` is never silently dropped. That is what satisfies the prohibition below on silently stripping meaningful path components, and it is what makes `*_PATH` useful now that the operation path is appended by the inference binding.
+
+A full URL in `TEXT_LLM_PATH` must not override the base URL by default. Deterministic joining governs: the value is treated as a path and appended to the base URL. An absolute-URL override requires an explicit opt-in for the route, for example `TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL=true`; without that opt-in, an absolute URL in `*_PATH` is invalid configuration and startup must reject it rather than resolve it silently.
 
 URL joining must be deterministic.
 
 The gateway must not duplicate `/v1`, append the same path component twice, or silently strip meaningful path components.
 
-LiteLLM appends operation paths (for example `/chat/completions`) to the resolved base URL; those operation paths are LiteLLM's responsibility, not the gateway's.
+The resolved value is handed to the inference binding as its base URL. LiteLLM appends operation paths (for example `/chat/completions`) to that base URL; those operation paths are LiteLLM's responsibility, not the gateway's.
 
 ---
 
@@ -1019,7 +1022,7 @@ USAGE_STORAGE=memory
 # ======================================
 # OBSERVABILITY
 # ======================================
-OTEL_ENABLED=true
+OTEL_ENABLED=false
 OTEL_EXPORTER_OTLP_ENDPOINT=
 LOG_LEVEL=info
 ```
