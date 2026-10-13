@@ -1,5 +1,6 @@
 """Route parsing and startup validation (PRD sections 6, 7, 8, 11, 18)."""
 
+import copy
 import dataclasses
 import json
 
@@ -143,7 +144,7 @@ def test_primary_route_fields_are_readable_individually():
     assert route.model_id == "primary-model"
     assert route.format == "openai"
     assert route.api_key == ""
-    assert route.auth_type is AuthType.BEARER
+    assert route.auth_type is None
     assert route.capabilities == frozenset({Capability.CHAT})
     assert route.extra_headers == {}
     assert route.allow_absolute_path_url is False
@@ -206,10 +207,37 @@ def test_route_is_frozen():
 # ---------------------------------------------------------------------------
 
 
-def test_the_default_authentication_type_is_bearer():
+def test_an_absent_authentication_type_means_native_provider_authentication():
     (route,) = parse(block())
 
-    assert route.auth_type is AuthType.BEARER
+    assert route.auth_type is None
+
+
+def test_a_blank_authentication_type_means_native_provider_authentication():
+    (route,) = parse(block(TEXT_LLM_AUTH_TYPE="   "))
+
+    assert route.auth_type is None
+
+
+def test_a_route_using_ambient_credentials_does_not_claim_bearer():
+    env = {
+        "TEXT_LLM_ENDPOINT": "https://primary.example/v1",
+        "TEXT_LLM_MODEL_ID": "gemini-1.5",
+        "TEXT_LLM_FORMAT": "vertex_ai",
+    }
+
+    (route,) = parse(env)
+
+    assert route.api_key == ""
+    assert route.auth_type is None
+
+
+def test_an_explicit_bearer_is_distinct_from_an_absent_authentication_type():
+    (explicit,) = parse(block(TEXT_LLM_AUTH_TYPE="bearer"))
+    (absent,) = parse(block())
+
+    assert explicit.auth_type is AuthType.BEARER
+    assert absent.auth_type is None
 
 
 @pytest.mark.parametrize(
@@ -236,7 +264,8 @@ def test_the_authentication_type_is_case_insensitive():
 
 def test_an_unknown_authentication_type_is_rejected():
     assert message(block(TEXT_LLM_AUTH_TYPE="token")) == (
-        f"TEXT_LLM_AUTH_TYPE must be one of {SUPPORTED_AUTH_TYPES}, got 'token'"
+        f"TEXT_LLM_AUTH_TYPE must be one of {SUPPORTED_AUTH_TYPES}, got 'token'; omit it to use "
+        "the provider's native authentication"
     )
 
 
@@ -245,8 +274,17 @@ def test_an_entry_declares_its_own_authentication_type():
 
     routes = parse(env)
 
-    assert routes[0].auth_type is AuthType.BEARER
+    assert routes[0].auth_type is None
     assert routes[1].auth_type is AuthType.API_KEY
+
+
+def test_an_absent_authentication_type_in_an_entry_means_native_authentication():
+    env = {**block(TEXT_LLM_AUTH_TYPE="x-api-key"), **routes_json(entry())}
+
+    routes = parse(env)
+
+    assert routes[0].auth_type is AuthType.X_API_KEY
+    assert routes[1].auth_type is None
 
 
 def test_an_entry_authentication_type_must_be_a_string():
@@ -262,7 +300,7 @@ def test_an_unknown_authentication_type_in_an_entry_is_rejected():
 
     assert message(env) == (
         f"TEXT_LLM_ROUTES_JSON entry 1 'auth_type' must be one of {SUPPORTED_AUTH_TYPES}, "
-        "got 'token'"
+        "got 'token'; omit it to use the provider's native authentication"
     )
 
 
@@ -401,7 +439,7 @@ def test_entry_fields_are_never_inherited_from_the_singleton_block():
     assert primary.extra_headers == {"x-organization": "acme"}
 
     assert fallback.api_key == ""
-    assert fallback.auth_type is AuthType.BEARER
+    assert fallback.auth_type is None
     assert fallback.base_url == "https://fallback.example/v1"
     assert fallback.capabilities == frozenset({Capability.CHAT})
     assert fallback.extra_headers == {}
@@ -529,6 +567,15 @@ def test_a_block_with_one_of_the_required_fields_is_rejected(present):
         pytest.param({"TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL": "false"}, id="opt-in-off"),
         pytest.param({"TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL": "no"}, id="opt-in-off-no"),
         pytest.param({"TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL": ""}, id="blank-opt-in"),
+        pytest.param({"TEXT_LLM_CONTEXT_WINDOW": ""}, id="blank-context-window"),
+        pytest.param({"TEXT_LLM_MAX_OUTPUT_TOKENS": ""}, id="blank-max-output-tokens"),
+        pytest.param({"EMBEDDINGS_DIMENSIONS": ""}, id="blank-dimensions"),
+        pytest.param({"EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM": ""}, id="blank-dimensions-param"),
+        pytest.param(
+            {"EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM": "false"}, id="dimensions-param-false"
+        ),
+        pytest.param({"EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM": "0"}, id="dimensions-param-zero"),
+        pytest.param({"EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM": "no"}, id="dimensions-param-no"),
         pytest.param(
             {
                 "TEXT_LLM_API_KEY": "",
@@ -537,6 +584,10 @@ def test_a_block_with_one_of_the_required_fields_is_rejected(present):
                 "TEXT_LLM_CAPABILITIES": "",
                 "TEXT_LLM_EXTRA_HEADERS_JSON": "{}",
                 "TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL": "false",
+                "TEXT_LLM_CONTEXT_WINDOW": "",
+                "TEXT_LLM_MAX_OUTPUT_TOKENS": "",
+                "EMBEDDINGS_DIMENSIONS": "",
+                "EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM": "false",
             },
             id="every-inert-default",
         ),
@@ -547,18 +598,54 @@ def test_a_block_holding_only_inert_settings_contributes_no_routes(env):
 
 
 @pytest.mark.parametrize(
-    ("variable", "value"),
+    "variable",
     [
-        ("TEXT_LLM_API_KEY", "secret"),
-        ("TEXT_LLM_AUTH_TYPE", "bearer"),
-        ("TEXT_LLM_PATH", "/custom"),
-        ("TEXT_LLM_CAPABILITIES", "chat"),
-        ("TEXT_LLM_EXTRA_HEADERS_JSON", '{"x-organization": "acme"}'),
-        ("TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL", "true"),
+        "EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM",
+        "TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL",
     ],
 )
-def test_orphan_configuration_in_a_block_without_an_identity_is_rejected(variable, value):
-    assert message({variable: value}) == orphan_message(variable, "TEXT_LLM")
+def test_an_unparseable_boolean_without_an_identity_is_an_error(variable):
+    assert message({variable: "perhaps"}) == (
+        f"{variable} must be a boolean, got 'perhaps'; expected one of '0', '1', 'false', 'no', "
+        "'off', 'on', 'true', 'yes'"
+    )
+
+
+@pytest.mark.parametrize(
+    ("prefix", "variable", "value"),
+    [
+        ("TEXT_LLM", "TEXT_LLM_API_KEY", "secret"),
+        ("TEXT_LLM", "TEXT_LLM_AUTH_TYPE", "bearer"),
+        ("TEXT_LLM", "TEXT_LLM_PATH", "/custom"),
+        ("TEXT_LLM", "TEXT_LLM_CAPABILITIES", "chat"),
+        ("TEXT_LLM", "TEXT_LLM_EXTRA_HEADERS_JSON", '{"x-organization": "acme"}'),
+        ("TEXT_LLM", "TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL", "true"),
+        ("TEXT_LLM", "TEXT_LLM_CONTEXT_WINDOW", "128000"),
+        ("TEXT_LLM", "TEXT_LLM_MAX_OUTPUT_TOKENS", "4096"),
+        ("EMBEDDINGS", "EMBEDDINGS_DIMENSIONS", "1024"),
+        ("EMBEDDINGS", "EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM", "true"),
+    ],
+)
+def test_orphan_configuration_in_a_block_without_an_identity_is_rejected(prefix, variable, value):
+    assert message({variable: value}) == orphan_message(variable, prefix)
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        pytest.param({"TEXT_LLM_CONTEXT_WINDOW": ""}, id="blank-context-window"),
+        pytest.param({"TEXT_LLM_MAX_OUTPUT_TOKENS": ""}, id="blank-max-output-tokens"),
+        pytest.param({"EMBEDDINGS_DIMENSIONS": ""}, id="blank-dimensions"),
+        pytest.param({"EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM": ""}, id="blank-dimensions-param"),
+        pytest.param(
+            {"EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM": "false"}, id="dimensions-param-false"
+        ),
+        pytest.param({"EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM": "0"}, id="dimensions-param-zero"),
+        pytest.param({"EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM": "no"}, id="dimensions-param-no"),
+    ],
+)
+def test_blank_limit_settings_are_inert(env):
+    assert parse(env) == ()
 
 
 def test_a_non_empty_api_key_is_never_silently_ignored():
@@ -730,6 +817,58 @@ def test_non_authentication_extra_headers_are_accepted():
         "x-organization": "acme",
         "anthropic-beta": "prompt-caching-2024-07-31",
     }
+
+
+def test_extra_headers_cannot_be_mutated_after_validation():
+    (route,) = parse(block(TEXT_LLM_EXTRA_HEADERS_JSON='{"x-organization": "acme"}'))
+
+    with pytest.raises(TypeError):
+        route.extra_headers["Authorization"] = "Bearer injected"
+
+    with pytest.raises(TypeError):
+        route.extra_headers.update({"Authorization": "Bearer injected"})
+
+    with pytest.raises(TypeError):
+        del route.extra_headers["x-organization"]
+
+    with pytest.raises(TypeError):
+        route.extra_headers.clear()
+
+    assert route.extra_headers == {"x-organization": "acme"}
+
+
+def test_a_route_without_headers_still_has_immutable_headers():
+    (route,) = parse(block())
+
+    with pytest.raises(TypeError):
+        route.extra_headers["Authorization"] = "Bearer injected"
+
+    assert route.extra_headers == {}
+
+
+def test_an_entries_headers_are_immutable_too():
+    routes = parse({**block(), **routes_json(entry(extra_headers={"x-organization": "acme"}))})
+
+    with pytest.raises(TypeError):
+        routes[1].extra_headers["x-api-key"] = "secret"
+
+
+def test_extra_headers_survive_copying_as_immutable_headers():
+    (route,) = parse(block(TEXT_LLM_EXTRA_HEADERS_JSON='{"x-organization": "acme"}'))
+
+    copied = copy.deepcopy(route)
+
+    with pytest.raises(TypeError):
+        copied.extra_headers["Authorization"] = "Bearer injected"
+
+
+def test_extra_headers_are_ordinary_data_under_asdict():
+    (route,) = parse(block(TEXT_LLM_EXTRA_HEADERS_JSON='{"x-organization": "acme"}'))
+
+    dumped = dataclasses.asdict(route)
+
+    assert dumped["extra_headers"] == {"x-organization": "acme"}
+    assert json.loads(json.dumps(dict(dumped["extra_headers"]))) == {"x-organization": "acme"}
 
 
 def test_blank_extra_headers_are_absent():
@@ -1228,7 +1367,7 @@ def test_the_prd_fallback_example_is_accepted():
         (0, "https://primary.example/v1", "openai/primary-model"),
         (1, "https://fallback.example/v1", "openai/fallback-model"),
     ]
-    assert [route.auth_type for route in routes] == [AuthType.BEARER, AuthType.BEARER]
+    assert [route.auth_type for route in routes] == [None, None]
 
 
 def test_the_prd_complete_environment_example_is_accepted():
