@@ -36,6 +36,153 @@ STRICTLY_POSITIVE_VARIABLES = [
     *DECIMAL_VARIABLES,
 ]
 
+BOOLEAN_EXPECTATION = "expected one of '0', '1', 'false', 'no', 'off', 'on', 'true', 'yes'"
+
+PRODUCTION_REQUIRES_AUTH = (
+    "CHORA_ENVIRONMENT is production but GATEWAY_AUTH_ENABLED is false; "
+    "production must not serve unauthenticated inference. Set "
+    "GATEWAY_AUTH_ENABLED=true with GATEWAY_API_KEYS, or set "
+    "CHORA_ENVIRONMENT=development"
+)
+
+AUTH_KEYS_REQUIRED = (
+    "GATEWAY_AUTH_ENABLED is true but GATEWAY_API_KEYS is empty; set one or more "
+    "comma-separated keys, or set GATEWAY_AUTH_ENABLED=false"
+)
+
+
+def _direct(**overrides) -> Settings:
+    """Build settings by direct construction from valid defaults plus overrides."""
+    fields = dataclasses.asdict(Settings.from_env({}))
+    fields.update(overrides)
+    return Settings(**fields)
+
+
+def _replaced(**overrides) -> Settings:
+    """Build settings by replacing fields on a valid instance."""
+    return dataclasses.replace(Settings.from_env({}), **overrides)
+
+
+INVALID_STATES = [
+    pytest.param(
+        {"http_port": 999999},
+        "CHORA_HTTP_PORT must be a port number between 1 and 65535, got '999999'",
+        id="http-port-above-range",
+    ),
+    pytest.param(
+        {"http_port": 0},
+        "CHORA_HTTP_PORT must be a port number between 1 and 65535, got '0'",
+        id="http-port-zero",
+    ),
+    pytest.param(
+        {"grpc_port": 65536},
+        "CHORA_GRPC_PORT must be a port number between 1 and 65535, got '65536'",
+        id="grpc-port-above-range",
+    ),
+    pytest.param(
+        {"grpc_port": -1},
+        "CHORA_GRPC_PORT must be a port number between 1 and 65535, got '-1'",
+        id="grpc-port-negative",
+    ),
+    pytest.param(
+        {"log_level": "POTATO"},
+        "LOG_LEVEL must be one of 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL', "
+        "got 'POTATO'",
+        id="log-level-unknown",
+    ),
+    pytest.param({"log_level": ""}, "LOG_LEVEL must not be empty", id="log-level-empty"),
+    pytest.param(
+        {"provider_timeout_seconds": float("inf")},
+        "PROVIDER_TIMEOUT_SECONDS must be a finite number, got 'inf'",
+        id="timeout-infinite",
+    ),
+    pytest.param(
+        {"provider_timeout_seconds": float("nan")},
+        "PROVIDER_TIMEOUT_SECONDS must be a finite number, got 'nan'",
+        id="timeout-nan",
+    ),
+    pytest.param(
+        {"provider_connect_timeout_seconds": 0},
+        "PROVIDER_CONNECT_TIMEOUT_SECONDS must be a positive number, got '0'",
+        id="connect-timeout-zero",
+    ),
+    pytest.param(
+        {"shutdown_timeout_seconds": -0.5},
+        "GATEWAY_SHUTDOWN_TIMEOUT_SECONDS must be a positive number, got '-0.5'",
+        id="shutdown-timeout-negative",
+    ),
+    pytest.param(
+        {"provider_retry_count": -1},
+        "PROVIDER_RETRY_COUNT must be a non-negative integer, got '-1'",
+        id="retry-count-negative",
+    ),
+    pytest.param(
+        {"provider_retry_count": 2.5},
+        "PROVIDER_RETRY_COUNT must be a non-negative integer, got '2.5'",
+        id="retry-count-not-an-integer",
+    ),
+    pytest.param(
+        {"provider_retry_backoff_ms": -1},
+        "PROVIDER_RETRY_BACKOFF_MS must be a non-negative integer, got '-1'",
+        id="backoff-negative",
+    ),
+    pytest.param(
+        {"provider_max_concurrent_requests": 0},
+        "PROVIDER_MAX_CONCURRENT_REQUESTS must be a positive integer, got '0'",
+        id="max-concurrent-zero",
+    ),
+    pytest.param(
+        {"environment": "banana"},
+        "CHORA_ENVIRONMENT must be one of 'development', 'test', 'production', got 'banana'",
+        id="environment-unknown",
+    ),
+    pytest.param(
+        {"environment": "production", "auth_enabled": False},
+        PRODUCTION_REQUIRES_AUTH,
+        id="production-without-authentication",
+    ),
+    pytest.param(
+        {"usage_storage": "redis"},
+        "USAGE_STORAGE must be one of 'none', 'memory', 'sqlite', 'postgres', got 'redis'",
+        id="usage-storage-unknown",
+    ),
+    pytest.param(
+        {"auth_enabled": "maybe"},
+        f"GATEWAY_AUTH_ENABLED must be a boolean, got 'maybe'; {BOOLEAN_EXPECTATION}",
+        id="auth-enabled-not-a-boolean",
+    ),
+    pytest.param(
+        {"allow_anonymous_health": "maybe"},
+        f"GATEWAY_ALLOW_ANONYMOUS_HEALTH must be a boolean, got 'maybe'; {BOOLEAN_EXPECTATION}",
+        id="anonymous-health-not-a-boolean",
+    ),
+    pytest.param(
+        {"usage_tracking_enabled": "maybe"},
+        f"USAGE_TRACKING_ENABLED must be a boolean, got 'maybe'; {BOOLEAN_EXPECTATION}",
+        id="usage-tracking-not-a-boolean",
+    ),
+    pytest.param(
+        {"cost_tracking_enabled": "maybe"},
+        f"COST_TRACKING_ENABLED must be a boolean, got 'maybe'; {BOOLEAN_EXPECTATION}",
+        id="cost-tracking-not-a-boolean",
+    ),
+    pytest.param(
+        {"otel_enabled": "perhaps"},
+        f"OTEL_ENABLED must be a boolean, got 'perhaps'; {BOOLEAN_EXPECTATION}",
+        id="otel-enabled-not-a-boolean",
+    ),
+    pytest.param(
+        {"api_keys": 5},
+        "GATEWAY_API_KEYS must be a comma-separated list of keys, got 5",
+        id="api-keys-not-a-list",
+    ),
+    pytest.param(
+        {"auth_enabled": True, "api_keys": " , "},
+        AUTH_KEYS_REQUIRED,
+        id="authentication-without-keys",
+    ),
+]
+
 
 def test_settings_is_importable_from_the_config_package():
     config = importlib.import_module("model_gateway.config")
@@ -209,12 +356,7 @@ def test_production_requires_authentication():
     with pytest.raises(ConfigurationError) as error:
         Settings.from_env({"CHORA_ENVIRONMENT": "production"})
 
-    assert str(error.value) == (
-        "CHORA_ENVIRONMENT is production but GATEWAY_AUTH_ENABLED is false; "
-        "production must not serve unauthenticated inference. Set "
-        "GATEWAY_AUTH_ENABLED=true with GATEWAY_API_KEYS, or set "
-        "CHORA_ENVIRONMENT=development"
-    )
+    assert str(error.value) == PRODUCTION_REQUIRES_AUTH
 
 
 def test_production_requires_authentication_even_when_it_is_disabled_explicitly():
@@ -299,8 +441,7 @@ def test_boolean_variables_reject_unrecognised_values(value):
         Settings.from_env({"COST_TRACKING_ENABLED": value})
 
     assert str(error.value) == (
-        f"COST_TRACKING_ENABLED must be a boolean, got {value!r}; expected one of "
-        "'0', '1', 'false', 'no', 'off', 'on', 'true', 'yes'"
+        f"COST_TRACKING_ENABLED must be a boolean, got {value!r}; {BOOLEAN_EXPECTATION}"
     )
 
 
@@ -477,3 +618,74 @@ def test_auth_is_validated_on_direct_construction():
 
     with pytest.raises(ConfigurationError, match="GATEWAY_AUTH_ENABLED is true"):
         dataclasses.replace(settings, auth_enabled=True)
+
+
+@pytest.mark.parametrize("build", [_direct, _replaced], ids=["direct", "replace"])
+@pytest.mark.parametrize(("overrides", "message"), INVALID_STATES)
+def test_every_construction_path_rejects_invalid_state(build, overrides, message):
+    with pytest.raises(ConfigurationError) as error:
+        build(**overrides)
+
+    assert str(error.value) == message
+
+
+def test_direct_construction_normalises_valid_values():
+    settings = _direct(
+        environment="PRODUCTION",
+        http_port="8080",
+        log_level="warning",
+        auth_enabled=True,
+        api_keys="key-a, key-b",
+        provider_timeout_seconds=30,
+        provider_retry_count=0,
+        usage_storage="sqlite",
+        otel_enabled="yes",
+    )
+
+    assert settings.environment is Environment.PRODUCTION
+    assert settings.http_port == 8080
+    assert settings.log_level == "WARNING"
+    assert settings.auth_enabled is True
+    assert settings.api_keys == ("key-a", "key-b")
+    assert settings.provider_timeout_seconds == 30.0
+    assert settings.provider_retry_count == 0
+    assert settings.usage_storage is UsageStorage.SQLITE
+    assert settings.otel_enabled is True
+
+
+def test_direct_construction_matches_from_env_for_the_same_input():
+    assert _direct() == Settings.from_env({})
+
+
+def test_valid_settings_survive_direct_construction_round_trip():
+    settings = Settings.from_env({})
+
+    assert Settings(**dataclasses.asdict(settings)) == settings
+
+
+def test_valid_settings_survive_replace_round_trip():
+    settings = Settings.from_env({})
+
+    assert dataclasses.replace(settings) == settings
+    assert dataclasses.replace(settings, http_port=9090).http_port == 9090
+
+
+def test_replace_accepts_already_normalised_values():
+    settings = Settings.from_env({})
+
+    production = dataclasses.replace(
+        settings,
+        environment=Environment.PRODUCTION,
+        auth_enabled=True,
+        api_keys=("key-a",),
+    )
+
+    assert production.environment is Environment.PRODUCTION
+    assert production.usage_storage is UsageStorage.MEMORY
+
+
+def test_zero_retry_and_zero_backoff_survive_every_construction_path():
+    assert _direct(provider_retry_count=0).provider_retry_count == 0
+    assert _replaced(provider_retry_count=0).provider_retry_count == 0
+    assert _direct(provider_retry_backoff_ms=0).provider_retry_backoff_ms == 0
+    assert _replaced(provider_retry_backoff_ms=0).provider_retry_backoff_ms == 0

@@ -1,17 +1,21 @@
 """Deployment settings loaded and validated at startup (PRD sections 6, 7, 15, 18).
 
 Environment variables are the authoritative deployment configuration. Every
-value a deployment can set is read and validated here, so an unusable
-configuration fails when the process starts rather than at the first inference
-request.
+value a deployment can set is described once, in ``_FIELDS``, and parsed by the
+parser named there. Parsing happens in ``Settings.__post_init__``, so every
+construction path — ``from_env``, direct construction and
+``dataclasses.replace`` — either produces a valid ``Settings`` or raises
+``ConfigurationError``; an instance cannot hold a value the gateway could not
+run with.
 """
 
 import math
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Self
+from functools import partial
+from typing import NamedTuple, Self
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
@@ -40,6 +44,8 @@ class ConfigurationError(ValueError):
     """Raised when the deployment environment cannot be used as configured."""
 
 
+Parser = Callable[[str, object], object]
+
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 _BOOLEAN_VALUES = tuple(sorted(_TRUE_VALUES | _FALSE_VALUES))
@@ -49,39 +55,40 @@ def _raw(env: Mapping[str, str], name: str, default: str) -> str:
     return env.get(name, default).strip()
 
 
-def _read_text(
-    env: Mapping[str, str],
-    name: str,
-    default: str,
-    *,
-    allow_empty: bool = False,
-) -> str:
-    value = _raw(env, name, default)
-    if not value and not allow_empty:
+def _text(value: object) -> str:
+    return str(value).strip()
+
+
+def _parse_text(name: str, value: object, *, allow_empty: bool = False) -> str:
+    text = _text(value)
+    if not text and not allow_empty:
         raise ConfigurationError(f"{name} must not be empty")
-    return value
+    return text
 
 
-def _read_bool(env: Mapping[str, str], name: str, default: str) -> bool:
-    value = _raw(env, name, default).lower()
-    if value in _TRUE_VALUES:
+_parse_optional_text = partial(_parse_text, allow_empty=True)
+
+
+def _parse_bool(name: str, value: object) -> bool:
+    text = _text(value).lower()
+    if text in _TRUE_VALUES:
         return True
-    if value in _FALSE_VALUES:
+    if text in _FALSE_VALUES:
         return False
     expected = ", ".join(repr(option) for option in _BOOLEAN_VALUES)
     raise ConfigurationError(
-        f"{name} must be a boolean, got {value!r}; expected one of {expected}"
+        f"{name} must be a boolean, got {text!r}; expected one of {expected}"
     )
 
 
-def _read_port(env: Mapping[str, str], name: str, default: str) -> int:
-    value = _raw(env, name, default)
+def _parse_port(name: str, value: object) -> int:
+    text = _text(value)
     try:
-        port = int(value)
+        port = int(text)
     except ValueError as exc:
-        raise _port_error(name, value) from exc
+        raise _port_error(name, text) from exc
     if not _MIN_PORT <= port <= _MAX_PORT:
-        raise _port_error(name, value)
+        raise _port_error(name, text)
     return port
 
 
@@ -91,80 +98,145 @@ def _port_error(name: str, value: str) -> ConfigurationError:
     )
 
 
-def _read_positive_int(env: Mapping[str, str], name: str, default: str) -> int:
-    value = _raw(env, name, default)
+def _parse_positive_int(name: str, value: object) -> int:
+    text = _text(value)
     try:
-        number = int(value)
+        number = int(text)
     except ValueError as exc:
-        raise ConfigurationError(f"{name} must be a positive integer, got {value!r}") from exc
+        raise ConfigurationError(f"{name} must be a positive integer, got {text!r}") from exc
     if number <= 0:
-        raise ConfigurationError(f"{name} must be a positive integer, got {value!r}")
+        raise ConfigurationError(f"{name} must be a positive integer, got {text!r}")
     return number
 
 
-def _read_non_negative_int(env: Mapping[str, str], name: str, default: str) -> int:
-    value = _raw(env, name, default)
+def _parse_non_negative_int(name: str, value: object) -> int:
+    text = _text(value)
     try:
-        number = int(value)
+        number = int(text)
     except ValueError as exc:
         raise ConfigurationError(
-            f"{name} must be a non-negative integer, got {value!r}"
+            f"{name} must be a non-negative integer, got {text!r}"
         ) from exc
     if number < 0:
-        raise ConfigurationError(f"{name} must be a non-negative integer, got {value!r}")
+        raise ConfigurationError(f"{name} must be a non-negative integer, got {text!r}")
     return number
 
 
-def _read_positive_float(env: Mapping[str, str], name: str, default: str) -> float:
-    value = _raw(env, name, default)
+def _parse_positive_float(name: str, value: object) -> float:
+    text = _text(value)
     try:
-        number = float(value)
+        number = float(text)
     except ValueError as exc:
-        raise ConfigurationError(f"{name} must be a positive number, got {value!r}") from exc
+        raise ConfigurationError(f"{name} must be a positive number, got {text!r}") from exc
     if not math.isfinite(number):
-        raise ConfigurationError(f"{name} must be a finite number, got {value!r}")
+        raise ConfigurationError(f"{name} must be a finite number, got {text!r}")
     if number <= 0:
-        raise ConfigurationError(f"{name} must be a positive number, got {value!r}")
+        raise ConfigurationError(f"{name} must be a positive number, got {text!r}")
     return number
 
 
-def _read_list(env: Mapping[str, str], name: str, default: str = "") -> tuple[str, ...]:
-    return tuple(item.strip() for item in _raw(env, name, default).split(",") if item.strip())
-
-
-def _read_log_level(env: Mapping[str, str], name: str, default: str) -> str:
-    value = _read_text(env, name, default)
-    level = value.upper()
+def _parse_log_level(name: str, value: object) -> str:
+    text = _parse_text(name, value)
+    level = text.upper()
     if level not in LOG_LEVELS:
         supported = ", ".join(repr(option) for option in LOG_LEVELS)
-        raise ConfigurationError(f"{name} must be one of {supported}, got {value!r}")
+        raise ConfigurationError(f"{name} must be one of {supported}, got {text!r}")
     return level
 
 
-def _read_environment(env: Mapping[str, str], name: str, default: str) -> Environment:
-    value = _read_text(env, name, default)
+def _parse_environment(name: str, value: object) -> Environment:
+    text = _parse_text(name, value)
     try:
-        return Environment(value.lower())
+        return Environment(text.lower())
     except ValueError as exc:
-        raise _environment_error(value) from exc
+        raise _environment_error(name, text) from exc
 
 
-def _environment_error(value: object) -> ConfigurationError:
+def _environment_error(name: str, value: object) -> ConfigurationError:
     supported = ", ".join(repr(member.value) for member in Environment)
-    return ConfigurationError(f"CHORA_ENVIRONMENT must be one of {supported}, got {value!r}")
+    return ConfigurationError(f"{name} must be one of {supported}, got {value!r}")
 
 
-def _read_usage_storage(env: Mapping[str, str], name: str, default: str) -> UsageStorage:
-    value = _read_text(env, name, default, allow_empty=True)
+def _parse_usage_storage(name: str, value: object) -> UsageStorage:
+    text = _text(value)
     try:
-        return UsageStorage(value)
+        return UsageStorage(text)
     except ValueError as exc:
-        raise _usage_storage_error(name, value) from exc
+        raise _usage_storage_error(name, text) from exc
 
 
 def _usage_storage_error(name: str, value: object) -> ConfigurationError:
     supported = ", ".join(repr(member.value) for member in UsageStorage)
     return ConfigurationError(f"{name} must be one of {supported}, got {value!r}")
+
+
+def _parse_api_keys(name: str, value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        items: Iterable[object] = value.split(",")
+    elif isinstance(value, Iterable):
+        items = value
+    else:
+        raise ConfigurationError(
+            f"{name} must be a comma-separated list of keys, got {value!r}"
+        )
+    keys = (str(item).strip() for item in items)
+    return tuple(key for key in keys if key)
+
+
+class _Field(NamedTuple):
+    """One deployment variable: the attribute it fills, its name, default and parser."""
+
+    attribute: str
+    variable: str
+    default: str
+    parse: Parser
+
+
+_FIELDS: tuple[_Field, ...] = (
+    _Field("environment", "CHORA_ENVIRONMENT", "development", _parse_environment),
+    _Field("http_port", "CHORA_HTTP_PORT", "8080", _parse_port),
+    _Field("grpc_port", "CHORA_GRPC_PORT", "9090", _parse_port),
+    _Field("log_level", "LOG_LEVEL", "info", _parse_log_level),
+    _Field("auth_enabled", "GATEWAY_AUTH_ENABLED", "false", _parse_bool),
+    _Field("api_keys", "GATEWAY_API_KEYS", "", _parse_api_keys),
+    _Field("allow_anonymous_health", "GATEWAY_ALLOW_ANONYMOUS_HEALTH", "true", _parse_bool),
+    _Field("provider_timeout_seconds", "PROVIDER_TIMEOUT_SECONDS", "110", _parse_positive_float),
+    _Field(
+        "provider_connect_timeout_seconds",
+        "PROVIDER_CONNECT_TIMEOUT_SECONDS",
+        "10",
+        _parse_positive_float,
+    ),
+    _Field("provider_retry_count", "PROVIDER_RETRY_COUNT", "2", _parse_non_negative_int),
+    _Field(
+        "provider_retry_backoff_ms",
+        "PROVIDER_RETRY_BACKOFF_MS",
+        "500",
+        _parse_non_negative_int,
+    ),
+    _Field(
+        "provider_max_concurrent_requests",
+        "PROVIDER_MAX_CONCURRENT_REQUESTS",
+        "100",
+        _parse_positive_int,
+    ),
+    _Field(
+        "shutdown_timeout_seconds",
+        "GATEWAY_SHUTDOWN_TIMEOUT_SECONDS",
+        "30",
+        _parse_positive_float,
+    ),
+    _Field("usage_tracking_enabled", "USAGE_TRACKING_ENABLED", "true", _parse_bool),
+    _Field("cost_tracking_enabled", "COST_TRACKING_ENABLED", "false", _parse_bool),
+    _Field("usage_storage", "USAGE_STORAGE", "memory", _parse_usage_storage),
+    _Field("otel_enabled", "OTEL_ENABLED", "false", _parse_bool),
+    _Field(
+        "otel_exporter_otlp_endpoint",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "",
+        _parse_optional_text,
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -195,23 +267,11 @@ class Settings:
     otel_exporter_otlp_endpoint: str
 
     def __post_init__(self) -> None:
-        environment = self.environment
-        if not isinstance(environment, Environment):
-            try:
-                environment = Environment(str(environment).lower())
-            except ValueError as exc:
-                raise _environment_error(self.environment) from exc
-            object.__setattr__(self, "environment", environment)
+        for entry in _FIELDS:
+            current = getattr(self, entry.attribute)
+            object.__setattr__(self, entry.attribute, entry.parse(entry.variable, current))
 
-        storage = self.usage_storage
-        if not isinstance(storage, UsageStorage):
-            try:
-                storage = UsageStorage(storage)
-            except ValueError as exc:
-                raise _usage_storage_error("USAGE_STORAGE", self.usage_storage) from exc
-            object.__setattr__(self, "usage_storage", storage)
-
-        if environment is Environment.PRODUCTION and not self.auth_enabled:
+        if self.environment is Environment.PRODUCTION and not self.auth_enabled:
             raise ConfigurationError(
                 "CHORA_ENVIRONMENT is production but GATEWAY_AUTH_ENABLED is false; "
                 "production must not serve unauthenticated inference. Set "
@@ -229,35 +289,8 @@ class Settings:
     def from_env(cls, env: Mapping[str, str] | None = None) -> Self:
         """Read settings from ``env``, defaulting to the process environment."""
         source = os.environ if env is None else env
-        return cls(
-            environment=_read_environment(source, "CHORA_ENVIRONMENT", "development"),
-            http_port=_read_port(source, "CHORA_HTTP_PORT", "8080"),
-            grpc_port=_read_port(source, "CHORA_GRPC_PORT", "9090"),
-            log_level=_read_log_level(source, "LOG_LEVEL", "info"),
-            auth_enabled=_read_bool(source, "GATEWAY_AUTH_ENABLED", "false"),
-            api_keys=_read_list(source, "GATEWAY_API_KEYS"),
-            allow_anonymous_health=_read_bool(source, "GATEWAY_ALLOW_ANONYMOUS_HEALTH", "true"),
-            provider_timeout_seconds=_read_positive_float(
-                source, "PROVIDER_TIMEOUT_SECONDS", "110"
-            ),
-            provider_connect_timeout_seconds=_read_positive_float(
-                source, "PROVIDER_CONNECT_TIMEOUT_SECONDS", "10"
-            ),
-            provider_retry_count=_read_non_negative_int(source, "PROVIDER_RETRY_COUNT", "2"),
-            provider_retry_backoff_ms=_read_non_negative_int(
-                source, "PROVIDER_RETRY_BACKOFF_MS", "500"
-            ),
-            provider_max_concurrent_requests=_read_positive_int(
-                source, "PROVIDER_MAX_CONCURRENT_REQUESTS", "100"
-            ),
-            shutdown_timeout_seconds=_read_positive_float(
-                source, "GATEWAY_SHUTDOWN_TIMEOUT_SECONDS", "30"
-            ),
-            usage_tracking_enabled=_read_bool(source, "USAGE_TRACKING_ENABLED", "true"),
-            cost_tracking_enabled=_read_bool(source, "COST_TRACKING_ENABLED", "false"),
-            usage_storage=_read_usage_storage(source, "USAGE_STORAGE", "memory"),
-            otel_enabled=_read_bool(source, "OTEL_ENABLED", "false"),
-            otel_exporter_otlp_endpoint=_read_text(
-                source, "OTEL_EXPORTER_OTLP_ENDPOINT", "", allow_empty=True
-            ),
-        )
+        values: dict[str, object] = {}
+        for entry in _FIELDS:
+            raw = _raw(source, entry.variable, entry.default)
+            values[entry.attribute] = entry.parse(entry.variable, raw)
+        return cls(**values)
