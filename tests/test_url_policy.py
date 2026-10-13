@@ -64,31 +64,39 @@ def test_join_accepts_a_path_without_a_leading_slash():
 @pytest.mark.parametrize(
     ("base_url", "path", "expected"),
     [
-        ("https://provider.example/v1", "/v1", "https://provider.example/v1"),
-        ("https://provider.example/v1", "/v1/custom", "https://provider.example/v1/custom"),
+        ("https://provider.example/v1", "/v1", "https://provider.example/v1/v1"),
+        (
+            "https://provider.example/v1",
+            "/v1/custom",
+            "https://provider.example/v1/v1/custom",
+        ),
         (
             "https://provider.example/v1",
             "/v1/chat/completions",
-            "https://provider.example/v1/chat/completions",
+            "https://provider.example/v1/v1/chat/completions",
         ),
         (
             "https://provider.example/v1/chat/completions",
             "/chat/completions",
-            "https://provider.example/v1/chat/completions",
+            "https://provider.example/v1/chat/completions/chat/completions",
         ),
         (
             "https://provider.example/v1/chat",
             "/chat/completions",
-            "https://provider.example/v1/chat/completions",
+            "https://provider.example/v1/chat/chat/completions",
         ),
-        ("https://provider.example/api/v1", "/api/v1", "https://provider.example/api/v1"),
+        (
+            "https://provider.example/api/models",
+            "/models/generate",
+            "https://provider.example/api/models/models/generate",
+        ),
     ],
 )
-def test_join_never_duplicates_a_repeated_path_component(base_url, path, expected):
+def test_join_concatenates_path_segments_literally(base_url, path, expected):
     assert join_endpoint(base_url, path) == expected
 
 
-def test_join_keeps_base_path_components_the_path_does_not_repeat():
+def test_join_keeps_every_base_path_component():
     assert (
         join_endpoint("https://provider.example/openai/v1", "/custom")
         == "https://provider.example/openai/v1/custom"
@@ -118,7 +126,7 @@ def test_join_is_pure_and_deterministic():
     path = "/v1/custom/"
     first = join_endpoint(base_url, path)
     second = join_endpoint(base_url, path)
-    assert first == second == "https://provider.example/v1/custom"
+    assert first == second == "https://provider.example/v1/v1/custom"
     assert base_url == "https://provider.example/v1/"
     assert path == "/v1/custom/"
 
@@ -278,10 +286,52 @@ def test_validate_rejects_an_invalid_port():
     assert "port" in str(raised.value)
 
 
-def test_scheme_error_does_not_echo_url_credentials():
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://leakyuser@provider.example/v1",
+        "https://:leakysecret@provider.example/v1",
+        "https://leakyuser:leakysecret@provider.example/v1",
+    ],
+)
+def test_validate_rejects_url_userinfo_without_echoing_it(url):
     with pytest.raises(UrlPolicyError) as raised:
-        validate_upstream_url("http://user:supersecret@provider.example/v1")
-    assert "supersecret" not in str(raised.value)
+        validate_upstream_url(url, resolver=public_resolver)
+    message = str(raised.value)
+    assert "credentials" in message
+    assert "leakyuser" not in message
+    assert "leakysecret" not in message
+
+
+def test_validate_rejects_userinfo_in_an_absolute_path_override():
+    with pytest.raises(UrlPolicyError) as raised:
+        join_endpoint(
+            "https://provider.example/v1",
+            "https://leakyuser:leakysecret@other.example/v1",
+            allow_absolute_path_url=True,
+        )
+    message = str(raised.value)
+    assert "credentials" in message
+    assert "leakysecret" not in message
+
+
+def test_join_rejects_a_base_url_with_embedded_credentials():
+    with pytest.raises(UrlPolicyError) as raised:
+        join_endpoint("https://leakyuser:leakysecret@provider.example/v1")
+    message = str(raised.value)
+    assert "credentials" in message
+    assert "leakysecret" not in message
+
+
+def test_scheme_error_does_not_echo_the_url():
+    with pytest.raises(UrlPolicyError) as raised:
+        validate_upstream_url(
+            "http://provider.example/private/secret-token",
+            resolver=public_resolver,
+        )
+    message = str(raised.value)
+    assert "insecure transport" in message
+    assert "secret-token" not in message
 
 
 @pytest.mark.parametrize(
@@ -396,12 +446,15 @@ def test_validate_rejects_a_missing_host():
         validate_upstream_url("https:///v1")
 
 
-def test_ssrf_error_names_the_host_without_echoing_credentials():
+def test_ssrf_error_names_the_host_without_echoing_the_url():
     with pytest.raises(UrlPolicyError) as raised:
-        validate_upstream_url(f"https://user:supersecret@{METADATA_ADDRESS}/v1")
+        validate_upstream_url(
+            f"https://{METADATA_ADDRESS}/private/secret-token",
+            resolver=unreachable_resolver,
+        )
     message = str(raised.value)
     assert METADATA_ADDRESS in message
-    assert "supersecret" not in message
+    assert "secret-token" not in message
 
 
 def test_system_resolver_returns_a_literal_address_without_network_access():
@@ -514,6 +567,18 @@ def test_redirect_refuses_a_destination_carrying_a_query_string():
         resolver=public_resolver,
     )
     assert decision.allowed is False
+
+
+def test_redirect_refuses_a_destination_with_embedded_credentials():
+    decision = evaluate_redirect(
+        "https://provider.example/v1",
+        "https://leakyuser:leakysecret@provider.example/v1/models",
+        resolver=public_resolver,
+    )
+    assert decision.allowed is False
+    assert decision.forward_credentials is False
+    assert "credentials" in decision.reason
+    assert "leakysecret" not in decision.reason
 
 
 def test_redirect_requires_a_valid_source_url():

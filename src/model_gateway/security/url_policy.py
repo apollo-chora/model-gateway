@@ -1,16 +1,31 @@
 """Upstream URL policy: deterministic endpoint joining, scheme and SSRF checks.
 
 The endpoint handed to LiteLLM is composed from a configured base URL and an
-optional configured path (PRD section 8). Composition is additive: the base
-URL's own path is preserved, and segments the configured path re-states are
-collapsed instead of duplicated. A full URL in the path setting is refused
-unless the route opts in explicitly.
+optional configured path (PRD section 8). Composition is literal: the base
+URL's path is preserved and the configured path's segments are appended to it,
+with no component repaired, reordered or dropped. A full URL in the path
+setting is refused unless the route opts in explicitly.
 
 Every URL the gateway is about to contact is validated first: the scheme must
 be HTTPS unless insecure transport is explicitly enabled for development, and
 every address a host resolves to must be publicly routable (PRD sections 9.2
 and 14). Redirects are revalidated, and a route's credentials never cross an
-origin change (PRD section 7).
+origin change (PRD section 7). Credentials must arrive through route
+configuration; a URL that embeds userinfo is refused.
+
+Transport contract
+------------------
+These checks are configuration-time screening only, and a passing URL is not a
+guarantee of SSRF prevention. Screening resolves a hostname that the transport
+will resolve again, and the two answers can differ, so the component that
+performs the outbound request is required to:
+
+- connect to the address that was validated (DNS pinning) instead of
+  re-resolving the hostname and connecting wherever it now points, and
+- disable automatic redirect following, so that every hop passes through
+  :func:`evaluate_redirect` and a cross-origin hop cannot carry credentials.
+
+Without both obligations met, this module is advisory only.
 """
 
 import ipaddress
@@ -73,6 +88,11 @@ def check_host(host: str, *, resolver: Resolver = system_resolver) -> None:
     metadata address 169.254.169.254), multicast, reserved, unspecified and
     otherwise non-routable addresses are all refused. Every address the host
     resolves to is checked, not only the literal host string.
+
+    This is configuration-time screening only, and it does not by itself prevent
+    SSRF. A hostname screened here is resolved again by the transport, and the
+    second answer can differ, so the transport must connect to the address that
+    was validated instead (see the transport contract in the module docstring).
     """
     text = host.strip().strip("[]")
     if not text:
@@ -103,12 +123,16 @@ def join_endpoint(
 ) -> str:
     """Compose an endpoint from a base URL and an optional configured path (PRD section 8).
 
-    The base URL may carry a path of its own, and the configured path is joined
-    to it. Segments the configured path repeats from the end of the base path
-    are collapsed, so ``/v1`` is never duplicated and an operation path is never
-    appended twice. Path components are never discarded silently: a base path
-    survives joining, and a base URL or path carrying a query string, a fragment
-    or ``.``/``..`` segments is rejected instead of being trimmed.
+    The base URL may carry a path of its own, and the configured path's segments
+    are appended to it literally: ``/v1`` joined with ``/custom`` gives
+    ``/v1/custom``, and ``/v1`` joined with ``/v1/custom`` gives
+    ``/v1/v1/custom``. Nothing is repaired or guessed at, because a repeated
+    component is meaningful to some APIs (``/api/models`` joined with
+    ``/models/generate``) and is operator error elsewhere.
+
+    Nothing is discarded either: a base path always survives joining, and a base
+    URL or path carrying a query string, a fragment or ``.``/``..`` segments is
+    rejected instead of being trimmed.
 
     Empty segments and trailing slashes are normalised away, so the result never
     ends in ``/`` and never contains ``//``.
@@ -132,7 +156,7 @@ def join_endpoint(
     if relative.query or relative.fragment:
         raise UrlPolicyError("path setting must not carry a query string or fragment")
     segments = _path_segments(relative.path, what="path setting")
-    return base.rebuild(path_segments=_merge_paths(base.path_segments, segments))
+    return base.rebuild(path_segments=base.path_segments + segments)
 
 
 def validate_upstream_url(
@@ -141,7 +165,14 @@ def validate_upstream_url(
     allow_insecure_transport: bool = False,
     resolver: Resolver = system_resolver,
 ) -> None:
-    """Apply scheme policy and SSRF checks to an absolute upstream URL (PRD section 14)."""
+    """Apply scheme policy and SSRF checks to an absolute upstream URL (PRD section 14).
+
+    Configuration-time screening only, not a guarantee of SSRF prevention: the
+    checks run once, against a DNS answer the transport will obtain again. The
+    transport that performs the outbound request is required to pin the
+    validated address and to disable automatic redirect following, so that every
+    hop passes through :func:`evaluate_redirect` (module docstring).
+    """
     parsed = _parse_url(url, what="URL")
     _check_scheme(parsed.scheme, allow_insecure_transport=allow_insecure_transport)
     check_host(parsed.host, resolver=resolver)
@@ -182,6 +213,10 @@ def evaluate_redirect(
     never reach a blocked address or downgrade to plain HTTP. Credentials are
     forwarded only within one origin: a redirect that changes scheme, host or
     port follows without them (PRD sections 7 and 14).
+
+    This helper only has an effect when the transport disables automatic
+    redirect following; a transport that follows redirects on its own never
+    consults it (module docstring).
 
     ``source_url`` is the URL the gateway already validated, so a malformed
     source raises :class:`UrlPolicyError`; a malformed target is a refusal.
@@ -231,6 +266,10 @@ def _parse_url(url: str, *, what: str) -> _Url:
         raise UrlPolicyError(f"{what} must be an absolute URL with a scheme and host")
     if parts.query or parts.fragment:
         raise UrlPolicyError(f"{what} must not carry a query string or fragment")
+    if parts.username is not None or parts.password is not None:
+        raise UrlPolicyError(
+            f"{what} must not embed credentials; supply them through route configuration"
+        )
 
     host = parts.hostname
     if not host:
@@ -258,16 +297,6 @@ def _path_segments(path: str, *, what: str) -> tuple[str, ...]:
             raise UrlPolicyError(f"{what} must not contain '.' or '..' path segments")
         segments.append(segment)
     return tuple(segments)
-
-
-def _merge_paths(
-    base_segments: tuple[str, ...],
-    path_segments: tuple[str, ...],
-) -> tuple[str, ...]:
-    for size in range(min(len(base_segments), len(path_segments)), 0, -1):
-        if base_segments[-size:] == path_segments[:size]:
-            return base_segments + path_segments[size:]
-    return base_segments + path_segments
 
 
 def _is_absolute(text: str) -> bool:
