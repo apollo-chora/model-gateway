@@ -1,0 +1,10 @@
+# Normalize line endings to LF for all text files, so diffs stay stable across platforms.
+* text=auto eol=lf
+
+# Binary assets are never normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
