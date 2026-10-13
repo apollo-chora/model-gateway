@@ -1,0 +1,40 @@
+[project]
+name = "model-gateway"
+version = "0.1.0"
+description = "AI model gateway"
+requires-python = ">=3.13"
+dependencies = [
+    "blacksheep==2.6.4",
+    "granian==2.8.4",
+    "litellm-core==1.106.0rc1",
+    "orjson==3.13.0",
+    "structlog==26.1.0",
+]
+
+[project.scripts]
+model-gateway = "model_gateway.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.17.0",
+]
+
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/model_gateway"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
