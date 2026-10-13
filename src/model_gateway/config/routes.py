@@ -11,25 +11,29 @@ and must carry its own credentials (PRD section 7). Precedence between routes is
 positional, never field-merged.
 
 Configuration that cannot be read unambiguously is rejected rather than resolved
-by guessing (PRD section 11.1): a partially configured block, an unknown
-capability, a reserved authentication header supplied as an extra header, an
-absolute URL in ``*_PATH`` without the route's opt-in, a malformed
-``*_ROUTES_JSON``, an entry missing a required field, two routes naming the same
-endpoint and model, and the unsupported indexed form (``TEXT_LLM_1_*``).
+by guessing (PRD section 11.1): a partially configured block, a setting left
+behind in a block that has no endpoint, model ID or format, an unknown
+capability or authentication type, an explicitly supplied but empty capability
+list, a reserved authentication header supplied as an extra header, an absolute
+URL in ``*_PATH`` without the route's opt-in, a malformed ``*_ROUTES_JSON``, an
+entry missing a required field, two routes naming the same endpoint, format and
+model, and the unsupported indexed form (``TEXT_LLM_1_*``).
 
-Credential requirements and the public-model-ID registry are deliberately not
-this module's business: a route records the credential it was configured with
-(``api_key``), and public model IDs live with the rest of the public contract.
+Which authentication modes require a static credential, and how a public model
+ID maps onto an operation, are deliberately not this module's business: a route
+records the credential and authentication type it was configured with, and the
+public contract belongs to the northbound layer.
 """
 
 import json
 import os
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import NamedTuple
 
+from model_gateway.auth import AuthType
 from model_gateway.capabilities import Capability
 from model_gateway.config.settings import (
     ConfigurationError,
@@ -54,28 +58,17 @@ class Operation(StrEnum):
     IMAGE = "image"
     EMBEDDINGS = "embeddings"
 
-    @property
-    def public_model_id(self) -> str:
-        """The fixed public model ID that reaches this operation (PRD section 10)."""
-        return _PUBLIC_MODEL_IDS[self]
-
-
-_PUBLIC_MODEL_IDS: Mapping[Operation, str] = {
-    Operation.TEXT: "text-default",
-    Operation.IMAGE: "image-default",
-    Operation.EMBEDDINGS: "embedding-default",
-}
-
 
 @dataclass(frozen=True)
 class Route:
-    """One configured inference target, validated at startup (PRD sections 6, 8, 11).
+    """One configured inference target, validated at startup (PRD sections 6, 7, 8, 11).
 
     ``endpoint`` is the base URL exactly as configured and ``base_url`` is that
     endpoint resolved under the URL policy, which is the value handed to the
-    inference binding as its base URL (PRD sections 8 and 9.4). ``extra_headers``
-    holds only non-authentication headers, because a reserved authentication
-    header is refused at parse time (PRD section 7).
+    inference binding as its base URL (PRD sections 8 and 9.4). ``api_key`` and
+    ``auth_type`` are the route's own authentication configuration, and
+    ``extra_headers`` holds only non-authentication headers, because a reserved
+    authentication header is refused at parse time (PRD section 7).
     """
 
     operation: Operation
@@ -85,6 +78,7 @@ class Route:
     model_id: str
     format: str
     api_key: str
+    auth_type: AuthType
     capabilities: frozenset[Capability]
     extra_headers: Mapping[str, str]
     allow_absolute_path_url: bool
@@ -113,18 +107,20 @@ _ENDPOINT = "ENDPOINT"
 _MODEL_ID = "MODEL_ID"
 _FORMAT = "FORMAT"
 _API_KEY = "API_KEY"
+_AUTH_TYPE = "AUTH_TYPE"
 _PATH = "PATH"
 _EXTRA_HEADERS_JSON = "EXTRA_HEADERS_JSON"
 _CAPABILITIES = "CAPABILITIES"
 _ALLOW_ABSOLUTE_PATH_URL = "ALLOW_ABSOLUTE_PATH_URL"
 _ROUTES_JSON = "ROUTES_JSON"
 
-_REQUIRED_SUFFIXES = (_ENDPOINT, _MODEL_ID, _FORMAT)
+_IDENTITY_SUFFIXES = (_ENDPOINT, _MODEL_ID, _FORMAT)
 
 _ENTRY_ENDPOINT = "endpoint"
 _ENTRY_MODEL_ID = "model_id"
 _ENTRY_FORMAT = "format"
 _ENTRY_API_KEY = "api_key"
+_ENTRY_AUTH_TYPE = "auth_type"
 _ENTRY_PATH = "path"
 _ENTRY_EXTRA_HEADERS = "extra_headers"
 _ENTRY_CAPABILITIES = "capabilities"
@@ -136,6 +132,7 @@ _ENTRY_KEYS: frozenset[str] = frozenset(
         _ENTRY_MODEL_ID,
         _ENTRY_FORMAT,
         _ENTRY_API_KEY,
+        _ENTRY_AUTH_TYPE,
         _ENTRY_PATH,
         _ENTRY_EXTRA_HEADERS,
         _ENTRY_CAPABILITIES,
@@ -176,7 +173,15 @@ def _parse_block(block: _Block, env: Mapping[str, str], *, resolver: Resolver) -
     routes_variable = _variable(block, _ROUTES_JSON)
     routes_json = _read(env, routes_variable)
 
-    if not any(_read(env, _variable(block, suffix)) for suffix in _REQUIRED_SUFFIXES):
+    if not any(_read(env, _variable(block, suffix)) for suffix in _IDENTITY_SUFFIXES):
+        orphans = _orphan_configuration(block, env)
+        if orphans:
+            raise ConfigurationError(
+                f"{orphans[0]} is set but the {block.prefix} block has no endpoint, model ID or "
+                f"format; a capability is enabled only when its singleton block is configured, so "
+                f"define {block.prefix}_ENDPOINT, {block.prefix}_MODEL_ID and "
+                f"{block.prefix}_FORMAT, or remove {orphans[0]}"
+            )
         if routes_json:
             raise ConfigurationError(
                 f"{routes_variable} is set but the {block.prefix}_* block is unset; a capability "
@@ -191,6 +196,9 @@ def _parse_block(block: _Block, env: Mapping[str, str], *, resolver: Resolver) -
     format = _parse_text(_variable(block, _FORMAT), _read(env, _variable(block, _FORMAT)))
     path = _read(env, _variable(block, _PATH))
     api_key = _read(env, _variable(block, _API_KEY))
+    auth_type = _parse_auth_type(
+        _variable(block, _AUTH_TYPE), _read(env, _variable(block, _AUTH_TYPE))
+    )
 
     opt_in_variable = _variable(block, _ALLOW_ABSOLUTE_PATH_URL)
     opt_in = _read(env, opt_in_variable)
@@ -215,6 +223,7 @@ def _parse_block(block: _Block, env: Mapping[str, str], *, resolver: Resolver) -
         model_id=model_id,
         format=format,
         api_key=api_key,
+        auth_type=auth_type,
         capabilities=capabilities,
         extra_headers=extra_headers,
         allow_absolute_path_url=allow_absolute_path_url,
@@ -225,6 +234,54 @@ def _parse_block(block: _Block, env: Mapping[str, str], *, resolver: Resolver) -
         sources.append((f"{routes_variable} entry {route.index}", route))
     _reject_duplicate_routes(block, sources)
     return [route for _, route in sources]
+
+
+def _orphan_configuration(block: _Block, env: Mapping[str, str]) -> list[str]:
+    """The block's non-identity settings that hold a value the gateway cannot act on.
+
+    A block with no endpoint, model ID or format defines no route, so any other
+    value it carries is configuration the gateway would otherwise discard in
+    silence — a non-empty API key above all.
+    """
+    orphans: list[str] = []
+    for suffix, is_inert in _INERT_SETTINGS:
+        variable = _variable(block, suffix)
+        if not is_inert(variable, _read(env, variable)):
+            orphans.append(variable)
+    return sorted(orphans)
+
+
+def _inert_text(variable: str, raw: str) -> bool:
+    return not raw
+
+
+def _inert_object(variable: str, raw: str) -> bool:
+    if not raw:
+        return True
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and not parsed
+
+
+def _inert_flag(variable: str, raw: str) -> bool:
+    if not raw:
+        return True
+    try:
+        return not _parse_bool(variable, raw)
+    except ConfigurationError:
+        return False
+
+
+_INERT_SETTINGS: tuple[tuple[str, Callable[[str, str], bool]], ...] = (
+    (_API_KEY, _inert_text),
+    (_PATH, _inert_text),
+    (_EXTRA_HEADERS_JSON, _inert_object),
+    (_CAPABILITIES, _inert_text),
+    (_ALLOW_ABSOLUTE_PATH_URL, _inert_flag),
+    (_AUTH_TYPE, _inert_text),
+)
 
 
 def _parse_entries(
@@ -288,6 +345,7 @@ def _parse_entry(
         model_id=model_id,
         format=format,
         api_key=_entry_optional_text(where, entry, _ENTRY_API_KEY),
+        auth_type=_entry_auth_type(where, entry.get(_ENTRY_AUTH_TYPE)),
         capabilities=_entry_capabilities(block, where, entry.get(_ENTRY_CAPABILITIES)),
         extra_headers=_entry_extra_headers(where, entry.get(_ENTRY_EXTRA_HEADERS)),
         allow_absolute_path_url=allow_absolute_path_url,
@@ -295,14 +353,14 @@ def _parse_entry(
 
 
 def _reject_duplicate_routes(block: _Block, sources: Sequence[tuple[str, Route]]) -> None:
-    seen: dict[tuple[str, str], str] = {}
+    seen: dict[tuple[str, str, str], str] = {}
     for label, route in sources:
-        identity = (route.base_url, route.model_id)
+        identity = (route.base_url, route.format, route.model_id)
         first = seen.get(identity)
         if first is not None:
             raise ConfigurationError(
-                f"{label} names the same endpoint and model ID as {first}; every route of the "
-                f"{block.prefix} operation must name a distinct endpoint and model"
+                f"{label} names the same endpoint, format and model ID as {first}; every route of "
+                f"the {block.prefix} operation must name a distinct endpoint, format and model"
             )
         seen[identity] = label
 
@@ -350,7 +408,7 @@ def _resolve_base_url(
 def _singleton_capabilities(block: _Block, raw: str) -> frozenset[Capability]:
     if not raw:
         return frozenset({block.default_capability})
-    return _capabilities_from(_variable(block, _CAPABILITIES), raw.split(","))
+    return _capabilities_from(_variable(block, _CAPABILITIES), raw, raw.split(","))
 
 
 def _entry_capabilities(block: _Block, where: str, value: object) -> frozenset[Capability]:
@@ -358,7 +416,7 @@ def _entry_capabilities(block: _Block, where: str, value: object) -> frozenset[C
     if value is None:
         return frozenset({block.default_capability})
     if isinstance(value, str):
-        return _capabilities_from(label, value.split(","))
+        return _capabilities_from(label, value, value.split(","))
     if isinstance(value, list):
         for item in value:
             if not isinstance(item, str):
@@ -366,15 +424,18 @@ def _entry_capabilities(block: _Block, where: str, value: object) -> frozenset[C
                     f"{label} must be an array of capability names, got {_json_type(item)} in "
                     f"the array"
                 )
-        return _capabilities_from(label, value)
+        return _capabilities_from(label, value, value)
     raise ConfigurationError(
         f"{label} must be an array of capability names or a comma-separated string, got "
         f"{_json_type(value)}"
     )
 
 
-def _capabilities_from(where: str, tokens: Iterable[str]) -> frozenset[Capability]:
-    return frozenset(_capability(where, token) for token in tokens if token.strip())
+def _capabilities_from(where: str, raw: object, tokens: Iterable[str]) -> frozenset[Capability]:
+    capabilities = frozenset(_capability(where, token) for token in tokens if token.strip())
+    if not capabilities:
+        raise ConfigurationError(f"{where} must name at least one capability, got {raw!r}")
+    return capabilities
 
 
 def _capability(where: str, token: str) -> Capability:
@@ -386,6 +447,25 @@ def _capability(where: str, token: str) -> Capability:
         raise ConfigurationError(
             f"{where} must name capabilities from {supported}; got {name!r}"
         ) from error
+
+
+def _parse_auth_type(where: str, raw: str) -> AuthType:
+    if not raw:
+        return AuthType.BEARER
+    try:
+        return AuthType(raw.lower())
+    except ValueError as error:
+        supported = ", ".join(repr(member.value) for member in AuthType)
+        raise ConfigurationError(f"{where} must be one of {supported}, got {raw!r}") from error
+
+
+def _entry_auth_type(where: str, value: object) -> AuthType:
+    label = f"{where} {_ENTRY_AUTH_TYPE!r}"
+    if value is None:
+        return AuthType.BEARER
+    if not isinstance(value, str):
+        raise ConfigurationError(f"{label} must be a string, got {_json_type(value)}")
+    return _parse_auth_type(label, value.strip())
 
 
 def _singleton_extra_headers(block: _Block, raw: str) -> dict[str, str]:

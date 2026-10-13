@@ -1,10 +1,11 @@
-"""Route parsing and startup validation (PRD sections 6, 7, 8, 10, 11, 18)."""
+"""Route parsing and startup validation (PRD sections 6, 7, 8, 11, 18)."""
 
 import dataclasses
 import json
 
 import pytest
 
+from model_gateway.auth import AuthType
 from model_gateway.capabilities import Capability
 from model_gateway.config import ConfigurationError
 from model_gateway.config.routes import Operation, Route, parse_routes
@@ -14,9 +15,11 @@ METADATA_ADDRESS = "169.254.169.254"
 
 SUPPORTED_CAPABILITIES = "'chat', 'tools', 'vision', 'embeddings', 'generation', 'editing'"
 
+SUPPORTED_AUTH_TYPES = "'bearer', 'x-api-key', 'api-key', 'none', 'custom-header'"
+
 ENTRY_KEYS = (
-    "'allow_absolute_path_url', 'api_key', 'capabilities', 'endpoint', 'extra_headers', "
-    "'format', 'model_id', 'path'"
+    "'allow_absolute_path_url', 'api_key', 'auth_type', 'capabilities', 'endpoint', "
+    "'extra_headers', 'format', 'model_id', 'path'"
 )
 
 
@@ -77,6 +80,15 @@ def routes_json(*entries: dict[str, object]) -> dict[str, str]:
     return {"TEXT_LLM_ROUTES_JSON": json.dumps(list(entries))}
 
 
+def orphan_message(variable: str, prefix: str) -> str:
+    """The error a block reports when it carries settings but no endpoint, model ID or format."""
+    return (
+        f"{variable} is set but the {prefix} block has no endpoint, model ID or format; a "
+        f"capability is enabled only when its singleton block is configured, so define "
+        f"{prefix}_ENDPOINT, {prefix}_MODEL_ID and {prefix}_FORMAT, or remove {variable}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Operation
 # ---------------------------------------------------------------------------
@@ -86,12 +98,6 @@ def test_operation_values_match_the_prd():
     assert Operation.TEXT == "text"
     assert Operation.IMAGE == "image"
     assert Operation.EMBEDDINGS == "embeddings"
-
-
-def test_public_model_ids_are_the_fixed_public_contract():
-    assert Operation.TEXT.public_model_id == "text-default"
-    assert Operation.IMAGE.public_model_id == "image-default"
-    assert Operation.EMBEDDINGS.public_model_id == "embedding-default"
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +114,7 @@ def test_unrelated_variables_do_not_create_routes():
 
 
 def test_singleton_block_defines_the_primary_route():
-    routes = parse(block(TEXT_LLM_API_KEY="secret"))
+    routes = parse(block(TEXT_LLM_API_KEY="secret", TEXT_LLM_AUTH_TYPE="x-api-key"))
 
     assert routes == (
         Route(
@@ -119,6 +125,7 @@ def test_singleton_block_defines_the_primary_route():
             model_id="primary-model",
             format="openai",
             api_key="secret",
+            auth_type=AuthType.X_API_KEY,
             capabilities=frozenset({Capability.CHAT}),
             extra_headers={},
             allow_absolute_path_url=False,
@@ -136,6 +143,7 @@ def test_primary_route_fields_are_readable_individually():
     assert route.model_id == "primary-model"
     assert route.format == "openai"
     assert route.api_key == ""
+    assert route.auth_type is AuthType.BEARER
     assert route.capabilities == frozenset({Capability.CHAT})
     assert route.extra_headers == {}
     assert route.allow_absolute_path_url is False
@@ -191,6 +199,71 @@ def test_route_is_frozen():
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         route.model_id = "other"
+
+
+# ---------------------------------------------------------------------------
+# Authentication type
+# ---------------------------------------------------------------------------
+
+
+def test_the_default_authentication_type_is_bearer():
+    (route,) = parse(block())
+
+    assert route.auth_type is AuthType.BEARER
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("bearer", AuthType.BEARER),
+        ("x-api-key", AuthType.X_API_KEY),
+        ("api-key", AuthType.API_KEY),
+        ("none", AuthType.NONE),
+        ("custom-header", AuthType.CUSTOM_HEADER),
+    ],
+)
+def test_every_supported_authentication_type_is_parsed(configured, expected):
+    (route,) = parse(block(TEXT_LLM_AUTH_TYPE=configured))
+
+    assert route.auth_type is expected
+
+
+def test_the_authentication_type_is_case_insensitive():
+    (route,) = parse(block(TEXT_LLM_AUTH_TYPE=" X-API-KEY "))
+
+    assert route.auth_type is AuthType.X_API_KEY
+
+
+def test_an_unknown_authentication_type_is_rejected():
+    assert message(block(TEXT_LLM_AUTH_TYPE="token")) == (
+        f"TEXT_LLM_AUTH_TYPE must be one of {SUPPORTED_AUTH_TYPES}, got 'token'"
+    )
+
+
+def test_an_entry_declares_its_own_authentication_type():
+    env = {**block(), **routes_json(entry(api_key="fallback-secret", auth_type="api-key"))}
+
+    routes = parse(env)
+
+    assert routes[0].auth_type is AuthType.BEARER
+    assert routes[1].auth_type is AuthType.API_KEY
+
+
+def test_an_entry_authentication_type_must_be_a_string():
+    env = {**block(), **routes_json(entry(auth_type=5))}
+
+    assert message(env) == (
+        "TEXT_LLM_ROUTES_JSON entry 1 'auth_type' must be a string, got a number"
+    )
+
+
+def test_an_unknown_authentication_type_in_an_entry_is_rejected():
+    env = {**block(), **routes_json(entry(auth_type="token"))}
+
+    assert message(env) == (
+        f"TEXT_LLM_ROUTES_JSON entry 1 'auth_type' must be one of {SUPPORTED_AUTH_TYPES}, "
+        "got 'token'"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +382,7 @@ def test_entry_fields_are_never_inherited_from_the_singleton_block():
         {
             **block(
                 TEXT_LLM_API_KEY="primary-secret",
+                TEXT_LLM_AUTH_TYPE="x-api-key",
                 TEXT_LLM_PATH="/custom",
                 TEXT_LLM_CAPABILITIES="chat,tools",
                 TEXT_LLM_EXTRA_HEADERS_JSON='{"x-organization": "acme"}',
@@ -321,11 +395,13 @@ def test_entry_fields_are_never_inherited_from_the_singleton_block():
     primary, fallback = routes
 
     assert primary.api_key == "primary-secret"
+    assert primary.auth_type is AuthType.X_API_KEY
     assert primary.base_url == "https://primary.example/v1/custom"
     assert primary.capabilities == frozenset({Capability.CHAT, Capability.TOOLS})
     assert primary.extra_headers == {"x-organization": "acme"}
 
     assert fallback.api_key == ""
+    assert fallback.auth_type is AuthType.BEARER
     assert fallback.base_url == "https://fallback.example/v1"
     assert fallback.capabilities == frozenset({Capability.CHAT})
     assert fallback.extra_headers == {}
@@ -440,15 +516,83 @@ def test_a_block_with_one_of_the_required_fields_is_rejected(present):
     assert message(env).endswith("must not be empty")
 
 
-def test_a_block_with_only_inert_variables_contributes_no_routes():
+@pytest.mark.parametrize(
+    "env",
+    [
+        pytest.param({}, id="nothing-set"),
+        pytest.param({"TEXT_LLM_API_KEY": ""}, id="blank-api-key"),
+        pytest.param({"TEXT_LLM_AUTH_TYPE": ""}, id="blank-auth-type"),
+        pytest.param({"TEXT_LLM_PATH": ""}, id="blank-path"),
+        pytest.param({"TEXT_LLM_CAPABILITIES": ""}, id="blank-capabilities"),
+        pytest.param({"TEXT_LLM_EXTRA_HEADERS_JSON": "{}"}, id="empty-headers"),
+        pytest.param({"TEXT_LLM_EXTRA_HEADERS_JSON": "{ }"}, id="empty-headers-with-space"),
+        pytest.param({"TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL": "false"}, id="opt-in-off"),
+        pytest.param({"TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL": "no"}, id="opt-in-off-no"),
+        pytest.param({"TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL": ""}, id="blank-opt-in"),
+        pytest.param(
+            {
+                "TEXT_LLM_API_KEY": "",
+                "TEXT_LLM_AUTH_TYPE": "",
+                "TEXT_LLM_PATH": "",
+                "TEXT_LLM_CAPABILITIES": "",
+                "TEXT_LLM_EXTRA_HEADERS_JSON": "{}",
+                "TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL": "false",
+            },
+            id="every-inert-default",
+        ),
+    ],
+)
+def test_a_block_holding_only_inert_settings_contributes_no_routes(env):
+    assert parse(env) == ()
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("TEXT_LLM_API_KEY", "secret"),
+        ("TEXT_LLM_AUTH_TYPE", "bearer"),
+        ("TEXT_LLM_PATH", "/custom"),
+        ("TEXT_LLM_CAPABILITIES", "chat"),
+        ("TEXT_LLM_EXTRA_HEADERS_JSON", '{"x-organization": "acme"}'),
+        ("TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL", "true"),
+    ],
+)
+def test_orphan_configuration_in_a_block_without_an_identity_is_rejected(variable, value):
+    assert message({variable: value}) == orphan_message(variable, "TEXT_LLM")
+
+
+def test_a_non_empty_api_key_is_never_silently_ignored():
+    assert message({"TEXT_LLM_API_KEY": "secret"}) == orphan_message("TEXT_LLM_API_KEY", "TEXT_LLM")
+
+
+def test_a_non_empty_api_key_is_rejected_even_when_other_operations_are_configured():
     env = {
         "TEXT_LLM_API_KEY": "secret",
-        "TEXT_LLM_AUTH_TYPE": "bearer",
-        "TEXT_LLM_EXTRA_HEADERS_JSON": "{}",
-        "TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL": "false",
+        "EMBEDDINGS_ENDPOINT": "https://embeddings.example/v1",
+        "EMBEDDINGS_MODEL_ID": "embedding-model",
+        "EMBEDDINGS_FORMAT": "openai",
     }
 
-    assert parse(env) == ()
+    assert message(env) == orphan_message("TEXT_LLM_API_KEY", "TEXT_LLM")
+
+
+def test_orphan_configuration_is_rejected_for_every_operation_block():
+    assert message({"EMBEDDINGS_API_KEY": "secret"}) == orphan_message(
+        "EMBEDDINGS_API_KEY", "EMBEDDINGS"
+    )
+    assert message({"IMAGE_GEN_PATH": "/custom"}) == orphan_message("IMAGE_GEN_PATH", "IMAGE_GEN")
+
+
+def test_the_first_orphan_variable_is_reported():
+    env = {"TEXT_LLM_PATH": "/custom", "TEXT_LLM_API_KEY": "secret"}
+
+    assert message(env) == orphan_message("TEXT_LLM_API_KEY", "TEXT_LLM")
+
+
+def test_orphan_configuration_is_reported_before_a_routes_json_without_a_block():
+    env = {"TEXT_LLM_API_KEY": "secret", "TEXT_LLM_ROUTES_JSON": "[]"}
+
+    assert message(env) == orphan_message("TEXT_LLM_API_KEY", "TEXT_LLM")
 
 
 def test_a_disabled_block_does_not_prevent_other_operations_from_operating():
@@ -495,6 +639,34 @@ def test_a_blank_capabilities_list_falls_back_to_the_operation_default():
     (route,) = parse(block(TEXT_LLM_CAPABILITIES="   "))
 
     assert route.capabilities == frozenset({Capability.CHAT})
+
+
+@pytest.mark.parametrize("value", [",", ",,,", ", ,"])
+def test_an_explicitly_empty_capability_list_is_rejected(value):
+    assert message(block(TEXT_LLM_CAPABILITIES=value)) == (
+        f"TEXT_LLM_CAPABILITIES must name at least one capability, got {value!r}"
+    )
+
+
+@pytest.mark.parametrize("value", [[], "", ["", "  "]])
+def test_an_explicitly_empty_capability_list_in_an_entry_is_rejected(value):
+    env = {**block(), **routes_json(entry(capabilities=value))}
+
+    assert message(env) == (
+        f"TEXT_LLM_ROUTES_JSON entry 1 'capabilities' must name at least one capability, "
+        f"got {value!r}"
+    )
+
+
+def test_omitting_capabilities_defaults_but_an_empty_list_is_rejected():
+    (primary, fallback) = parse({**block(), **routes_json(entry())})
+
+    assert primary.capabilities == frozenset({Capability.CHAT})
+    assert fallback.capabilities == frozenset({Capability.CHAT})
+
+    empty = {**block(), **routes_json(entry(capabilities=[]))}
+
+    assert "must name at least one capability" in message(empty)
 
 
 def test_an_unknown_capability_is_rejected():
@@ -895,8 +1067,9 @@ def test_an_entry_may_not_repeat_the_primary_route():
     }
 
     assert message(env) == (
-        "TEXT_LLM_ROUTES_JSON entry 1 names the same endpoint and model ID as the TEXT_LLM_* "
-        "block; every route of the TEXT_LLM operation must name a distinct endpoint and model"
+        "TEXT_LLM_ROUTES_JSON entry 1 names the same endpoint, format and model ID as the "
+        "TEXT_LLM_* block; every route of the TEXT_LLM operation must name a distinct endpoint, "
+        "format and model"
     )
 
 
@@ -907,10 +1080,34 @@ def test_two_entries_may_not_name_the_same_route():
     }
 
     assert message(env) == (
-        "TEXT_LLM_ROUTES_JSON entry 2 names the same endpoint and model ID as "
+        "TEXT_LLM_ROUTES_JSON entry 2 names the same endpoint, format and model ID as "
         "TEXT_LLM_ROUTES_JSON entry 1; every route of the TEXT_LLM operation must name a "
-        "distinct endpoint and model"
+        "distinct endpoint, format and model"
     )
+
+
+def test_two_dialects_of_the_same_model_on_one_endpoint_are_distinct_routes():
+    env = {
+        **block(TEXT_LLM_FORMAT="openai"),
+        **routes_json(
+            entry(
+                endpoint="https://primary.example/v1",
+                model_id="primary-model",
+                format="anthropic",
+            )
+        ),
+    }
+
+    routes = parse(env)
+
+    assert [route.base_url for route in routes] == [
+        "https://primary.example/v1",
+        "https://primary.example/v1",
+    ]
+    assert [route.litellm_model for route in routes] == [
+        "openai/primary-model",
+        "anthropic/primary-model",
+    ]
 
 
 def test_the_same_endpoint_with_a_different_model_is_allowed():
@@ -1031,6 +1228,7 @@ def test_the_prd_fallback_example_is_accepted():
         (0, "https://primary.example/v1", "openai/primary-model"),
         (1, "https://fallback.example/v1", "openai/fallback-model"),
     ]
+    assert [route.auth_type for route in routes] == [AuthType.BEARER, AuthType.BEARER]
 
 
 def test_the_prd_complete_environment_example_is_accepted():
@@ -1086,3 +1284,4 @@ def test_the_prd_complete_environment_example_is_accepted():
     )
     assert routes[1].capabilities == frozenset({Capability.GENERATION})
     assert routes[2].capabilities == frozenset({Capability.EMBEDDINGS})
+    assert [route.auth_type for route in routes] == [AuthType.BEARER] * 3
