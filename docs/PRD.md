@@ -1,7 +1,7 @@
 # Product Requirements Document
 # Vendor-Neutral AI Model Gateway
 
-**Version:** 1.1  
+**Version:** 1.2  
 **Status:** Implementation-ready specification  
 **Implementation language:** Python  
 **Architecture:** Standalone, self-hostable, multi-provider AI gateway  
@@ -12,6 +12,7 @@
 
 **Revision history:**
 
+- **1.2** — Makes the LiteLLM boundary and ownership split explicit; collapses multi-route configuration to one schema (a singleton primary block plus `<CAPABILITY>_ROUTES_JSON`); assigns retry and fallback ownership solely to the gateway core with LiteLLM retry and fallback disabled; restricts an absolute-URL override in `*_PATH` to explicit opt-in.
 - **1.1** — Removes grounded search and configurable model aliases; delegates all upstream inference to the LiteLLM library.
 - **1.0** — Initial specification.
 
@@ -56,7 +57,7 @@ The gateway must provide:
 - Support for multi-turn conversations.
 - Tool/function calling with structured arguments.
 - Multimodal input and output.
-- Model aliases and fallback routing.
+- Fixed logical model IDs with explicitly configured route fallback.
 - Token usage and cost accounting.
 - Configurable rate limits and concurrency limits.
 - Optional API authentication and tenant isolation.
@@ -370,13 +371,13 @@ The canonical gRPC request must represent:
 | `tenant_id` | string | Optional tenant identity |
 | `actor_id` | string | Optional caller identity |
 | `agent_id` | string | Agent/service identifier |
-| `model` | string | Logical model alias |
+| `model` | string | Public model ID |
 | `messages` | repeated message | Conversation |
 | `system_prompt` | string | System instruction |
 | `generation_config` | structured object | Model parameters |
 | `tools` | repeated message | Tool declarations |
 | `response_modality` | enum | Text, image, multimodal |
-| `fallback_models` | repeated string | Allowed fallback routes |
+| `fallback_models` | repeated string | Permitted fallback routes |
 | `idempotency_key` | string | Request deduplication |
 | `metadata` | map | Non-sensitive request metadata |
 
@@ -387,7 +388,7 @@ The protobuf schema must assign stable field numbers and preserve backward compa
 Required concepts:
 
 - Invocation ID.
-- Logical model ID.
+- Public model ID.
 - Resolved upstream model ID.
 - Text content.
 - Tool calls.
@@ -442,6 +443,8 @@ Configuration is loaded and validated at startup.
 
 An absent optional capability is disabled rather than preventing unrelated capabilities from operating.
 
+`*_FORMAT` keeps its name in every capability block. Its value is the provider dialect name understood by the inference binding — a LiteLLM provider name such as `openai` or `vertex_ai`, not the company operating the endpoint. The operation performed (chat, embedding, image generation) is determined by which capability block the variable belongs to, not by the variable name: `TEXT_LLM_FORMAT` selects the dialect for chat and text, `EMBEDDINGS_FORMAT` for embeddings, and `IMAGE_GEN_FORMAT` for image generation.
+
 ## 6.1 Text generation
 
 ```dotenv
@@ -470,7 +473,7 @@ Supported initial formats (LiteLLM provider names):
 | `ollama` | Ollama |
 | `azure` | Azure OpenAI |
 
-The format is a LiteLLM provider name identifying the upstream API dialect, not the company operating the endpoint.
+`TEXT_LLM_FORMAT` is the provider dialect name for chat and text understood by the inference binding (a LiteLLM provider name), not the company operating the endpoint.
 
 ## 6.2 Image generation
 
@@ -485,7 +488,7 @@ IMAGE_GEN_EXTRA_HEADERS_JSON={}
 IMAGE_GEN_CAPABILITIES=generation
 ```
 
-`IMAGE_GEN_FORMAT` is a LiteLLM provider name, and `IMAGE_GEN_MODEL_ID` is the bare upstream model name.
+`IMAGE_GEN_FORMAT` is the provider dialect name for image generation, and `IMAGE_GEN_MODEL_ID` is the bare upstream model name.
 
 Possible image formats:
 
@@ -510,7 +513,7 @@ EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM=false
 EMBEDDINGS_EXTRA_HEADERS_JSON={}
 ```
 
-`EMBEDDINGS_FORMAT` is a LiteLLM provider name (`openai`, `vertex_ai`, `gemini`, `azure`, `ollama`), and `EMBEDDINGS_MODEL_ID` is the bare upstream model name.
+`EMBEDDINGS_FORMAT` is the provider dialect name for embeddings (`openai`, `vertex_ai`, `gemini`, `azure`, `ollama`), and `EMBEDDINGS_MODEL_ID` is the bare upstream model name.
 
 The gateway must support both fixed-dimension and configurable-dimension models.
 
@@ -527,6 +530,16 @@ Supported upstream authentication mechanisms:
 | `api-key` | `api-key` header |
 | `none` | No upstream authentication |
 | `custom-header` | Configurable authentication header |
+
+The gateway decides which credential configuration applies to a route and supplies it to the binding; LiteLLM builds the provider's native authentication header from what it is given. Precedence:
+
+1. **Native provider authentication is the default.** The gateway supplies `api_key` for the route and normally lets LiteLLM construct the provider's native header — for example the OpenAI-compatible `Authorization: Bearer` header.
+2. **`*_AUTH_TYPE` applies only when a custom endpoint needs a non-native header.** It exists for endpoints that are not the provider's native endpoint and require `x-api-key`, `api-key`, or a named custom header. A value that matches the provider's native scheme (for example `bearer` for an OpenAI-compatible endpoint) is a no-op and equivalent to leaving the variable unset.
+3. **`*_EXTRA_HEADERS_JSON` applies only to the same custom-endpoint case.** It is not a general override of provider authentication.
+
+Extra headers merge with the headers LiteLLM generates for the request. The gateway's configured headers are applied last, so a configured header name wins over a LiteLLM-generated header with the same name, and LiteLLM's remaining generated headers are preserved. The merge is deterministic and must not be used to inject a credential that the route's own credential configuration does not supply.
+
+Credentials are bound to one origin. The gateway must never forward a route's credentials to a different origin, and must never re-send them across a redirect that changes scheme, host, or port (§14).
 
 For `vertex_ai` routes, upstream Google credentials are resolved by LiteLLM through Google Application Default Credentials, and the gateway passes no static key. ADC is ambient: on GCE or GKE the workload's attached service account is inherited automatically, so operators must scope that service account deliberately.
 
@@ -586,7 +599,7 @@ Resolved base URL handed to LiteLLM:
 https://provider.example/custom
 ```
 
-A full URL in `TEXT_LLM_PATH` may override the base URL when explicitly permitted by configuration.
+A full URL in `TEXT_LLM_PATH` must not override the base URL by default. Deterministic joining governs: the value is treated as a path and joined to the base URL. An absolute-URL override requires an explicit opt-in for the route, for example `TEXT_LLM_ALLOW_ABSOLUTE_PATH_URL=true`; without that opt-in, an absolute URL in `*_PATH` is invalid configuration and startup must reject it rather than resolve it silently.
 
 URL joining must be deterministic.
 
@@ -600,7 +613,13 @@ LiteLLM appends operation paths (for example `/chat/completions`) to the resolve
 
 The gateway binds to LiteLLM as its vendor-neutral inference layer. Each configured route supplies a LiteLLM provider name, an upstream model name, a base URL, and an API key, and the gateway calls LiteLLM with a provider-prefixed model string.
 
-LiteLLM owns provider-specific request encoding, network execution, response decoding, error normalization, and translation for text, vision, tool calling, image generation, and embeddings. This satisfies the extensibility principle: additional upstream providers are supported by LiteLLM without changing the gateway's core business logic.
+LiteLLM owns provider-specific request encoding, network execution, and response decoding for text, vision, tool calling, image generation, and embeddings. That is the whole of the boundary: **LiteLLM owns upstream protocol translation and execution, and nothing else.**
+
+The gateway owns policy, lifecycle, validation, identity, reliability policy, and the public contract. It also re-normalises LiteLLM's output at its own boundary: a LiteLLM result is treated as upstream data, mapped into the canonical representation, and checked against the fields the gateway depends on, never forwarded to callers unchanged.
+
+In particular, LiteLLM does not own error normalisation or authentication decisions. It may raise provider-shaped exceptions, and it may construct a provider-native authentication header from credentials the gateway supplies (§7), but the gateway decides which error category a caller sees and which credential configuration applies to a route.
+
+This satisfies the extensibility principle: additional upstream providers are supported by LiteLLM without changing the gateway's core business logic.
 
 The binding must not own:
 
@@ -610,6 +629,9 @@ The binding must not own:
 - Request idempotency.
 - Global retry policy.
 - Audit persistence.
+- Error normalisation.
+- Authentication decisions.
+- The public response contract.
 
 These responsibilities belong to the gateway core.
 
@@ -648,13 +670,31 @@ When a provider does not support a requested capability, the gateway must return
 
 It must not silently discard tools, images, system instructions, structured-output requirements, or other semantically important parameters.
 
+## 9.4 Route-to-invocation mapping
+
+Each capability resolves to exactly one LiteLLM entry point. The gateway passes the resolved base URL as the endpoint, the route's API key, and a provider-prefixed model string (`<format>/<model_id>`). The endpoint is always passed as a base URL; operation paths are appended by LiteLLM (§8).
+
+| Capability | LiteLLM entry point | Parameters passed |
+|---|---|---|
+| Chat / text | `litellm.completion` (streaming: `stream=True`; async: `litellm.acompletion`) | `model` = `<format>/<model_id>`, `api_base` = resolved endpoint, `api_key`, `messages`, generation parameters, `timeout` drawn from the invocation deadline, `num_retries=0` |
+| Embeddings | `litellm.embedding` (async: `litellm.aembedding`) | `model` = `<format>/<model_id>`, `api_base` = resolved endpoint, `api_key`, `input`, `dimensions` only when the route enables it, `num_retries=0` |
+| Image generation | `litellm.image_generation` (async: `litellm.aimage_generation`) | `model` = `<format>/<model_id>`, `api_base` = resolved endpoint, `api_key`, `prompt`, only the image parameters the route advertises (§9.5), `num_retries=0` |
+
+Retries are disabled on every call because the gateway core owns the retry loop (§11.3).
+
+**"Supported in this gateway" is a narrower claim than "supported somewhere in LiteLLM".** A provider appearing in LiteLLM's catalogue is not acceptance evidence for this gateway. A provider is supported here only when a configured route names it *and* the gateway's own tests cover its operation, custom endpoint, authentication, and response semantics. LiteLLM may know how to call a provider this gateway has never validated, and the gateway must not advertise or route to one.
+
+## 9.5 Image generation constraints
+
+The supported upstream operation is `POST {endpoint}/images/generations`. A route advertises image generation only when that operation is what its endpoint provides.
+
+Image support must not be overstated. For an image model that LiteLLM does not recognise, passing `response_format` (and possibly `size`) makes LiteLLM raise `UnsupportedParamsError` instead of ignoring the parameter. Routes for such models must therefore drop those parameters before the call, or not advertise them at all; the gateway must not promise OpenAI-style image parameters it cannot pass through.
+
 ---
 
 # 10. Model Routing
 
-The gateway must support logical model aliases.
-
-Fixed logical model IDs:
+The gateway exposes a fixed set of public model IDs. They are part of the public contract and are not configurable aliases:
 
 ```text
 text-default
@@ -662,41 +702,50 @@ image-default
 embedding-default
 ```
 
-Each logical model ID maps to a configured capability route.
+Each public model ID maps to a configured capability route and to that route's configured fallbacks (§11).
 
-An unknown model alias must return a model-not-found error.
+An unknown public model ID must return a model-not-found error.
 
 Caller-supplied model names must not allow access to unconfigured upstream endpoints.
+
+The word "alias" is reserved for configurable mappings. The gateway defines none: a public model ID is a fixed identifier, and callers cannot introduce, rename, or remap one.
 
 ---
 
 # 11. Multiple Providers and Fallbacks
 
-The gateway should support multiple routes for a capability.
+The gateway must support multiple routes for a capability. Fallbacks are required: a capability may declare a primary route and any number of additional routes.
 
-Example:
+## 11.1 Configuration schema
 
-```dotenv
-TEXT_LLM_1_ENDPOINT=
-TEXT_LLM_1_MODEL_ID=
-TEXT_LLM_1_API_KEY=
-TEXT_LLM_1_FORMAT=
-
-TEXT_LLM_2_ENDPOINT=
-TEXT_LLM_2_MODEL_ID=
-TEXT_LLM_2_API_KEY=
-TEXT_LLM_2_FORMAT=
-```
-
-A structured alternative is:
+There is exactly one schema. For each capability, the singleton block defines the primary route and a `<CAPABILITY>_ROUTES_JSON` variable supplies the additional routes as a JSON array.
 
 ```dotenv
-TEXT_LLM_ROUTES_JSON=[]
+TEXT_LLM_ENDPOINT=https://primary.example/v1
+TEXT_LLM_MODEL_ID=primary-model
+TEXT_LLM_API_KEY=
+TEXT_LLM_FORMAT=openai
+
+TEXT_LLM_ROUTES_JSON=[{"endpoint":"https://fallback.example/v1","model_id":"fallback-model","api_key":"","format":"openai"}]
 ```
 
-If both indexed and structured route configuration are supplied, startup must reject the ambiguity unless an explicit precedence rule is documented.
+The same pattern applies to every capability: `IMAGE_GEN_*` with `IMAGE_GEN_ROUTES_JSON`, and `EMBEDDINGS_*` with `EMBEDDINGS_ROUTES_JSON`.
 
-Fallback behavior:
+How the singleton block and `*_ROUTES_JSON` combine:
+
+- The singleton block always defines the primary route (index 0). It is the only place the primary route is defined.
+- `*_ROUTES_JSON` entries are additional routes, appended in array order (index 1, 2, ...).
+- An absent or empty array means the capability has exactly one route.
+- Precedence is positional, not field-merged. An entry never overrides a field of the singleton block, and no field is inherited from one route to another: each entry is self-contained and must specify its own endpoint, model ID, format, and credentials. Credentials are never carried across routes, because a fallback route may point at a different origin (§7).
+- A capability is enabled only when its singleton block is configured. `*_ROUTES_JSON` alone, with the singleton block unset, is ambiguous and must be rejected at startup.
+
+The indexed form (`TEXT_LLM_1_*`, `TEXT_LLM_2_*`) does not exist. It is not a supported configuration, and its presence must be rejected at startup.
+
+Ambiguous configuration must be rejected at startup rather than resolved by guessing. This includes a malformed JSON array, an entry missing a required field, a duplicate route index, and two entries naming the same endpoint and model.
+
+## 11.2 Fallback selection
+
+Route order is fallback order. The gateway walks the configured routes in order, retrying the current route within its retry budget and moving to the next route only when that route is exhausted or fails with a retryable error.
 
 ```text
 Primary
@@ -720,7 +769,15 @@ Retries must be bounded.
 
 Requests that have already produced visible streaming output must not silently switch providers.
 
-LiteLLM exposes its own fallback support. The gateway may use it or keep fallback selection in its core; either way, the deterministic retry and fallback semantics defined in this section govern.
+## 11.3 Retry and fallback ownership
+
+The gateway core owns retries and fallbacks. LiteLLM's own retry and fallback support is disabled, so that there is exactly one retry loop, one deadline, and one attempt count for an invocation.
+
+- LiteLLM is called with retries disabled (`num_retries=0`). The gateway must not rely on LiteLLM's `fallbacks` or `context_window_fallbacks` parameters.
+- The gateway enforces a single total deadline per invocation (§15). Provider timeouts and connect timeouts are budgeted inside that deadline, and no retry or fallback may extend it.
+- Retries must never switch providers after visible streaming output has been emitted to the caller.
+
+Stacked retry loops are prohibited: neither the gateway core nor the LiteLLM binding may wrap a second retry layer around a call that the other already governs.
 
 ---
 
@@ -746,7 +803,7 @@ Record:
 
 - Invocation ID.
 - Timestamp.
-- Route and logical model.
+- Route and public model ID.
 - Actual upstream model.
 - Capability.
 - Input tokens.
@@ -830,6 +887,8 @@ The gateway must:
 
 A retry must not exceed the caller's remaining deadline.
 
+The gateway enforces a single total deadline per invocation. Provider timeouts, connect timeouts, retries, and fallbacks all draw from that one budget. LiteLLM's retry and fallback support is disabled so that no second loop and no second deadline exists (§11.3).
+
 ---
 
 # 16. Streaming
@@ -838,7 +897,9 @@ HTTP streaming must use Server-Sent Events where the endpoint's protocol defines
 
 gRPC streaming must use server-streaming responses.
 
-Streaming through LiteLLM must support:
+Streaming is delivered through the LiteLLM binding. The gateway maintains no per-provider streaming adapters: it consumes the stream the binding produces for the configured provider and re-normalises each chunk at the gateway boundary.
+
+Streaming through the LiteLLM binding must support:
 
 - Incremental text.
 - Tool-call argument deltas.
@@ -902,6 +963,7 @@ TEXT_LLM_EXTRA_HEADERS_JSON={}
 TEXT_LLM_CAPABILITIES=chat,tools,vision
 TEXT_LLM_CONTEXT_WINDOW=
 TEXT_LLM_MAX_OUTPUT_TOKENS=
+TEXT_LLM_ROUTES_JSON=[]
 
 # ======================================
 # IMAGE GENERATION
@@ -914,6 +976,7 @@ IMAGE_GEN_AUTH_TYPE=bearer
 IMAGE_GEN_PATH=
 IMAGE_GEN_EXTRA_HEADERS_JSON={}
 IMAGE_GEN_CAPABILITIES=generation
+IMAGE_GEN_ROUTES_JSON=[]
 
 # ======================================
 # EMBEDDINGS
@@ -926,6 +989,7 @@ EMBEDDINGS_AUTH_TYPE=bearer
 EMBEDDINGS_PATH=
 EMBEDDINGS_DIMENSIONS=1024
 EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM=false
+EMBEDDINGS_ROUTES_JSON=[]
 
 # ======================================
 # AUTHENTICATION
@@ -997,7 +1061,7 @@ Cover:
 - Authentication headers.
 - Request normalization.
 - Response normalization.
-- Model aliases.
+- Public model ID resolution.
 - Retry classification.
 - Error mapping.
 - Tool-call translation.
@@ -1005,7 +1069,9 @@ Cover:
 
 ## Integration tests
 
-Use deterministic mock upstream servers implementing each supported LiteLLM provider protocol.
+Use deterministic mock upstream servers that implement the provider protocol the binding speaks for each configured format. The mocks stand in for the upstream provider, never for the gateway: the gateway itself maintains no per-provider protocol implementation.
+
+The public gateway contract must stay covered. Mock providers substitute for the upstream only, and the gateway's own HTTP and gRPC surface is exercised against them.
 
 Test:
 
@@ -1049,7 +1115,7 @@ The product is accepted when:
 10. Streaming works for compatible providers.
 11. Timeouts, retries, and fallbacks behave deterministically.
 12. No provider credentials are exposed through public APIs.
-13. Unknown model aliases cannot access arbitrary upstream endpoints.
+13. Unknown public model IDs cannot reach unconfigured upstream endpoints.
 14. Usage accounting distinguishes actual and estimated token counts.
 15. The service can run without a database.
 16. Health and readiness checks function independently.
@@ -1117,7 +1183,9 @@ Vendor-independent routing, validation, governance, reliability, and accounting.
 
 **LiteLLM binding**
 
-Protocol-specific request encoding, authentication, network execution, and response decoding, delegated to the LiteLLM library.
+Protocol-specific request encoding, network execution, and response decoding, delegated to the LiteLLM library.
+
+Vendor neutrality is a property of the gateway, not of its inference dependency. The gateway core holds no provider-specific business logic, and the provider is chosen entirely by configuration. That neutrality is bounded by the LiteLLM dependency: the gateway is vendor-neutral to the extent that LiteLLM can speak the target provider's protocol. The dependency is pinned, isolated behind the binding, and replaceable — swapping it changes the binding, not the gateway's public contract, routing, policy, or accounting.
 
 No commercial vendor identity may be required by the gateway core.
 
