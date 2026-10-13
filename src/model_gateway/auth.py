@@ -1,4 +1,9 @@
-"""Authentication mechanisms for upstream calls and inbound clients (PRD section 7)."""
+"""How the gateway presents a configured key or header to an upstream route.
+
+Provider-specific authentication — including Google ADC for Vertex routes —
+is handled by LiteLLM itself; these values only describe the transport of a
+credential the gateway has already been given (PRD section 7).
+"""
 
 from enum import StrEnum
 
@@ -10,5 +15,4 @@ class AuthType(StrEnum):
     X_API_KEY = "x-api-key"
     API_KEY = "api-key"
     NONE = "none"
-    GOOGLE_ADC = "google-adc"
     CUSTOM_HEADER = "custom-header"
