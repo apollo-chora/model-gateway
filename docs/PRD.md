@@ -1,7 +1,7 @@
 # Product Requirements Document
 # Vendor-Neutral AI Model Gateway
 
-**Version:** 1.4  
+**Version:** 1.5  
 **Status:** Implementation-ready specification  
 **Implementation language:** Python  
 **Architecture:** Standalone, self-hostable, multi-provider AI gateway  
@@ -12,6 +12,7 @@
 
 **Revision history:**
 
+- **1.5** — Adds §14.1, which states that configuration-time URL screening alone is not SSRF prevention and requires the outbound transport to pin the connection to a validated address and to disable automatic redirect following, with a network-level egress restriction as the fallback where the binding cannot provide those controls; cross-references the obligation from §9 and narrows the SSRF wording in §9.2 and §14.
 - **1.4** — Documents additive path joining in §8 (`*_PATH` is appended to the base path and never replaces it, so a provider prefix is never dropped) and sets `OTEL_ENABLED=false` in the §18 example to match the shipped environment templates.
 - **1.3** — Corrections from architecture review: additional routes now carry their own authentication configuration plus only the credentials that configuration requires; drops the impossible duplicate-route-index rejection while keeping duplicate route identity and identical endpoint+model rejections; allows `*_EXTRA_HEADERS_JSON` on any route and replaces the unenforceable credential-injection wording with a reserved-authentication-header rule enforced at startup; tightens the §9 extensibility wording to "can be added through LiteLLM".
 - **1.2** — Makes the LiteLLM boundary and ownership split explicit; collapses multi-route configuration to one schema (a singleton primary block plus `<CAPABILITY>_ROUTES_JSON`); assigns retry and fallback ownership solely to the gateway core with LiteLLM retry and fallback disabled; restricts an absolute-URL override in `*_PATH` to explicit opt-in.
@@ -625,6 +626,8 @@ The gateway owns policy, lifecycle, validation, identity, reliability policy, an
 
 In particular, LiteLLM does not own error normalisation or authentication decisions. It may raise provider-shaped exceptions, and it may construct a provider-native authentication header from credentials the gateway supplies (§7), but the gateway decides which error category a caller sees and which credential configuration applies to a route.
 
+Because the binding is what opens the outbound connection, it also carries the transport obligations that make the gateway's URL policy effective: the connection must be pinned to an address the gateway validated, and automatic redirects must be disabled so that the gateway evaluates each redirect (§14.1). Configuration-time screening in the gateway and connection-time control in the transport are two halves of one requirement, and neither alone prevents SSRF.
+
 This satisfies the extensibility principle: additional upstream providers can be added through LiteLLM without changing the gateway's core business logic.
 
 The binding must not own:
@@ -668,7 +671,7 @@ Image inputs may be supplied as:
 
 Vision content is passed through to LiteLLM, which handles provider-specific encoding.
 
-Remote image fetching must follow SSRF and size-limit protections.
+Remote image fetching must satisfy the same controls as upstream calls: the gateway screens the URL against its policy, and the fetch is performed under the transport-level controls in §14.1 (address pinning and no automatic redirect following), together with a size limit.
 
 ## 9.3 Unsupported features
 
@@ -852,8 +855,8 @@ The gateway must implement:
 - Secret redaction.
 - Request-body size limits.
 - Provider timeouts.
-- SSRF protection.
-- Redirect restrictions.
+- SSRF screening of configured upstream URLs and remote image URLs, backed by the transport-level controls in §14.1.
+- Redirect restrictions; automatic redirect following is disabled at the transport, so the gateway evaluates each redirect (§14.1).
 - Host and scheme validation.
 - Optional upstream hostname allowlists.
 - Safe error normalization.
@@ -864,6 +867,19 @@ The gateway must implement:
 Development may permit plain HTTP and unauthenticated local operation when explicitly configured.
 
 Production must not silently fall back to insecure behavior.
+
+## 14.1 SSRF protection and transport-level controls
+
+Configuration-time screening alone does not constitute SSRF prevention. The gateway validates an upstream URL when configuration is loaded: scheme, blocked address classes, and every address the hostname resolves to. But the request is performed later by the inference binding, which resolves the hostname again and may follow redirects automatically. Validation and connection therefore live in different layers, leaving a DNS-rebinding (time-of-check to time-of-use) gap: a hostname can resolve to a public address during validation and to `127.0.0.1` or `169.254.169.254` at connection time.
+
+Whatever transport performs the outbound request must therefore supply the controls that close that gap:
+
+- **Address pinning (DNS pinning).** The connection must be pinned to an address that passed the gateway's policy, so the socket terminates at a validated destination rather than at whatever the hostname resolves to at connect time.
+- **No automatic redirect following.** Automatic redirect following must be disabled, so that every redirect is evaluated by the gateway's redirect policy instead: the destination is revalidated under the same rules, and credentials are never forwarded across an origin change (§7).
+
+These obligations fall on the binding and its transport, not on the configuration loader. Where the binding cannot provide transport-level control — because its HTTP client exposes no address pinning or redirect handling — the deployment must enforce an equivalent network-level egress restriction instead, such as a firewall, forward proxy, or egress gateway that permits only validated destinations. A deployment in that position must document the restriction; it must not rely on configuration-time screening alone.
+
+The controls must be proven by integration tests that exercise the rebinding and redirect cases against the transport actually used, not by unit tests of the URL validator alone.
 
 ---
 
@@ -1094,6 +1110,7 @@ Test:
 - Authentication.
 - Timeouts.
 - Fallbacks.
+- URL policy enforcement: rebinding and redirect handling exercised against the transport actually used (§14.1).
 
 ## End-to-end tests
 
