@@ -47,7 +47,11 @@ and 9.5). Embeddings are separate in the same way
 (:class:`EmbeddingProvider`): the operation is a different upstream call with a
 different answer, so a provider that cannot embed is refused rather than handed
 an embeddings request it would answer with something else (PRD sections 4.7,
-6.3 and 9.6).
+6.3 and 9.6). Image generation is separate in the same way
+(:class:`ImageProvider`): it is a different upstream call with a different
+answer — images rather than words or vectors — so a provider that cannot
+generate images is refused rather than handed an image request it would answer
+with something else (PRD sections 4.6, 6.2 and 9.6).
 """
 
 from collections.abc import AsyncIterator
@@ -58,11 +62,13 @@ from typing import Protocol, runtime_checkable
 from model_gateway.config.routes import Route
 from model_gateway.domain import InvocationRequest, InvocationResponse
 from model_gateway.domain.embeddings import EmbeddingRequest, EmbeddingResponse
+from model_gateway.domain.images import ImageRequest, ImageResponse
 from model_gateway.domain.streaming import StreamEvent
 
 __all__ = [
     "AttemptContext",
     "EmbeddingProvider",
+    "ImageProvider",
     "StreamingTextProvider",
     "TextProvider",
 ]
@@ -260,6 +266,78 @@ class EmbeddingProvider(Protocol):
         gateway core's work, not the provider's: the provider reports what the
         upstream said, and a provider that silently reordered or renumbered the
         answer would hide a difference the gateway is required to notice.
+
+        One attempt is not the same as one upstream request. An implementation
+        may reach a library that retries internally without the gateway's
+        knowledge, so the wire-request count can exceed the attempt count and
+        must never be reported as it.
+        """
+        ...
+
+
+@runtime_checkable
+class ImageProvider(Protocol):
+    """A provider that can turn a prompt into images (PRD sections 4.6, 6.2 and 9.6).
+
+    Image generation is a capability of its own, not a mode of
+    :class:`TextProvider`: it is a different upstream operation with a different
+    answer — images instead of words — so a provider that cannot generate must
+    be *refused* rather than handed the request and left to improvise. There is
+    no honest degradation here: a text provider asked for an image could only
+    invent one or fail, and either would tell the caller its request was served
+    when it was not (PRD section 9.5).
+
+    The protocol is structural and runtime-checkable, so the gateway core can
+    ask ``isinstance(provider, ImageProvider)`` before it accepts an image
+    request and raise a capability error naming ``image`` when the answer is no.
+    A provider that implements :meth:`generate` satisfies it; one that does not
+    is simply not an image provider, and no attribute is faked onto it.
+
+    ``route`` is the resolved route — its endpoint, credential, authentication
+    type, headers, provider dialect and upstream model — and it is the image
+    route the registry selected for the public model, never a text route
+    reached through the same provider. ``request`` is the canonical image
+    request, whose ``prompt`` is what the image is generated from and whose
+    ``size``, ``response_format`` and ``n`` are the caller's parameters. The
+    gateway core has already validated the request against the route's
+    advertised capability (PRD section 6.2); what the provider is handed is a
+    request the route promised to serve.
+
+    ``context`` is this attempt's own execution facts (:class:`AttemptContext`),
+    carrying the budget the attempt may use exactly as it does for
+    :meth:`TextProvider.complete`.
+
+    What the provider returns is upstream data translated into the canonical
+    shape: one entry per generated image, each carrying the payload or location
+    the upstream reported and the revised prompt when there is one, the usage
+    the upstream reported, and the invocation the attempt belongs to. The
+    provider reports what the upstream said rather than what the caller asked
+    for: an entry the canonical representation cannot carry — a provider
+    annotation with no canonical target, say — is refused with a malformed-
+    response error naming it rather than trimmed, so another eligible route may
+    answer correctly (PRD sections 9.1 and 11.2).
+    """
+
+    async def generate(
+        self,
+        route: Route,
+        request: ImageRequest,
+        context: AttemptContext,
+    ) -> ImageResponse:
+        """Call the upstream named by ``route`` and return the canonical images.
+
+        Performs one gateway attempt for exactly one route, under the same
+        policy as :meth:`TextProvider.complete`: it does not retry, does not
+        fall back to another route, and does not choose between routes (PRD
+        sections 9.2 and 11.3). It applies the budget on ``context`` to the
+        call it makes, so the upstream client is given the gateway's deadline
+        rather than one of its own choosing (PRD section 9.6).
+
+        The parameters forwarded are the ones the route advertises and the
+        upstream can honour: a parameter the caller stated that the dialect's
+        provider configuration does not accept is refused with a capability
+        error naming it rather than forwarded to an opaque upstream failure
+        (PRD sections 9.5 and 9.7).
 
         One attempt is not the same as one upstream request. An implementation
         may reach a library that retries internally without the gateway's
