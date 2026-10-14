@@ -1,0 +1,487 @@
+"""The Invoke RPC, driven the way a caller drives it (PRD sections 5, 5.1, 5.2 and 5.4).
+
+Every test here runs against a real ``grpc.aio`` server on an ephemeral loopback
+port, reached through the generated :class:`ModelGatewayServiceStub`, so what is
+asserted is what crosses the wire: the canonical invocation the provider was
+handed, the protobuf answer the caller reads back, and the gRPC status a refusal
+carries. Only the upstream is a stand-in — the provider is the one thing this
+layer does not own — and it records every call, which is how "the provider was
+never called" is proved rather than assumed.
+
+The server is assembled here rather than through
+:class:`~model_gateway.grpc.server.GrpcServer` because that class registers every
+RPC of the service while this file tests one: a server carrying only ``Invoke``
+keeps each failure attributable to the handler under test. It binds
+``127.0.0.1:0``, so the port is the operating system's choice and no test can
+collide with another or with a running deployment.
+
+**An answer carrying a tool call, an image or a refusal is translated, not
+refused.** The canonical answer is an ordered sequence of output items and the
+contract carries the same shapes, so the inference service's text path — which
+stamps the gateway's own facts onto the provider's answer and changes nothing
+else — hands all three to the caller. Nothing on this path raises a capability
+error for what an *answer* carries: the capability rules are request-side, and
+they refuse what the caller stated before any provider is called (PRD section
+9.5). The three tests named for those answers pin the behaviour that actually
+happens, which is the opposite of refusing a provider's own successful answer.
+
+The refusal tests assert the status a caller reads, which is what catches an
+abort that never took effect: ``grpc.aio``'s ``ServicerContext.abort`` is a
+coroutine, so an abort that is not awaited leaves the call to fail as
+``UNKNOWN`` instead of the category's own status.
+"""
+
+from contextlib import asynccontextmanager
+
+import grpc
+import pytest
+
+from model_gateway.capabilities import Capability
+from model_gateway.config import Settings
+from model_gateway.config.routes import Operation, Route
+from model_gateway.domain import (
+    FinishReason,
+    ImagePart,
+    InvocationRequest,
+    InvocationResponse,
+    RefusalPart,
+    TextPart,
+    ToolCall,
+    Usage,
+)
+from model_gateway.errors import UnavailableError
+from model_gateway.grpc import gateway_pb2 as pb
+from model_gateway.grpc import gateway_pb2_grpc
+from model_gateway.grpc.identity import Authenticator
+from model_gateway.grpc.invoke import Invoke
+from model_gateway.inference import InferenceService
+from model_gateway.providers.mock import MockProvider, MockSpec
+from model_gateway.registry import ModelRegistry
+from model_gateway.security.api_keys import ApiKeySet
+
+API_KEY = "sk-gateway-test-key"
+TENANT = "tenant-a"
+# A tenant no configured key is bound to, so a claim of it disagrees with every
+# credential this file's key set can produce.
+UNBOUND_TENANT = "tenant-no-key-is-bound-to"
+UPSTREAM_ENDPOINT = "https://upstream.internal.example/v1"
+UPSTREAM_KEY = "sk-upstream-secret-key"
+PUBLIC_MODEL = "text-default"
+PRIMARY_MODEL = "upstream-text"
+FALLBACK_MODEL = "fallback-text"
+
+_HOST = "127.0.0.1"
+
+
+def text_route(index: int, model_id: str) -> Route:
+    """One configured text route, with the capabilities a chat invocation needs."""
+    return Route(
+        operation=Operation.TEXT,
+        index=index,
+        endpoint=UPSTREAM_ENDPOINT,
+        base_url=UPSTREAM_ENDPOINT,
+        model_id=model_id,
+        format="openai",
+        api_key=UPSTREAM_KEY,
+        capabilities=frozenset({Capability.CHAT, Capability.TOOLS}),
+        extra_headers={},
+        allow_absolute_path_url=False,
+    )
+
+
+def make_registry(*, fallback: bool = False) -> ModelRegistry:
+    """A registry serving ``text-default``, optionally with a second route behind it."""
+    routes = [text_route(0, PRIMARY_MODEL)]
+    if fallback:
+        routes.append(text_route(1, FALLBACK_MODEL))
+    return ModelRegistry(tuple(routes))
+
+
+def user_message(text: str) -> pb.Message:
+    return pb.Message(role=pb.ROLE_USER, content=(pb.ContentPart(text=pb.TextPart(text=text)),))
+
+
+def request(**overrides) -> pb.InvokeRequest:
+    """An ``InvokeRequest`` a caller could send: one user turn, the modality stated.
+
+    ``response_modality`` is stated because the contract carries no default for
+    it: an unstated modality is the ``*_UNSPECIFIED`` zero value, which the
+    translation refuses rather than reading as text (see
+    :func:`test_an_unstated_enum_is_refused`).
+    """
+    fields = {
+        "model": PUBLIC_MODEL,
+        "messages": (user_message("Explain recursion."),),
+        "response_modality": pb.RESPONSE_MODALITY_TEXT,
+    }
+    fields.update(overrides)
+    return pb.InvokeRequest(**fields)
+
+
+def bearer(key: str | None = API_KEY) -> tuple[tuple[str, str], ...]:
+    """The call metadata presenting ``key``, or nothing when ``key`` is ``None``."""
+    return () if key is None else (("authorization", f"Bearer {key}"),)
+
+
+class _InvokeOnlyServicer(gateway_pb2_grpc.ModelGatewayServiceServicer):
+    """Dispatch ``Invoke`` to the handler under test, and nothing else."""
+
+    def __init__(self, invoke: Invoke) -> None:
+        self._invoke = invoke
+
+    async def Invoke(self, request, context):
+        return await self._invoke.invoke(request, context)
+
+
+class ScriptedProvider:
+    """A ``TextProvider`` double answering with the canonical response it was given.
+
+    :class:`~model_gateway.providers.mock.MockProvider` builds its answer from
+    text and tool calls, so an answer carrying an image part or a refusal is not
+    a shape its spec can express; the tests about those answers state the
+    canonical response directly. What the double records is the same triple the
+    mock records, so "the provider was never called" reads the same either way.
+    """
+
+    def __init__(self, response: InvocationResponse) -> None:
+        self._response = response
+        self.calls: list[tuple[Route, InvocationRequest, object]] = []
+
+    async def complete(self, route: Route, request, context) -> InvocationResponse:
+        self.calls.append((route, request, context))
+        return self._response
+
+
+@asynccontextmanager
+async def serve(
+    provider,
+    *,
+    registry: ModelRegistry | None = None,
+    auth_enabled: bool = True,
+):
+    """A real in-process gRPC server serving one ``Invoke`` handler, and a stub for it.
+
+    The server, the authenticator and the inference service are built from the
+    same objects the listener builds them from, so a test exercises the real
+    authentication policy and the real reliability policy rather than a stand-in
+    for either. The port is reserved before the server starts, so the address the
+    stub dials is the one this server bound and never a guess at a free port.
+    """
+    settings = Settings.from_env(
+        {
+            "GATEWAY_AUTH_ENABLED": "true" if auth_enabled else "false",
+            "GATEWAY_API_KEYS": f"{API_KEY}:{TENANT}",
+        }
+    )
+    authenticator = Authenticator(
+        ApiKeySet.from_settings(settings),
+        auth_enabled=settings.auth_enabled,
+        allow_anonymous_health=settings.allow_anonymous_health,
+    )
+    service = InferenceService(registry if registry is not None else make_registry(), provider)
+    server = grpc.aio.server()
+    port = server.add_insecure_port(f"{_HOST}:0")
+    gateway_pb2_grpc.add_ModelGatewayServiceServicer_to_server(
+        _InvokeOnlyServicer(Invoke(authenticator, service)), server
+    )
+    await server.start()
+    channel = grpc.aio.insecure_channel(f"{_HOST}:{port}")
+    try:
+        yield gateway_pb2_grpc.ModelGatewayServiceStub(channel)
+    finally:
+        await channel.close()
+        await server.stop(grace=None)
+
+
+@pytest.fixture
+def provider() -> MockProvider:
+    """The deterministic provider the fixture's server is wired to."""
+    return MockProvider()
+
+
+@pytest.fixture
+async def stub(provider):
+    """A running in-process server over ``provider``, stopped when the test ends."""
+    async with serve(provider) as running:
+        yield running
+
+
+async def test_a_successful_invocation_round_trips(stub, provider):
+    response = await stub.Invoke(request(invocation_id="inv-1"), metadata=bearer())
+
+    assert response.invocation_id == "inv-1"
+    assert response.model == PUBLIC_MODEL
+    assert response.upstream_model == PRIMARY_MODEL
+    assert [item.content.text.text for item in response.output] == ["Explain recursion."]
+    assert response.finish_reason == pb.FINISH_REASON_STOP
+    assert len(provider.calls) == 1
+
+
+async def test_the_provider_is_handed_the_canonical_request(stub, provider):
+    await stub.Invoke(
+        request(
+            invocation_id="inv-2",
+            actor_id="actor-1",
+            agent_id="agent-1",
+            system_prompt="Answer briefly.",
+        ),
+        metadata=bearer(),
+    )
+
+    route, invocation, _ = provider.calls[0]
+    assert route.model_id == PRIMARY_MODEL
+    assert invocation.model == PUBLIC_MODEL
+    assert invocation.invocation_id == "inv-2"
+    assert invocation.actor_id == "actor-1"
+    assert invocation.agent_id == "agent-1"
+    assert invocation.system_instruction == "Answer briefly."
+    assert [
+        (
+            message.role.value,
+            "".join(part.text for part in message.content if isinstance(part, TextPart)),
+        )
+        for message in invocation.messages
+    ] == [("user", "Explain recursion.")]
+
+
+async def test_the_invocation_carries_the_credentials_tenant(stub, provider):
+    # The caller claims no tenant at all, so the tenant the provider sees can
+    # only have come from the credential.
+    await stub.Invoke(request(), metadata=bearer())
+
+    _, invocation, _ = provider.calls[0]
+    assert invocation.tenant_id == TENANT
+
+
+async def test_a_claimed_tenant_matching_the_credential_is_accepted(stub, provider):
+    response = await stub.Invoke(request(tenant_id=TENANT), metadata=bearer())
+
+    _, invocation, _ = provider.calls[0]
+    assert invocation.tenant_id == TENANT
+    assert response.model == PUBLIC_MODEL
+
+
+async def test_an_unauthenticated_call_is_refused_before_the_provider(stub, provider):
+    with pytest.raises(grpc.aio.AioRpcError) as raised:
+        await stub.Invoke(request(), metadata=bearer(None))
+
+    assert raised.value.code() is grpc.StatusCode.UNAUTHENTICATED
+    assert provider.calls == []
+
+
+async def test_a_rejected_credential_is_refused(stub, provider):
+    with pytest.raises(grpc.aio.AioRpcError) as raised:
+        await stub.Invoke(request(), metadata=bearer("sk-not-a-configured-key"))
+
+    assert raised.value.code() is grpc.StatusCode.UNAUTHENTICATED
+    assert provider.calls == []
+
+
+async def test_a_claimed_tenant_that_disagrees_is_refused(stub, provider):
+    with pytest.raises(grpc.aio.AioRpcError) as raised:
+        await stub.Invoke(request(tenant_id=UNBOUND_TENANT), metadata=bearer())
+
+    assert raised.value.code() is grpc.StatusCode.PERMISSION_DENIED
+    assert provider.calls == []
+
+
+async def test_an_unknown_model_is_refused_and_the_provider_is_never_called(stub, provider):
+    with pytest.raises(grpc.aio.AioRpcError) as raised:
+        await stub.Invoke(request(model="no-such-model"), metadata=bearer())
+
+    assert raised.value.code() is grpc.StatusCode.NOT_FOUND
+    assert provider.calls == []
+
+
+async def test_a_provider_failure_keeps_its_own_status():
+    provider = MockProvider(MockSpec(error=UnavailableError("the upstream is unreachable")))
+
+    async with serve(provider) as stub:
+        with pytest.raises(grpc.aio.AioRpcError) as raised:
+            await stub.Invoke(request(), metadata=bearer())
+
+    assert raised.value.code() is grpc.StatusCode.UNAVAILABLE
+    assert "provider_unavailable" in raised.value.details()
+    assert len(provider.calls) == 1
+
+
+async def test_an_unstated_enum_is_refused():
+    # No response_modality: the wire carries the *_UNSPECIFIED zero value, which
+    # is not a modality the contract defines.
+    provider = MockProvider()
+
+    async with serve(provider) as stub:
+        with pytest.raises(grpc.aio.AioRpcError) as raised:
+            await stub.Invoke(
+                pb.InvokeRequest(model=PUBLIC_MODEL, messages=(user_message("hi"),)),
+                metadata=bearer(),
+            )
+
+    assert raised.value.code() is grpc.StatusCode.INVALID_ARGUMENT
+    assert provider.calls == []
+
+
+async def test_a_content_part_carrying_no_kind_is_refused():
+    provider = MockProvider()
+    empty = pb.Message(role=pb.ROLE_USER, content=(pb.ContentPart(),))
+
+    async with serve(provider) as stub:
+        with pytest.raises(grpc.aio.AioRpcError) as raised:
+            await stub.Invoke(request(messages=(empty,)), metadata=bearer())
+
+    assert raised.value.code() is grpc.StatusCode.INVALID_ARGUMENT
+    assert provider.calls == []
+
+
+async def test_an_answer_carrying_a_tool_call_is_translated():
+    provider = MockProvider(
+        MockSpec(
+            text="Let me look that up.",
+            tool_calls=(ToolCall(id="call_1", name="lookup", arguments={"query": "recursion"}),),
+            finish_reason=FinishReason.TOOL_CALLS,
+        )
+    )
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    assert [item.WhichOneof("item") for item in response.output] == ["content", "tool_call"]
+    assert response.output[0].content.text.text == "Let me look that up."
+    call = response.output[1].tool_call
+    assert call.id == "call_1"
+    assert call.name == "lookup"
+    assert call.arguments.struct_value.fields["query"].string_value == "recursion"
+    assert response.finish_reason == pb.FINISH_REASON_TOOL_CALLS
+
+
+async def test_a_tool_choice_reaches_the_provider(stub, provider):
+    await stub.Invoke(
+        request(
+            tools=(pb.ToolDefinition(name="lookup", description="Look a term up."),),
+            tool_choice=pb.ToolChoice(mode=pb.TOOL_CHOICE_MODE_SPECIFIC, name="lookup"),
+        ),
+        metadata=bearer(),
+    )
+
+    _, invocation, _ = provider.calls[0]
+    assert [declared.name for declared in invocation.tools] == ["lookup"]
+    assert invocation.tool_choice is not None
+    assert invocation.tool_choice.mode.value == "specific"
+    assert invocation.tool_choice.name == "lookup"
+
+
+async def test_an_answer_carrying_an_image_is_translated():
+    provider = ScriptedProvider(
+        InvocationResponse(
+            model=PUBLIC_MODEL,
+            upstream_model=PRIMARY_MODEL,
+            content=(ImagePart(data="aW1hZ2UtYnl0ZXM=", media_type="image/png"),),
+            finish_reason=FinishReason.STOP,
+            raw_finish_reason="stop",
+        )
+    )
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    image = response.output[0].content.image
+    assert image.WhichOneof("source") == "data"
+    assert image.data == "aW1hZ2UtYnl0ZXM="
+    assert image.media_type == "image/png"
+
+
+async def test_an_answer_carrying_a_refusal_is_translated():
+    provider = ScriptedProvider(
+        InvocationResponse(
+            model=PUBLIC_MODEL,
+            upstream_model=PRIMARY_MODEL,
+            content=(RefusalPart(text="I cannot help with that."),),
+            finish_reason=FinishReason.CONTENT_FILTER,
+            raw_finish_reason="content_filter",
+        )
+    )
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    assert response.output[0].content.refusal.text == "I cannot help with that."
+    assert response.finish_reason == pb.FINISH_REASON_CONTENT_FILTER
+
+
+async def test_an_unreported_usage_count_is_not_rendered_as_zero():
+    provider = MockProvider(MockSpec(usage=Usage(input_tokens=25)))
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    assert response.usage.HasField("input_tokens")
+    assert response.usage.input_tokens == 25
+    assert not response.usage.HasField("output_tokens")
+    assert not response.usage.HasField("total_tokens")
+    assert not response.usage.HasField("cached_tokens")
+
+
+async def test_the_usage_the_provider_reported_is_carried():
+    provider = MockProvider(
+        MockSpec(usage=Usage(input_tokens=25, output_tokens=42, total_tokens=67))
+    )
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    assert response.usage.HasField("input_tokens")
+    assert response.usage.input_tokens == 25
+    assert response.usage.output_tokens == 42
+    assert response.usage.total_tokens == 67
+
+
+async def test_attempt_count_is_one_when_the_primary_route_answered(stub):
+    response = await stub.Invoke(request(), metadata=bearer())
+
+    assert response.attempt_count == 1
+    assert response.fallback_used is False
+
+
+async def test_a_fallback_reports_the_attempts_the_gateway_made():
+    provider = MockProvider(
+        [
+            MockSpec(error=UnavailableError("the primary route is unreachable")),
+            MockSpec(text="Answered by the fallback."),
+        ]
+    )
+
+    async with serve(provider, registry=make_registry(fallback=True)) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    assert [route.model_id for route, _, _ in provider.calls] == [
+        PRIMARY_MODEL,
+        FALLBACK_MODEL,
+    ]
+    assert response.attempt_count == 2
+    assert response.fallback_used is True
+    assert response.upstream_model == FALLBACK_MODEL
+    assert response.output[0].content.text.text == "Answered by the fallback."
+
+
+async def test_a_raw_finish_reason_is_carried_beside_its_classification():
+    provider = MockProvider(MockSpec(finish_reason=FinishReason.UNKNOWN, raw_finish_reason="eos"))
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    assert response.finish_reason == pb.FINISH_REASON_UNKNOWN
+    assert response.raw_finish_reason == "eos"
+
+
+async def test_an_anonymous_call_can_claim_no_tenant():
+    # With authentication disabled the caller is anonymous, and the tenant rule
+    # discards its claim rather than propagating it: a request field can never
+    # create a tenant.
+    provider = MockProvider()
+
+    async with serve(provider, auth_enabled=False) as stub:
+        response = await stub.Invoke(request(tenant_id=UNBOUND_TENANT), metadata=bearer(None))
+
+    _, invocation, _ = provider.calls[0]
+    assert invocation.tenant_id is None
+    assert response.model == PUBLIC_MODEL
