@@ -22,18 +22,31 @@ ID raises carries none of it (PRD section 4.3, acceptance criterion 12).
 A :class:`ModelInfo` is derived from the operation's routes. Its capabilities are
 the capabilities the *primary* route declares, because that is the route that
 would serve the model; a fallback route the primary does not need is not evidence
-the primary can do more. Its advertised limits are the ones the deployment
-configured for the operation (PRD sections 4.3, 6.1 and 6.3):
-``TEXT_LLM_CONTEXT_WINDOW`` and ``TEXT_LLM_MAX_OUTPUT_TOKENS`` for the text
-operation, which are environment configuration the route model does not carry
-and are read from the environment the registry was built from, and the declared
-embedding dimensionality for the embeddings operation, which is a property of
-the *primary route* (``EMBEDDINGS_DIMENSIONS``, or a ``dimensions`` entry on it),
-because the inference path checks every answer against the dimensionality of the
-route that produced it rather than against one operation-wide setting. An
-operation with no configured route is not listed at all, which is what makes an
-absent optional capability disabled rather than fatal to the others (PRD
-section 6).
+the primary can do more. That single rule covers every operation, and it is the
+rule that lets a caller read an image model's contract off the listing: an image
+route declares ``generation``, and ``editing`` only when the operator stated it
+(PRD section 6.2), so the advertised set is what tells a caller whether the model
+can be asked to edit an image as well as to produce one — and an image route that
+declares ``generation`` alone is refused an edit request rather than handed one
+(PRD section 4.6).
+
+Its advertised limits are the ones the deployment configured for the operation
+(PRD sections 4.3, 6.1 and 6.3): ``TEXT_LLM_CONTEXT_WINDOW`` and
+``TEXT_LLM_MAX_OUTPUT_TOKENS`` for the text operation, which are environment
+configuration the route model does not carry and are read from the environment
+the registry was built from, and the declared embedding dimensionality for the
+embeddings operation, which is a property of the *primary route*
+(``EMBEDDINGS_DIMENSIONS``, or a ``dimensions`` entry on it), because the
+inference path checks every answer against the dimensionality of the route that
+produced it rather than against one operation-wide setting. The image operation
+advertises no limit: an ``IMAGE_GEN_*`` block configures neither a context window
+nor a dimensionality, and an unconfigured limit is not a limit of zero.
+
+An operation with no configured route is not listed at all, which is what makes
+an absent optional capability disabled rather than fatal to the others (PRD
+section 6). Image generation is one of those optional capabilities: a deployment
+that configures no ``IMAGE_GEN_*`` block serves text and embeddings and publishes
+no image model, and ``image-default`` resolves to nothing at all.
 """
 
 import os
@@ -79,7 +92,12 @@ class ModelInfo:
     ``capabilities`` are the capabilities the primary route declares — the route
     that would actually serve this model. They are advertised so a caller can
     choose a model and know what it can ask for (PRD section 4.3), and they are the
-    set the inference service enforces against the route (PRD section 9.5).
+    set the inference service enforces against the route (PRD section 9.5). The
+    reading differs per operation because the capability vocabulary does: a text
+    model advertises ``chat`` and whatever else its route declares, an embeddings
+    model ``embeddings``, and an image model ``generation`` — with ``editing``
+    beside it only when the operator declared that too (PRD section 6.2), which is
+    how a caller learns whether the model accepts an edit request or refuses one.
 
     ``context_window`` and ``max_output_tokens`` are the text operation's
     advertised limits and ``dimensions`` the embeddings operation's (PRD sections
