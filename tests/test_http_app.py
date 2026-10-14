@@ -5,19 +5,20 @@ cover what the two things the handlers cannot: that the routes and the error
 handler are installed on the application the server actually runs, and that the
 health endpoints keep working beside them.
 
-They also cover what the factory refuses to do. No provider is selected
-implicitly, so the default path fails startup with an actionable message instead
-of serving the deterministic mock, and a serving application is always one
-somebody injected a provider into.
+They also cover what the factory wires when nothing is injected: the production
+LiteLLM binding over the registry's routes, with the configured attempt budget,
+so a process started with configuration alone really calls upstream. An
+injected service is still used verbatim — that is how tests bind the
+deterministic mock, and how a caller substitutes a provider of its own.
 """
 
 import pytest
 from blacksheep import Content, JSONContent
 from blacksheep.testing import TestClient
 
-from model_gateway.app import NO_PROVIDER_MESSAGE, create_app
+from model_gateway.app import create_app
 from model_gateway.capabilities import Capability
-from model_gateway.config import ConfigurationError, Settings
+from model_gateway.config import Settings
 from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import FinishReason, InvocationResponse, TextPart, Usage
 from model_gateway.inference import InferenceService
@@ -153,26 +154,84 @@ async def test_no_public_response_carries_upstream_configuration(client):
         assert "upstream-text" not in body
 
 
-def test_the_factory_refuses_to_start_without_an_injected_service():
-    """The default path fails rather than serving the deterministic mock.
+async def test_the_factory_builds_the_litellm_provider_when_no_service_is_injected(monkeypatch):
+    """The default path wires the real binding, never an implicit stand-in.
 
-    A process that started with the mock would advertise ``text-default``, accept
-    a production chat request and answer it with an echo — a fake that looks
-    exactly like working upstream inference.
+    A factory that picked the deterministic mock would advertise
+    ``text-default``, accept a production chat request and answer it with an
+    echo — a fake that looks exactly like working upstream inference.
+
+    The application is started and stopped, not merely built: blacksheep's
+    default router is shared process-wide, and an application that is never
+    started leaves its routes queued in it for the next application.
     """
-    with pytest.raises(ConfigurationError) as error:
-        create_app(Settings.from_env({}))
+    constructed = []
 
-    assert str(error.value) == NO_PROVIDER_MESSAGE
-    assert "mock" in str(error.value)
+    class RecordingProvider:
+        def __init__(self):
+            constructed.append(self)
+
+    monkeypatch.setattr("model_gateway.app.LiteLLMProvider", RecordingProvider)
+
+    app = create_app(Settings.from_env({}))
+    await app.start()
+    await app.stop()
+
+    assert len(constructed) == 1
 
 
-def test_the_factory_refuses_to_start_with_a_registry_but_no_service():
-    with pytest.raises(ConfigurationError):
-        create_app(Settings.from_env({}), registry=registry())
+async def test_the_factory_builds_the_litellm_service_with_a_registry_but_no_service(
+    monkeypatch,
+):
+    constructed = []
+
+    class RecordingProvider:
+        def __init__(self):
+            constructed.append(self)
+
+    monkeypatch.setattr("model_gateway.app.LiteLLMProvider", RecordingProvider)
+
+    app = create_app(Settings.from_env({}), registry=registry())
+    await app.start()
+    await app.stop()
+
+    assert len(constructed) == 1
 
 
-async def test_an_injected_service_is_the_only_way_to_a_serving_application(provider):
+async def test_the_factory_gives_the_built_service_the_configured_attempt_budget(monkeypatch):
+    """Every attempt context carries the configured provider timeout (PRD 9.6).
+
+    A later slice makes that budget the minimum of the configured timeout and
+    the invocation deadline remaining when the attempt begins (PRD section 15);
+    the service constructor is where the configured value enters.
+    """
+    captured = {}
+
+    class RecordingService:
+        def __init__(self, registry, provider, *, attempt_timeout=None):
+            captured["attempt_timeout"] = attempt_timeout
+
+    monkeypatch.setattr("model_gateway.app.InferenceService", RecordingService)
+
+    app = create_app(Settings.from_env({"PROVIDER_TIMEOUT_SECONDS": "42"}))
+    await app.start()
+    await app.stop()
+
+    assert captured["attempt_timeout"] == 42.0
+
+
+async def test_the_default_path_serves_an_application_with_the_real_binding():
+    app = create_app(Settings.from_env({}))
+    await app.start()
+    try:
+        client = TestClient(app)
+        assert (await client.get("/healthz")).status == 200
+        assert (await client.get("/readyz")).status == 200
+    finally:
+        await app.stop()
+
+
+async def test_an_injected_service_is_used_verbatim(provider):
     models = registry()
     app = create_app(
         Settings.from_env({}),
