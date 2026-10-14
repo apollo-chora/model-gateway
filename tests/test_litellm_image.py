@@ -33,6 +33,10 @@ from litellm.litellm_core_utils.llm_response_utils.convert_dict_to_response impo
     convert_to_model_response_object,
 )
 from litellm.llms.custom_httpx.http_handler import HTTPHandler
+from litellm.llms.openai.image_generation.dall_e_3_transformation import (
+    DallE3ImageGenerationConfig,
+)
+from litellm.llms.openai.image_generation.gpt_transformation import GPTImageGenerationConfig
 from litellm.types.utils import ImageObject, ImageResponse
 from litellm.types.utils import Usage as LiteLLMUsage
 
@@ -50,13 +54,14 @@ from model_gateway.providers.base import AttemptContext, ImageProvider
 from model_gateway.providers.litellm_image import (
     IMAGE_DIALECTS,
     LiteLLMImageProvider,
-    _SyncPinnedAddressTransport,
+    _forward_response_format,
+    _ImageConfig,
+    _route_image_config,
     _ZeroRetryAsyncOpenAI,
     ensure_supported_image_dialect,
     from_litellm_image_usage,
 )
-from model_gateway.security.transport import PinnedAddressTransport
-from model_gateway.security.url_policy import UrlPolicyError
+from model_gateway.security.transport import PinnedAddressTransport, SyncPinnedAddressTransport
 
 ENDPOINT = "https://upstream.internal.example/v1"
 SECRET_KEY = "sk-upstream-secret-key"
@@ -205,6 +210,24 @@ class TestTheRefusal:
         for verified in sorted(IMAGE_DIALECTS):
             assert verified in message
 
+    def test_the_refusal_does_not_offer_synchronicity_as_a_reason(self) -> None:
+        """A synchronous pinned transport exists and works, so sync is not why a path is refused.
+
+        The generic image dialects are served synchronously and are verified, so
+        a message that named synchronicity as a reason for refusal would send a
+        maintainer after the wrong thing. The three real reasons are the ones
+        stated instead.
+        """
+        with pytest.raises(FailedPreconditionError) as excinfo:
+            ensure_supported_image_dialect(UNVERIFIED_DIALECT)
+
+        message = excinfo.value.message
+        assert "discard the injected client" in message
+        assert "no usable branch" in message
+        assert "not yet verified" in message
+        assert "Being synchronous is not one of those reasons" in message
+        assert "synchronous pinned transport" in message
+
     @pytest.mark.parametrize("dialect", [UNVERIFIED_DIALECT, "anthropic", "openrouter"])
     async def test_an_unverified_dialect_is_refused_before_any_call(self, wire, dialect) -> None:
         provider, entry = wire()
@@ -286,10 +309,10 @@ class TestTheOpenAISdkPath:
         assert client.max_retries == 0
 
 
-def _sync_pinned_transport_of(handler: object) -> _SyncPinnedAddressTransport:
+def _sync_pinned_transport_of(handler: object) -> SyncPinnedAddressTransport:
     """The pinned transport the generic handler's client connects through."""
     transport = handler.client._transport  # pyright: ignore[reportPrivateUsage]
-    assert isinstance(transport, _SyncPinnedAddressTransport)
+    assert isinstance(transport, SyncPinnedAddressTransport)
     return transport
 
 
@@ -322,7 +345,7 @@ class TestTheGenericImagePath:
         handler = injected_client(entry)
         assert isinstance(handler, HTTPHandler)
         assert handler.follow_redirects is False
-        assert isinstance(_sync_pinned_transport_of(handler), _SyncPinnedAddressTransport)
+        assert isinstance(_sync_pinned_transport_of(handler), SyncPinnedAddressTransport)
         http_client = handler.client
         assert http_client.follow_redirects is False
         assert http_client.trust_env is False
@@ -370,20 +393,20 @@ class TestTheAttemptsOwnTransport:
     async def test_each_attempt_gets_its_own_transport_and_closes_it(
         self, wire, monkeypatch, dialect
     ) -> None:
-        closed: list[PinnedAddressTransport] = []
+        closed: list[PinnedAddressTransport | SyncPinnedAddressTransport] = []
         original_aclose = PinnedAddressTransport.aclose
-        original_close = _SyncPinnedAddressTransport.close
+        original_close = SyncPinnedAddressTransport.close
 
         async def recording_aclose(self: PinnedAddressTransport) -> None:
             closed.append(self)
             await original_aclose(self)
 
-        def recording_close(self: _SyncPinnedAddressTransport) -> None:
+        def recording_close(self: SyncPinnedAddressTransport) -> None:
             closed.append(self)
             original_close(self)
 
         monkeypatch.setattr(PinnedAddressTransport, "aclose", recording_aclose)
-        monkeypatch.setattr(_SyncPinnedAddressTransport, "close", recording_close)
+        monkeypatch.setattr(SyncPinnedAddressTransport, "close", recording_close)
         provider, entry = wire()
 
         await provider.generate(make_route(format=dialect), make_request(), make_context())
@@ -522,11 +545,16 @@ class TestTheRealOpenAISdkCall:
     async def test_a_500_upstream_is_answered_by_exactly_one_wire_request(self) -> None:
         """The pinned SDK client makes one wire request per gateway attempt (PRD section 11.3).
 
-        Measured against the pinned library: the image entry point assigns
-        ``max_retries`` (default 2) onto the client it is handed, and a plain SDK
-        client is retried twice — three wire requests inside one gateway
-        attempt. The binding's pinned subclass keeps the count at zero, so the
-        gateway's attempt count and the upstream's request count agree here.
+        The assertion is the wire count through the real entry point, not the
+        client's ``max_retries`` attribute: the attribute is only how the pin is
+        implemented, and a library upgrade that set it another way would leave an
+        attribute test passing while the retries came back. Measured against the
+        pinned library: the image entry point assigns ``max_retries`` (default 2)
+        onto the client it is handed, and a plain SDK client is retried twice —
+        three wire requests inside one gateway attempt (measured again with the
+        pin removed from this same setup: three requests arrive here). The
+        binding's pinned subclass keeps the count at zero, so the gateway's
+        attempt count and the upstream's request count agree.
         """
         inner = RecordingAsyncTransport(
             httpx.Response(
@@ -740,6 +768,74 @@ class TestTheResponseFormatConstraint:
             await provider.generate(
                 make_route(), make_request(response_format="b64_json"), make_context()
             )
+
+
+class TestTheBase64OnlyConfigurations:
+    """The honour-by-default case is keyed on the measured configuration, not on the value.
+
+    The case exists because three configurations were driven and found to have
+    no representation but base64. It must not be expressible as the general rule
+    "drop the parameter when the requested value is probably the default",
+    because a dialect that merely joins :data:`IMAGE_DIALECTS` would then inherit
+    it without any measurement of its own.
+    """
+
+    @pytest.mark.parametrize(
+        "dialect, model_id",
+        [
+            ("openai", GPT_MODEL_ID),
+            ("openai", "not-a-real-model"),
+            ("gemini", "gemini-2.5-flash-image-preview"),
+            ("gemini", "imagen-3.0-generate-002"),
+            ("vertex_ai", "imagegeneration@006"),
+            ("vertex_ai", "imagen-3.0-generate-002"),
+        ],
+    )
+    def test_every_verified_route_that_drops_the_parameter_is_a_measured_configuration(
+        self, dialect: str, model_id: str
+    ) -> None:
+        """Every verified route that does not forward ``response_format`` is one that was measured.
+
+        The b64_json case is true of three configurations and of nothing else.
+        A library upgrade that hands a verified dialect a different
+        configuration object fails here — and in the binding it turns the drop
+        into a refusal, which is loud, rather than into a silent claim that an
+        unmeasured upstream returned what was asked for.
+        """
+        config = _route_image_config(make_route(format=dialect, model_id=model_id))
+
+        assert "response_format" not in config.supported
+        assert config.base64_only
+
+    def test_a_measured_configuration_drops_the_parameter(self) -> None:
+        config = _ImageConfig(
+            configuration=GPTImageGenerationConfig(), supported=frozenset()
+        )
+        params: dict[str, object] = {}
+
+        _forward_response_format(params, config, "b64_json")
+
+        assert params == {}
+
+    def test_an_unmeasured_configuration_cannot_inherit_the_case(self) -> None:
+        """The branch is keyed on the configuration's class, not on the stated value.
+
+        ``DallE3ImageGenerationConfig`` is not a measured base64-only
+        configuration — its own upstream honours ``response_format`` — so a
+        route whose configuration is that one, with the parameter stripped from
+        what it accepts, models a dialect that has joined the set without being
+        measured. The stated ``b64_json`` is refused rather than dropped.
+        """
+        config = _ImageConfig(
+            configuration=DallE3ImageGenerationConfig(), supported=frozenset()
+        )
+        params: dict[str, object] = {}
+
+        with pytest.raises(CapabilityError) as excinfo:
+            _forward_response_format(params, config, "b64_json")
+
+        assert params == {}
+        assert excinfo.value.details["capability"] == "response_format"
 
 
 # ---------------------------------------------------------------------------
@@ -1104,73 +1200,3 @@ def _raising(error: Exception):
 class TestTheProtocol:
     def test_the_provider_satisfies_the_image_provider_protocol(self) -> None:
         assert isinstance(LiteLLMImageProvider(), ImageProvider)
-
-
-# ---------------------------------------------------------------------------
-# The synchronous pinned transport
-# ---------------------------------------------------------------------------
-
-
-class _StubInner(httpx.BaseTransport):
-    """An inner transport that answers without a socket and records what it was sent."""
-
-    def __init__(self) -> None:
-        self.requests: list[httpx.Request] = []
-        self.closed = False
-
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        return httpx.Response(200, json={"ok": True}, request=request)
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class TestTheSyncPinnedTransport:
-    """The sync twin pins and refuses exactly as the async one does."""
-
-    def test_the_request_is_rewritten_to_a_validated_address(self) -> None:
-        inner = _StubInner()
-        transport = _SyncPinnedAddressTransport(resolver=recording_resolver, inner=inner)
-
-        with httpx.Client(transport=transport) as client:
-            client.post("https://provider.example/v1/images/generations", json={"prompt": "hi"})
-
-        (request,) = inner.requests
-        assert request.url.host == PUBLIC_ADDRESS
-        # The hostname the caller asked for is preserved for TLS and Host.
-        assert request.extensions["sni_hostname"] == "provider.example"
-        assert request.headers["host"] == "provider.example"
-
-    def test_a_blocked_address_is_refused_before_the_inner_transport_is_reached(self) -> None:
-        inner = _StubInner()
-        transport = _SyncPinnedAddressTransport(resolver=recording_resolver, inner=inner)
-
-        with (
-            httpx.Client(transport=transport) as client,
-            pytest.raises(UrlPolicyError) as raised,
-        ):
-            client.post("https://127.0.0.1/v1/images/generations")
-
-        assert "blocked address" in str(raised.value)
-        assert inner.requests == []
-
-    def test_plain_http_is_refused_unless_insecure_transport_is_enabled(self) -> None:
-        inner = _StubInner()
-        transport = _SyncPinnedAddressTransport(resolver=recording_resolver, inner=inner)
-
-        with (
-            httpx.Client(transport=transport) as client,
-            pytest.raises(UrlPolicyError),
-        ):
-            client.post("http://provider.example/v1/images/generations")
-
-        assert inner.requests == []
-
-    def test_the_inner_transport_is_closed_with_the_wrapper(self) -> None:
-        inner = _StubInner()
-        transport = _SyncPinnedAddressTransport(resolver=recording_resolver, inner=inner)
-
-        transport.close()
-
-        assert inner.closed

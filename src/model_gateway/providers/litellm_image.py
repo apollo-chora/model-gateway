@@ -39,8 +39,9 @@ runnable here, as PRD section 6.2 records:
     then succeeds on the library's own default client, which re-resolves the
     hostname at connect time and follows redirects, with nothing raised. The
     binding hands that path a synchronous ``HTTPHandler`` built around
-    :class:`_SyncPinnedAddressTransport`, so the synchronous client this path
-    requires is pinned and non-redirecting exactly as the asynchronous one is.
+    :class:`~model_gateway.security.transport.SyncPinnedAddressTransport`, so
+    the synchronous client this path requires is pinned and non-redirecting
+    exactly as the asynchronous one is.
 
 ``azure`` — refused
     ``AzureChatCompletions.aimage_generation`` passes ``client=None`` to
@@ -102,16 +103,20 @@ that set contains.
 A stated parameter the configuration does not accept is refused with a
 :class:`~model_gateway.errors.CapabilityError` naming it, because the route
 promised the parameter and the upstream cannot honour it (PRD section 9.5).
-One deliberate exception, measured rather than assumed: every verified
-dialect that does not forward ``response_format`` produces base64 image data
-by construction — the Google Imagen transformations emit ``inlineData`` and
-``bytesBase64Encoded``, and the OpenAI GPT configuration's upstream defaults
-to ``b64_json`` — so a caller who asked for ``b64_json`` on a route that
-does not forward the parameter is honoured by the upstream's own single
-representation and the parameter is not forwarded. A caller who asked for
-``url`` cannot be honoured at all, and is refused. (The dall-e
-configurations list ``response_format`` and forward it explicitly; their
-upstream returns what the caller asked for.)
+One deliberate exception, measured rather than assumed: three specific
+configurations that do not forward ``response_format`` produce base64 image
+data by construction — the Google and Vertex Imagen transformations emit
+``inlineData`` and ``bytesBase64Encoded``, and the OpenAI GPT configuration's
+upstream defaults to ``b64_json`` — so a caller who asked for ``b64_json`` on
+one of those routes is honoured by the upstream's own single representation and
+the parameter is not forwarded. The exception is keyed on those configurations'
+classes (:data:`_BASE64_ONLY_IMAGE_CONFIGS`), not on the value the caller
+stated and not on membership of :data:`IMAGE_DIALECTS`, so a dialect the
+binding has not measured cannot inherit it by joining the set. A caller who
+asked for ``url`` on any route that does not forward the parameter cannot be
+honoured at all, and is refused. (The dall-e configurations list
+``response_format`` and forward it explicitly; their upstream returns what the
+caller asked for.)
 
 The translation of the upstream answer
 --------------------------------------
@@ -119,7 +124,11 @@ PRD section 9.1's four-way classification, applied to every field the binding
 inspects:
 
 * each data entry's ``b64_json``/``url``/``revised_prompt`` are mapped into
-  :class:`~model_gateway.domain.images.GeneratedImage`; an entry carrying a
+  :class:`~model_gateway.domain.images.GeneratedImage`; the ``url`` is carried
+  through as untrusted provider output, neither fetched nor screened here, and
+  must not be treated as a gateway-fetchable URL just because it survived
+  canonical parsing (:class:`~model_gateway.domain.images.GeneratedImage`
+  documents the contract). An entry carrying a
   provider-specific field (a ``thought_signature`` from a Gemini-shaped
   answer, say — measured arriving as ``provider_specific_fields``) or
   carrying neither payload nor location is refused with a
@@ -163,10 +172,17 @@ import ssl
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 from typing import Any, Final
 
 import httpx
+from litellm.llms.base_llm.image_generation.transformation import BaseImageGenerationConfig
 from litellm.llms.custom_httpx.http_handler import HTTPHandler
+from litellm.llms.gemini.image_generation.transformation import GoogleImageGenConfig
+from litellm.llms.openai.image_generation.gpt_transformation import GPTImageGenerationConfig
+from litellm.llms.vertex_ai.image_generation.vertex_imagen_transformation import (
+    VertexAIImagenImageGenerationConfig,
+)
 from litellm.types.utils import LlmProviders
 from litellm.utils import ProviderConfigManager
 
@@ -183,9 +199,9 @@ from model_gateway.providers._litellm import litellm, openai
 from model_gateway.providers.base import AttemptContext
 from model_gateway.providers.litellm_translation import map_litellm_error
 from model_gateway.security.transport import (
-    PinnedAddressTransport,
     attempt_timeout,
     build_async_client,
+    build_sync_client,
 )
 from model_gateway.security.url_policy import Resolver, system_resolver
 
@@ -197,6 +213,26 @@ __all__ = [
 
 _OPENAI_SDK_DIALECTS: Final[frozenset[str]] = frozenset({"openai"})
 _GENERIC_DIALECTS: Final[frozenset[str]] = frozenset({"gemini", "vertex_ai"})
+
+_BASE64_ONLY_IMAGE_CONFIGS: Final[frozenset[type]] = frozenset(
+    {
+        GPTImageGenerationConfig,
+        GoogleImageGenConfig,
+        VertexAIImagenImageGenerationConfig,
+    }
+)
+"""The provider image configurations measured to produce base64 image data by construction.
+
+These are the configurations that do not list ``response_format`` among their
+supported parameters and whose upstream has no other representation to return:
+the Google and Vertex Imagen transformations emit ``inlineData`` and
+``bytesBase64Encoded``, and the OpenAI GPT configuration's upstream defaults to
+``b64_json``. Only these make the ``b64_json`` honour-by-default case in
+:func:`_forward_response_format` true. Membership is by exact class, not by
+dialect and not by subclass, so a dialect that merely joins
+:data:`IMAGE_DIALECTS` — or a configuration that subclasses one of these —
+cannot inherit the case without its own measurement.
+"""
 
 IMAGE_DIALECTS: Final[frozenset[str]] = _OPENAI_SDK_DIALECTS | _GENERIC_DIALECTS
 """The provider dialects this binding has verified end to end for the image entry point.
@@ -215,25 +251,35 @@ def ensure_supported_image_dialect(dialect: str) -> str:
     """Return ``dialect`` when its image HTTP path is verified, and refuse it otherwise.
 
     A dialect whose image path the binding cannot keep behind the transport
-    controls is refused rather than attempted: ``azure``'s path discards the
-    injected client outright, and the dispatch has no image branch at all for
-    the remaining candidates — a model that matches no branch returns an empty
-    ``ImageResponse`` without contacting anything, which is worse than a
-    raised error. Either way the connection would be made to whatever the
-    hostname resolves to at connect time and redirects would be followed,
-    with nothing raised to notice. The refusal names the dialects the image
-    binding can run; the name is configuration, not a secret, so it is safe in
-    a caller-visible message.
+    controls is refused rather than attempted, and the reason is always one of
+    three: the library discards the injected client (``azure`` passes ``None`` to
+    its own request builder), the image dispatch has no usable branch for the
+    dialect (``anthropic`` is not in the dispatch at all and answers an empty
+    ``ImageResponse`` without contacting anything; ``openrouter`` is dispatched
+    but answers with an empty ``data`` list), or the path has simply not been
+    verified. Where a refused path does reach the upstream, the connection is
+    made to whatever the hostname resolves to at connect time and redirects are
+    followed, with nothing raised to notice; where it does not, an empty 200 is
+    worse than a raised error. Being synchronous is *not* one of those reasons:
+    the generic image dialects are synchronous, and the binding pins them through
+    a synchronous pinned transport, so the refusal turns on whether the injected
+    client is honoured and the path is verified, never on whether the path is
+    asynchronous. The refusal names the dialects the image binding can run; the
+    name is configuration, not a secret, so it is safe in a caller-visible
+    message.
     """
     if dialect in IMAGE_DIALECTS:
         return dialect
     verified = ", ".join(repr(name) for name in sorted(IMAGE_DIALECTS))
     raise FailedPreconditionError(
         f"the image binding cannot run the {dialect!r} provider dialect: its HTTP path has "
-        f"not been verified to honour the injected client for the image entry point, and a "
-        f"path that discards it — or that the gateway's pinned transport cannot pin, because "
-        f"it is synchronous — re-resolves the hostname and follows redirects with nothing "
-        f"raised. Verified image dialects are {verified}"
+        f"not been verified to honour the injected client for the image entry point. The "
+        f"paths refused here are the ones that discard the injected client, the ones the "
+        f"image dispatch has no usable branch for, and the ones not yet verified; where such "
+        f"a call proceeds it runs on the library's own client, which re-resolves the hostname "
+        f"and follows redirects with nothing raised. Being synchronous is not one of those "
+        f"reasons — the generic image dialects are synchronous and the binding pins them "
+        f"through a synchronous pinned transport. Verified image dialects are {verified}"
     )
 
 
@@ -259,58 +305,6 @@ class _ZeroRetryAsyncOpenAI(openai.AsyncOpenAI):
     @max_retries.setter
     def max_retries(self, value: int) -> None:
         return
-
-
-class _SyncPinnedAddressTransport(PinnedAddressTransport):
-    """The synchronous twin of the pinned transport, for the image generic path.
-
-    The generic image path is the one HTTP path this binding reaches that is
-    synchronous — the dispatch serves it through ``image_generation_handler``
-    without ``_is_async`` — so the injected client there is a synchronous
-    ``HTTPHandler`` over a synchronous httpx client, while
-    :class:`PinnedAddressTransport` is async-only. The pin itself is not
-    reimplemented: the resolver, the URL policy's own blocked-address checks
-    and the SNI-preserving rewrite are inherited, so what the inner transport
-    receives is exactly what the async twin's would be. Only the delegation to
-    a synchronous inner transport is new. If the transport module ever grows a
-    synchronous pinned transport of its own, this class delegates to it instead
-    of holding its own inner.
-    """
-
-    def __init__(
-        self,
-        *,
-        resolver: Resolver = system_resolver,
-        allow_insecure_transport: bool = False,
-        verify: ssl.SSLContext | bool = True,
-        inner: httpx.BaseTransport | None = None,
-    ) -> None:
-        self._resolver = resolver
-        self._allow_insecure_transport = allow_insecure_transport
-        self._inner: httpx.BaseTransport = (
-            httpx.HTTPTransport(verify=verify) if inner is None else inner
-        )
-
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        """Send ``request`` to a validated address, or refuse it before connecting.
-
-        The refusal behaviour is the inherited :meth:`PinnedAddressTransport._pin`'s:
-        a scheme the policy refuses, or a host that resolves to a blocked
-        address, raises :class:`~model_gateway.security.url_policy.UrlPolicyError`
-        and nothing is sent.
-        """
-        return self._inner.handle_request(self._pin(request))
-
-    def __enter__(self) -> "_SyncPinnedAddressTransport":
-        self._inner.__enter__()
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self._inner.__exit__(*exc_info)
-
-    def close(self) -> None:
-        """Close the inner transport, and with it every pooled connection."""
-        self._inner.close()
 
 
 class _AttemptClient:
@@ -379,22 +373,19 @@ def _generic_image_client(
     synchronously, so ``client=`` must carry a synchronous ``HTTPHandler``
     there; an ``AsyncHTTPHandler`` is silently discarded and the call runs on
     the library's own default client, which re-resolves the hostname and
-    follows redirects. The handler is built from a synchronous httpx client
-    whose transport is :class:`_SyncPinnedAddressTransport`, with
+    follows redirects. The handler is built from the synchronous client of
+    :func:`~model_gateway.security.transport.build_sync_client`, with
     ``follow_redirects=False`` because the handler's own default is the
     library's ``True`` and ``trust_env=False`` so no environment proxy is
     installed between the gateway and the upstream.
     """
     handler = HTTPHandler(
         timeout=attempt_timeout(budget),
-        client=httpx.Client(
-            transport=_SyncPinnedAddressTransport(
-                resolver=resolver,
-                verify=verify,
-                inner=inner_factory(),
-            ),
-            follow_redirects=False,
-            trust_env=False,
+        client=build_sync_client(
+            budget=budget,
+            resolver=resolver,
+            verify=verify,
+            inner=inner_factory(),
         ),
         follow_redirects=False,
     )
@@ -507,8 +498,8 @@ class LiteLLMImageProvider:
         the mapping does not catch (PRD section 15).
         """
         ensure_supported_image_dialect(route.format)
-        supported = _supported_image_params(route)
-        params = _image_params(route, request, context, supported)
+        config = _route_image_config(route)
+        params = _image_params(route, request, context, config)
         try:
             async with self._attempt_client(route, context.timeout) as client:
                 response = await litellm.aimage_generation(**params, client=client)
@@ -548,8 +539,9 @@ class LiteLLMImageProvider:
         )
 
 
-def _supported_image_params(route: Route) -> frozenset[str]:
-    """The image parameters the library's provider configuration accepts for this route.
+@dataclass(frozen=True)
+class _ImageConfig:
+    """The library's own provider image configuration for a route, and what it accepts.
 
     The library raises ``UnsupportedParamsError`` for a request parameter its
     provider configuration does not list, before any request is made (measured),
@@ -558,20 +550,49 @@ def _supported_image_params(route: Route) -> frozenset[str]:
     dispatch hands to it after stripping the provider prefix — asking with the
     prefixed ``<format>/<model_id>`` string would select the OpenAI GPT
     configuration for *every* model, including dall-e (measured).
+
+    ``configuration`` is ``None`` when the library recognises no configuration
+    for the route. ``supported`` is what that configuration lists for the bare
+    model ID. ``base64_only`` is the measured property
+    :func:`_forward_response_format` turns on: whether the configuration is one
+    of :data:`_BASE64_ONLY_IMAGE_CONFIGS`, which is true only of configurations
+    whose upstream was driven and found to have no representation but base64.
     """
-    config = ProviderConfigManager.get_provider_image_generation_config(
+
+    configuration: BaseImageGenerationConfig | None
+    supported: frozenset[str]
+
+    @property
+    def base64_only(self) -> bool:
+        """Whether this configuration's upstream was measured to produce base64 only.
+
+        Membership is by exact class: a subclass of a measured configuration is
+        a different configuration and inherits nothing from this one.
+        """
+        return (
+            self.configuration is not None
+            and type(self.configuration) in _BASE64_ONLY_IMAGE_CONFIGS
+        )
+
+
+def _route_image_config(route: Route) -> _ImageConfig:
+    """The library's provider image configuration for this route, and what it accepts."""
+    configuration = ProviderConfigManager.get_provider_image_generation_config(
         model=route.model_id, provider=LlmProviders(route.format)
     )
-    if config is None:
-        return frozenset()
-    return frozenset(config.get_supported_openai_params(route.model_id))
+    if configuration is None:
+        return _ImageConfig(configuration=None, supported=frozenset())
+    return _ImageConfig(
+        configuration=configuration,
+        supported=frozenset(configuration.get_supported_openai_params(route.model_id)),
+    )
 
 
 def _image_params(
     route: Route,
     request: ImageRequest,
     context: AttemptContext,
-    supported: frozenset[str],
+    config: _ImageConfig,
 ) -> dict[str, object]:
     """Translate an image request into ``litellm.aimage_generation`` keyword arguments.
 
@@ -601,9 +622,9 @@ def _image_params(
         "num_retries": 0,
         "timeout": context.timeout,
     }
-    _forward_param(params, supported, "n", request.n)
-    _forward_param(params, supported, "size", request.size)
-    _forward_response_format(params, supported, request.response_format)
+    _forward_param(params, config.supported, "n", request.n)
+    _forward_param(params, config.supported, "size", request.size)
+    _forward_response_format(params, config, request.response_format)
     return params
 
 
@@ -624,30 +645,46 @@ def _forward_param(
 
 
 def _forward_response_format(
-    params: dict[str, object], supported: frozenset[str], response_format: str | None
+    params: dict[str, object], config: _ImageConfig, response_format: str | None
 ) -> None:
     """Forward ``response_format`` where the configuration accepts it, classify where not.
 
-    Measured behaviour behind the three branches: a configuration that lists
-    ``response_format`` (the dall-e configurations on the ``openai`` dialect)
-    forwards it and the upstream honours it directly. A configuration that
-    does not (the GPT configuration, the Google and Vertex configurations)
-    would have the library raise ``UnsupportedParamsError`` if the parameter
-    reached it, and every one of those dialects produces base64 image data by
-    construction — the Google Imagen transformations emit ``inlineData`` and
-    ``bytesBase64Encoded``, and the OpenAI GPT configuration's upstream defaults
-    to ``b64_json`` — so a caller who asked for ``b64_json`` is honoured by
-    the upstream's own single representation and the parameter is not
-    forwarded. A caller who asked for ``url`` cannot be honoured at all and
-    is refused.
+    Each branch is a measured fact about the configuration the library itself
+    will use, never a rule about the value the caller stated. A configuration
+    that lists ``response_format`` — the dall-e configurations on the ``openai``
+    dialect — forwards it and its upstream honours it directly. A configuration
+    in :data:`_BASE64_ONLY_IMAGE_CONFIGS` does not list it and has no
+    representation but base64: the Google Imagen transformations emit
+    ``inlineData`` and ``bytesBase64Encoded``, and the OpenAI GPT
+    configuration's upstream defaults to ``b64_json``. Only for those is a
+    stated ``b64_json`` honoured by the upstream's own single representation,
+    and only there is the parameter dropped. Anything else is refused with a
+    capability error naming ``response_format``, because forwarding it would
+    reach the library's opaque ``UnsupportedParamsError`` and dropping it would
+    claim a representation was honoured on the strength of no measurement at
+    all.
+
+    The base64 branch is keyed on the configuration's exact class rather than on
+    the stated value, so a dialect that merely joins :data:`IMAGE_DIALECTS` —
+    and a configuration that subclasses a measured one — cannot inherit it. A
+    library upgrade that hands a verified dialect a different configuration
+    therefore turns the drop into a refusal, which is loud, rather than into a
+    silent claim that an unmeasured upstream returned what was asked for.
     """
     if response_format is None:
         return
-    if "response_format" in supported:
+    if "response_format" in config.supported:
         params["response_format"] = response_format
         return
-    if response_format == "b64_json":
+    if response_format == "b64_json" and config.base64_only:
         return
+    if response_format == "b64_json":
+        raise CapabilityError(
+            "the route's dialect and model cannot be honoured for a 'b64_json' request: the "
+            "configuration does not accept the response_format parameter, and this route's "
+            "upstream has not been measured to produce base64 image data by default",
+            details={"capability": "response_format"},
+        )
     raise CapabilityError(
         "the route's dialect and model cannot return images as urls: the configuration does "
         "not accept the response_format parameter, and the images it produces are base64-only",
@@ -731,6 +768,12 @@ def _generated_image_from(item: object) -> GeneratedImage:
     dictionaries its own converter produced, so both shapes are read the same
     way. An entry the canonical representation cannot carry is refused rather
     than coerced (PRD section 9.1).
+
+    An entry's ``url`` is copied through verbatim as the untrusted provider
+    output it is: it is not resolved, not screened against the URL policy and
+    not fetched, here or anywhere else in the binding, and its survival of this
+    mapping is no evidence that it is safe to fetch
+    (:class:`~model_gateway.domain.images.GeneratedImage`).
     """
     b64_json = _image_field(item, "b64_json")
     url = _image_field(item, "url")
