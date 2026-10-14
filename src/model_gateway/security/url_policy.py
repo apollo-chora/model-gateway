@@ -8,7 +8,7 @@ setting is refused unless the route opts in explicitly.
 
 Every URL the gateway is about to contact is validated first: the scheme must
 be HTTPS unless insecure transport is explicitly enabled for development, and
-every address a host resolves to must be publicly routable (PRD sections 9.2
+every address a host resolves to must be publicly routable (PRD sections 9.4
 and 14). Redirects are revalidated; a redirect that stays within one origin
 proceeds, a cross-origin redirect is refused unless the caller opts in, and a
 route's credentials never cross an origin change (PRD section 7). Credentials
@@ -84,7 +84,7 @@ def is_blocked_address(address: str) -> bool:
 
 
 def check_host(host: str, *, resolver: Resolver = system_resolver) -> None:
-    """Reject a host that resolves to any blocked address (PRD sections 9.2 and 14).
+    """Reject a host that resolves to any blocked address (PRD sections 9.4 and 14).
 
     Loopback, private, unique-local, link-local (which includes the cloud
     metadata address 169.254.169.254), multicast, reserved, unspecified and
@@ -191,7 +191,7 @@ def resolve_endpoint(
     """Join a route's endpoint and validate it before it is handed to LiteLLM.
 
     This is the entry point configuration validation and the LiteLLM binding
-    use: the result is the ``api_base`` value of PRD section 9.4.
+    use: the result is the ``api_base`` value of PRD section 9.6.
     """
     endpoint = join_endpoint(base_url, path, allow_absolute_path_url=allow_absolute_path_url)
     validate_upstream_url(
