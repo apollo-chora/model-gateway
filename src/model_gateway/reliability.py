@@ -43,6 +43,7 @@ from time import monotonic
 from model_gateway.errors import (
     DeadlineExceededError,
     ErrorReason,
+    MalformedResponseError,
     ResourceExhaustedError,
     UnavailableError,
 )
@@ -273,11 +274,15 @@ def is_retryable(error: BaseException, *, remaining: float | None = None) -> boo
     Not retryable, because repeating the call cannot change the answer:
     invalid arguments, authentication and permission failures, a missing
     resource or model, a capability the route does not advertise, a failed
-    precondition, and internal errors. The first group describes the request
-    or the caller and would repeat identically; a capability failure is a
-    property of the route that was chosen; and an internal error is a gateway
-    defect, which PRD section 15 classes as a deterministic error category —
-    deterministic failures are reported, not retried into.
+    precondition, a malformed upstream response, and internal errors. The
+    first group describes the request or the caller and would repeat
+    identically; a capability failure is a property of the route that was
+    chosen; a malformed upstream response is a property of that route's
+    *answer* — a route that just answered wrongly is unlikely to answer
+    differently immediately, so a same-route retry is not worth making even
+    though the invocation may walk to another route; and an internal error is a
+    gateway defect, which PRD section 15 classes as a deterministic error
+    category — deterministic failures are reported, not retried into.
     """
     if isinstance(error, DeadlineExceededError):
         return remaining is None or remaining > 0
@@ -309,6 +314,15 @@ def is_fallback_eligible(error: BaseException, *, remaining: float | None = None
     * :class:`~model_gateway.errors.DeadlineExceededError` — while the
       invocation deadline still has budget left (``remaining`` as in
       :func:`is_retryable`), another route may fit inside it.
+    * :class:`~model_gateway.errors.MalformedResponseError` — the fault lies in
+      that particular upstream's *answer*, not in the request and not in the
+      caller: the request was valid, the route was reachable, and what came
+      back was structurally wrong. It is precisely because the malformation
+      belongs to the route that answered it that another eligible route can
+      serve the same request correctly, so the invocation walks — while the
+      route that just answered wrongly is not worth retrying immediately (see
+      :func:`is_retryable`). PRD section 11.2 keeps the two decisions separate
+      for exactly this kind of failure.
 
     Everything else is not eligible: the failure describes the request or the
     caller and would repeat on any route, or it is a gateway defect.
@@ -319,6 +333,8 @@ def is_fallback_eligible(error: BaseException, *, remaining: float | None = None
     if isinstance(error, DeadlineExceededError):
         return remaining is None or remaining > 0
     if isinstance(error, UnavailableError):
+        return True
+    if isinstance(error, MalformedResponseError):
         return True
     if isinstance(error, ResourceExhaustedError):
         return error.reason is ErrorReason.RATE_LIMITED

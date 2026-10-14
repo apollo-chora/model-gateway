@@ -74,6 +74,7 @@ __all__ = [
     "GrpcStatus",
     "InternalError",
     "InvalidArgumentError",
+    "MalformedResponseError",
     "ModelNotFoundError",
     "NotFoundError",
     "PermissionDeniedError",
@@ -126,6 +127,7 @@ class ErrorReason(StrEnum):
     DEADLINE_EXCEEDED = "deadline_exceeded"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     INTERNAL_ERROR = "internal_error"
+    MALFORMED_RESPONSE = "malformed_response"
     UNSUPPORTED_CAPABILITY = "unsupported_capability"
 
 
@@ -147,6 +149,7 @@ class GrpcStatus(StrEnum):
     DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
     UNAVAILABLE = "UNAVAILABLE"
     INTERNAL = "INTERNAL"
+    UNKNOWN = "UNKNOWN"
 
 
 def sanitise_text(text: str) -> str:
@@ -389,6 +392,42 @@ class InternalError(GatewayError):
     allowed_reasons: ClassVar[frozenset[ErrorReason]] = frozenset({ErrorReason.INTERNAL_ERROR})
     _http_status: ClassVar[int] = 500
     _grpc_code: ClassVar[GrpcStatus] = GrpcStatus.INTERNAL
+
+
+class MalformedResponseError(GatewayError):
+    """An upstream answered, and its answer cannot serve the request: 502 / UNKNOWN.
+
+    Raised when a provider's response is structurally wrong for the request the
+    gateway made: the wrong number of vectors, a missing or duplicated input
+    position, a vector of the wrong dimensionality, or a record the canonical
+    representation cannot carry. The request itself was valid and the route was
+    reachable — the fault lies in that particular upstream's *answer*, which is
+    what separates this category from :class:`InternalError`. A gateway
+    programming bug is a defect in this process and must terminate the
+    invocation; a malformed answer is a property of one provider's response, so
+    another eligible route may well answer correctly. The reliability layer
+    classifies this accordingly: not retried on the route that just answered
+    wrongly, but eligible for a fallback (PRD section 11.2).
+
+    It is its own category rather than a reason on :class:`InternalError`,
+    because widening that category would make every gateway defect
+    fallback-eligible, and a defect is not something another route can fix.
+    It is also deliberately not an :class:`UnavailableError`: the provider was
+    reachable and did answer — the gateway could not use what it said.
+
+    502 Bad Gateway is HTTP's own code for exactly this: a gateway that
+    received an invalid response from an upstream server. gRPC has no 522-style
+    code; ``UNKNOWN`` is its standard name for an error that could not be
+    classified into a more specific code, which is what an undecodable upstream
+    answer is. As with :class:`CapabilityError`, the two transports map the
+    concept by their own specifications and only the numeric status is HTTP's
+    to decide.
+    """
+
+    default_reason: ClassVar[ErrorReason] = ErrorReason.MALFORMED_RESPONSE
+    allowed_reasons: ClassVar[frozenset[ErrorReason]] = frozenset({ErrorReason.MALFORMED_RESPONSE})
+    _http_status: ClassVar[int] = 502
+    _grpc_code: ClassVar[GrpcStatus] = GrpcStatus.UNKNOWN
 
 
 class CapabilityError(GatewayError):

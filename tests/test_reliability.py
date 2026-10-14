@@ -25,6 +25,7 @@ from model_gateway.errors import (
     FailedPreconditionError,
     InternalError,
     InvalidArgumentError,
+    MalformedResponseError,
     ModelNotFoundError,
     NotFoundError,
     PermissionDeniedError,
@@ -204,6 +205,33 @@ class TestFallbackEligibility:
 
     def test_a_deadline_with_no_budget_left_is_not_worth_another_route(self):
         assert not is_fallback_eligible(DeadlineExceededError(MESSAGE), remaining=0.0)
+
+    @pytest.mark.parametrize("remaining", [None, 0.5, 110.0])
+    def test_a_malformed_upstream_response_is_worth_another_route(self, remaining):
+        """The fault lies in that upstream's answer, so another route may fix it."""
+        assert is_fallback_eligible(MalformedResponseError(MESSAGE), remaining=remaining)
+
+
+class TestMalformedResponseClassification:
+    """The two answers differ for a malformed upstream response, by design.
+
+    The request was valid and the route was reachable; what came back was
+    structurally wrong. Retrying the route that just answered wrongly is
+    unlikely to produce a different answer, but the same request to a
+    different provider may well succeed — the two decisions the taxonomy
+    keeps separate (PRD section 11.2).
+    """
+
+    def test_a_malformed_upstream_response_is_not_retried_on_the_same_route(self):
+        assert not is_retryable(MalformedResponseError(MESSAGE))
+
+    def test_a_malformed_upstream_response_is_fallback_eligible(self):
+        assert is_fallback_eligible(MalformedResponseError(MESSAGE))
+
+    def test_a_gateway_defect_is_still_neither_retried_nor_walked(self):
+        """Widening internal would make a programming bug fallback-eligible."""
+        assert not is_retryable(InternalError(MESSAGE))
+        assert not is_fallback_eligible(InternalError(MESSAGE))
 
 
 class TestBackoff:
