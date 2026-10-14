@@ -11,22 +11,15 @@ that configuration the gateway cannot run with fails at startup rather than on
 the first request (PRD sections 6 and 21). Nothing is resolved lazily: a
 deployment whose routes are malformed does not start.
 
-The inference service is deliberately *not* built here. This slice has no
-production inference provider — the LiteLLM binding of PRD section 9 is not
-written yet — so a factory that picked one would be choosing it on the operator's
-behalf, and the only provider it could pick is the deterministic mock. A process
-started that way advertises ``text-default``, accepts a production chat request
-and answers it with an echo: a fake indistinguishable, from the outside, from
-working upstream inference. So the factory refuses to start rather than degrading
-to one, and :data:`NO_PROVIDER_MESSAGE` says what to do about it.
-
-The registry and the service are both injectable, and injecting the service is
-the only way to obtain a serving application. Tests and development code pass
-``InferenceService(registry, provider)`` explicitly — naming
-:class:`~model_gateway.providers.MockProvider` when they want the deterministic
-stand-in — and the binding will be wired at this same seam once it exists. There
-is no configuration flag that enables the mock: an operator cannot turn fake
-inference on by accident, and cannot turn it on on purpose either.
+When no service is injected, the factory builds the production one — the
+LiteLLM binding of PRD section 9 over the registry's routes, with the attempt
+budget from ``Settings`` — so a process started with configuration alone
+actually calls upstream. An injected service is still used verbatim: tests and
+callers bind the provider they want, naming the deterministic
+:class:`~model_gateway.providers.MockProvider` when they need the stand-in
+(PRD section 20). There is no configuration flag that enables the mock: an
+operator cannot turn fake inference on by accident, and cannot turn it on on
+purpose either.
 
 The gateway core never names a provider, so the binding is swappable here without
 touching routing, policy or the public contract (PRD sections 9 and 23).
@@ -38,7 +31,7 @@ from blacksheep import Application
 from blacksheep.settings.json import json_settings
 
 from model_gateway.app_logging import configure_logging
-from model_gateway.config import ConfigurationError, Settings
+from model_gateway.config import Settings
 from model_gateway.health import healthz, readyz
 from model_gateway.http import (
     register_chat_routes,
@@ -47,22 +40,11 @@ from model_gateway.http import (
 )
 from model_gateway.http.auth import create_auth_middleware
 from model_gateway.inference import InferenceService
+from model_gateway.providers.litellm_provider import LiteLLMProvider
 from model_gateway.registry import ModelRegistry
 from model_gateway.security.api_keys import ApiKeySet
 
 logger = structlog.get_logger(__name__)
-
-NO_PROVIDER_MESSAGE = (
-    "no inference provider is wired: this build has no production inference provider, so "
-    "create_app() will not select one implicitly and will not fall back to the deterministic "
-    "mock provider; pass service=InferenceService(registry, provider) explicitly, naming the "
-    "provider this process should call upstream with"
-)
-"""Why startup fails, and what the caller does about it.
-
-It is a module constant so the message is one string rather than a copy per call
-site, and so a test can assert against it rather than against prose that drifts.
-"""
 
 
 def _orjson_dumps(obj) -> str:
@@ -81,21 +63,29 @@ def create_app(
 ) -> Application:
     """Build the application, ready to be started by the server.
 
-    ``service`` is required and keyword-only: there is no production provider to
-    build one from, so an omitted service is a startup failure carrying
-    :data:`NO_PROVIDER_MESSAGE` rather than an application served by the mock
-    (see the module docstring). ``ConfigurationError`` is the same failure the
-    rest of startup raises, so a deployment that cannot run stops before the
-    server binds a port.
+    ``registry`` and ``service`` are keyword-only. An injected ``service`` is
+    used verbatim — tests and callers pass
+    ``InferenceService(registry, provider)`` naming the provider this process
+    should call upstream with. When no service is injected the factory builds
+    the production one: :class:`~model_gateway.providers.litellm_provider.LiteLLMProvider`
+    over the registry's routes, with ``PROVIDER_TIMEOUT_SECONDS`` as the budget
+    every attempt context carries (PRD section 9.6). That budget is the
+    provider's own ceiling today; a later slice makes it the minimum of the
+    configured timeout and the invocation deadline remaining when the attempt
+    begins (PRD section 15), so a retry can never outlive the caller's budget.
     """
     settings = settings or Settings.from_env()
     configure_logging(settings.log_level)
     configure_json()
 
-    if service is None:
-        raise ConfigurationError(NO_PROVIDER_MESSAGE)
-
     registry = registry or ModelRegistry.from_env()
+
+    if service is None:
+        service = InferenceService(
+            registry,
+            LiteLLMProvider(),
+            attempt_timeout=settings.provider_timeout_seconds,
+        )
 
     api_keys = ApiKeySet.from_settings(settings)
     app = Application()
