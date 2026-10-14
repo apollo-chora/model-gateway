@@ -36,6 +36,7 @@ from model_gateway.domain import InvocationRequest, Message, Role, TextPart
 from model_gateway.errors import FailedPreconditionError
 from model_gateway.inference import InferenceService
 from model_gateway.providers.base import AttemptContext
+from model_gateway.providers.litellm_image import IMAGE_DIALECTS
 from model_gateway.providers.litellm_provider import (
     SUPPORTED_DIALECTS,
     LiteLLMProvider,
@@ -51,6 +52,14 @@ UPSTREAM_MODEL = "gpt-4o"
 OPENAI_SDK_DIALECT = "openai"
 HTTP_HANDLER_DIALECTS = ("anthropic", "openrouter")
 UNVERIFIED_DIALECT = "vertex_ai"
+IMAGE_UNVERIFIED_DIALECT = "anthropic"
+"""A dialect the text binding accepts but the image binding refuses.
+
+The image entry point's verified set is entry-point-specific: ``anthropic``
+is a runnable text dialect the image dispatch has no branch for, so an image
+route naming it is refused by the image binding's own check, not by the text
+one.
+"""
 
 
 def make_route(**overrides: object) -> Route:
@@ -434,21 +443,31 @@ class TestTheStartupRefusal:
 
         assert create_app(Settings.from_env({}), registry=registry) is not None
 
-    def test_an_operation_the_binding_does_not_run_is_not_checked(self) -> None:
-        """A route this process would never serve is not a reason to refuse to start.
+    def test_an_image_route_with_an_unverified_dialect_fails_the_start(self) -> None:
+        """The image operation is the binding's too, so its routes are checked as well.
 
-        The image operation has no binding, so its routes are inert here; the
-        dialect check covers the operations the binding actually runs, which are
-        text and embeddings today.
+        The dialect named is one the *text* binding accepts — it is in
+        :data:`SUPPORTED_DIALECTS` — so the refusal can only come from the
+        image binding's own check: the image entry point's verified set is
+        entry-point-specific, and a dialect outside it is refused at startup
+        rather than on the first caller (PRD sections 6.2 and 14.1). The
+        refusal names the verified image set, read off the provider's own
+        export so the two cannot drift apart.
         """
         route = make_route(
             operation=Operation.IMAGE,
             capabilities=frozenset({Capability.GENERATION}),
-            format=UNVERIFIED_DIALECT,
+            format=IMAGE_UNVERIFIED_DIALECT,
         )
         registry = ModelRegistry((route,))
 
-        assert create_app(Settings.from_env({}), registry=registry) is not None
+        with pytest.raises(ConfigurationError) as excinfo:
+            create_app(Settings.from_env({}), registry=registry)
+
+        message = str(excinfo.value)
+        assert IMAGE_UNVERIFIED_DIALECT in message
+        for dialect in sorted(IMAGE_DIALECTS):
+            assert dialect in message
 
     def test_an_injected_service_is_not_validated(self) -> None:
         """An injected service brings its own provider, so the factory cannot judge its routes."""
