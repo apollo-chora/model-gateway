@@ -325,7 +325,10 @@ class InferenceService:
         cannot honour the request or the provider cannot stream, and otherwise
         the failure of the last attempt — surfaced the same way :meth:`invoke`
         surfaces it, except that a failure after the first output is reported
-        through the terminal ``ERROR`` event and then raised.
+        through the terminal ``ERROR`` event and then raised. The event is
+        authoritative and the exception is control-flow metadata: both describe
+        the same single failure, so the exception must not be read as a second
+        one.
         """
         routes = self._registry.routes_for(request.model)
         if not isinstance(self._provider, StreamingTextProvider):
@@ -705,10 +708,14 @@ def _error_event(
     the reason and the text agree with the error that is raised alongside the
     event.
 
-    A failure that is not already a :class:`~model_gateway.errors.GatewayError`
-    is normalised first, exactly as the HTTP boundary normalises it, so the
-    reason is one of the taxonomy's own and the message is gateway-authored
-    rather than the provider's (PRD section 5.4).
+    The message is constrained to the taxonomy's own gateway-authored messages.
+    It is never populated from arbitrary provider exception text with
+    sanitisation as the only defence: a failure that is not already a
+    :class:`~model_gateway.errors.GatewayError` is normalised first — here,
+    before the event is built, exactly as the HTTP boundary normalises it — so
+    the reason is one of the taxonomy's own and the message is gateway-authored
+    rather than the provider's (PRD section 5.4). The event is built from the
+    normalised error, never from the raw one.
     """
     gateway_error = error if isinstance(error, GatewayError) else normalise_exception(error)
     return StreamEvent(

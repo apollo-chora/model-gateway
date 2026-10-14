@@ -258,6 +258,14 @@ class StreamEvent:
     carry either, and an ``error`` event may not carry a finish reason: a
     terminal event that carried both would say generation stopped and that it
     never stopped.
+
+    After an ``error`` event the invocation also raises that failure, so a
+    consumer driving the stream sees one failure reported twice by design: the
+    event is the authoritative report — what the stream itself shows, and the
+    reason and message to switch on — and the exception is control-flow
+    metadata that ends the iteration, never a second failure. Reading the
+    exception as another failure double-counts one event; there is exactly one
+    failure either way, and the event is its report.
     """
 
     kind: StreamEventKind
