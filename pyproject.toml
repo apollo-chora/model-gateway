@@ -6,6 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     "blacksheep==2.6.4",
     "granian==2.8.4",
+    "httpx==0.28.1",
     "litellm-core==1.106.0rc1",
     "orjson==3.13.0",
     "structlog==26.1.0",
