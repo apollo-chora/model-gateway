@@ -6,8 +6,10 @@ validation and the LiteLLM binding apply exactly one policy.
 
 These checks screen configuration; they are not by themselves a guarantee of
 SSRF prevention. The transport that performs the outbound request must pin the
-validated address and disable automatic redirect following, so that every hop
-passes through ``evaluate_redirect``. See the transport contract in
+validated address and disable automatic redirect following, so that a redirect
+surfaces instead of being followed silently; no redirect is evaluated, because
+the binding has no redirect-evaluation step and refuses every hop (PRD
+section 14.1). See the transport contract in
 ``model_gateway.security.url_policy``.
 """
 
