@@ -1,7 +1,7 @@
 # Product Requirements Document
 # Vendor-Neutral AI Model Gateway
 
-**Version:** 1.8  
+**Version:** 1.10  
 **Status:** Implementation-ready specification  
 **Implementation language:** Python  
 **Architecture:** Standalone, self-hostable, multi-provider AI gateway  
@@ -12,6 +12,8 @@
 
 **Revision history:**
 
+- **1.10** — Tightens the capability-refusal rule to the primary route's advertised contract: a request is validated against the primary route's advertised capabilities first and refused when the primary does not declare the capability, even if a later route could honour it, because a fallback route may preserve a model's advertised capabilities but never silently expand them and the model listing advertises the primary route's capabilities (§4.3, §4.5, §6.1, §9.5); states the same rule in §11.2's fallback selection, where fallback candidates are filtered by the same capability test (§11.2).
+- **1.9** — Adds `response_format` to the Responses API's supported fields (§4.5) together with the route requirement it carries: a non-text response format is honoured only by a route that declares the `structured-output` capability, and the invocation is refused with a capability error when the primary route's advertised capabilities do not declare it (§6.1, §9.5).
 - **1.8** — Adds the `structured-output` route capability to the capability vocabulary (§4.3, §6, §18) and requires a route that cannot honour a structured-output requirement to be refused with a capability error rather than handed the request and allowed to answer with free text (§9.5); records that a system instruction is baseline chat semantics with no capability of its own, and that the gateway forwards an invocation-level instruction and a `system` message without merging either (§5.1, §9.5); and states the OpenAI compatibility boundary in §4 — the HTTP inference endpoints follow the compatible shapes for a supported subset rather than being drop-in compatible, and an unknown parameter is rejected as an invalid request rather than ignored, so a client SDK that serialises a new default parameter receives an error the caller can act on instead of a false assurance that its request was honoured.
 - **1.7** — Closes a gap in the binding contract: adds §9.1, which requires every binding translator to account for every semantically relevant field of the upstream response and request — mapping it into the canonical model or rejecting the response as unsupported — states that rejecting unknown canonical keys is one layer of that defence rather than the enforcement point for upstream translation, and requires binding tests to use upstream fixtures carrying additional semantic fields so a drop cannot pass undetected; renumbers §9's remaining subsections and their cross-references. Also states at the canonical model's definition (§5.1) that request `metadata` is never forwarded to the model or provider unless a separately specified feature explicitly consumes a named key, so metadata cannot become an untyped provider-parameter bag.
 - **1.6** — Replaces §8's stale path-joining prohibition with a rule against stripping, deduplicating, reordering or reinterpreting configured path components, so configured repetition is preserved; rewrites §14.1's network-level fallback as a compensating control that must block the prohibited address classes rather than claim equivalence to exact address pinning; and requires cross-origin redirects to be rejected by default unless a route opts in explicitly (§7, §14.1).
@@ -271,6 +273,9 @@ Supports:
 - `temperature`
 - `max_output_tokens`
 - `stream`
+- `response_format`
+
+`response_format` is a structured-output requirement rather than an ordinary generation parameter. A non-text value — `json_object` or `json_schema` — is honoured only by a route that declares the `structured-output` capability (§6.1). The request is validated against the primary route's advertised capabilities first: when the primary route does not declare the capability, the invocation is refused with a capability error naming `structured-output`, even if a later route could honour it — a fallback route may preserve a model's advertised capabilities but never silently expand them (§9.5, §11.2). A `text` response format needs nothing beyond `chat`, because it is the provider's own default.
 
 The gateway must normalize requests and responses into the Responses API representation.
 
@@ -493,7 +498,7 @@ Supported initial formats (LiteLLM provider names):
 
 `TEXT_LLM_FORMAT` is the provider dialect name for chat and text understood by the inference binding (a LiteLLM provider name), not the company operating the endpoint.
 
-`structured-output` is what a text route must declare to serve a caller's non-text response format — `json_object` or `json_schema` (§9.5). A route that does not declare it is not selected for a request carrying one, and when no configured route declares it the invocation is refused with a capability error naming `structured-output`. A `text` response format asks for nothing beyond `chat`, because it is the provider's own default.
+`structured-output` is what a text route must declare to serve a caller's non-text response format — `json_object` or `json_schema` (§9.5). The request is validated against the primary route's declared capabilities: when the primary route does not declare it, the invocation is refused with a capability error naming `structured-output`, even if a later route declares it — a fallback route may preserve the primary route's capabilities but never expand them. A `text` response format asks for nothing beyond `chat`, because it is the provider's own default.
 
 ## 6.2 Image generation
 
@@ -713,7 +718,7 @@ When a provider does not support a requested capability, the gateway must return
 
 It must not silently discard tools, images, system instructions, structured-output requirements, or other semantically important parameters.
 
-**Structured output.** A structured-output requirement is a capability in its own right, not a generation parameter the provider may treat as advice. A caller's non-text response format — `json_object` or `json_schema` — is honoured only by a route that declares the `structured-output` capability (§6). A route that does not declare it must not be handed the request, and when no configured route can honour the requirement the invocation is refused with a capability error naming `structured-output`. Answering with free text while the caller believes its output shape was guaranteed is the failure this forbids, and the caller's schema — not the provider's convenience — decides whether the requirement was met. A `text` response format needs nothing beyond `chat`.
+**Structured output.** A structured-output requirement is a capability in its own right, not a generation parameter the provider may treat as advice. A caller's non-text response format — `json_object` or `json_schema` — is honoured only by a route that declares the `structured-output` capability (§6). The request is validated against the primary route's advertised capability contract first: the model listing advertises the primary route's capabilities (§4.3), so when the primary route does not declare `structured-output` the invocation is refused with a capability error naming it — even when a later route declares it. Serving the request from that later route would answer a request the public contract never advertised for the model: a fallback route may preserve a model's advertised capabilities but never silently expand them (§11.2). Answering with free text while the caller believes its output shape was guaranteed is the failure this forbids, and the caller's schema — not the provider's convenience — decides whether the requirement was met. A `text` response format needs nothing beyond `chat`.
 
 **System instructions.** A system instruction needs no capability of its own, because it is baseline chat semantics rather than an optional behaviour: a route that declares `chat` claims to handle an instruction, and a binding that cannot map one must refuse the invocation rather than drop it or fold it into the conversation. The gateway carries an instruction in the form it was given. An invocation-level instruction — `system_prompt` in the canonical request (§5.1), `instructions` on the Responses API (§4.5) — and a `system` message inside `messages` are separate elements, and the gateway forwards both without merging either, because silently folding one into the other would change what the provider sees (§9.1).
 
@@ -803,6 +808,8 @@ Fallback 1
    ↓ failure
 Fallback 2
 ```
+
+A fallback route may preserve a model's advertised capabilities but never expand them. Fallback candidates are the later routes that could serve the request unchanged: each is filtered by the same capability test the primary route was validated against, so a route that does not declare everything the request needs is skipped rather than attempted, and no invocation is ever served a capability the model listing does not advertise (§4.3, §9.5).
 
 Retries may be triggered by:
 
