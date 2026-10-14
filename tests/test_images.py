@@ -6,7 +6,9 @@ field emitted, and every state the representation cannot hold is refused rather
 than dropped (PRD sections 4.6 and 9.1). The sharpest of those refusals is the
 image payload: a result entry carrying both a base64 payload and a URL, or
 neither, is refused at construction and at parse, because a caller reads
-whichever one is set and neither of those states defines that reading.
+whichever one is set and neither of those states defines that reading. The URL
+it does carry is untrusted provider output, so these tests also pin that
+canonical parsing screens it in no way at all.
 
 The second is the public model ID ``image-default``, which resolves onto the
 configured image routes exactly as ``text-default`` and ``embedding-default``
@@ -156,6 +158,25 @@ def test_a_generated_image_refuses_a_key_it_does_not_define():
 def test_a_generated_image_refuses_a_payload_that_is_not_an_object():
     with pytest.raises(ValueError, match="must be a JSON object"):
         GeneratedImage.from_dict([PAYLOAD])
+
+
+def test_a_generated_image_url_is_carried_through_unscreened():
+    """A generated image's url is provider output, not a URL the gateway vouches for.
+
+    The type accepts any non-empty string, so surviving canonical parsing says
+    nothing about where the URL points: the gateway does not resolve it, apply
+    the URL policy to it, pin a connection to it or fetch it, here or anywhere
+    else. A caller that fetches it does so on its own authority, which is why a
+    private address is representable and why this value must not be fed back to
+    the gateway as a URL it may fetch — the mirror image of the remote image
+    input the HTTP layer refuses.
+    """
+    url = "http://127.0.0.1:9000/internal.png"
+
+    image = GeneratedImage(url=url)
+
+    assert image.url == url
+    assert GeneratedImage.from_dict(image.to_dict()) == image
 
 
 # --------------------------------------------------------------------------- the request
