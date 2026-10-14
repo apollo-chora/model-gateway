@@ -24,9 +24,20 @@ _POLL_SECONDS = 5.0
 
 
 class HealthServicer(health_pb2_grpc.HealthServicer):
-    """Answers the health protocol from the serving state the listener reports."""
+    """Answers the health protocol from the serving state the listener reports.
 
-    def __init__(self, *, serving: bool) -> None:
+    The state is set rather than fixed, because it changes over the listener's
+    lifetime: a listener that has not started is not serving, one that has is.
+    ``start`` flips it, so a probe answered before the listener is up is told
+    ``NOT_SERVING`` rather than reading as a server that would reject the
+    connection anyway.
+    """
+
+    def __init__(self, *, serving: bool = False) -> None:
+        self._serving = serving
+
+    def set_serving(self, serving: bool) -> None:
+        """Record whether the listener is serving calls."""
         self._serving = serving
 
     def _status(self) -> "health_pb2.HealthCheckResponse.ServingStatus":
@@ -45,7 +56,7 @@ class HealthServicer(health_pb2_grpc.HealthServicer):
         vocabulary.
         """
         if request.service not in (_OVERALL,):
-            context.abort(
+            await context.abort(
                 grpc.StatusCode.NOT_FOUND,
                 f"the health protocol carries no service named {request.service!r}",
             )
@@ -60,7 +71,7 @@ class HealthServicer(health_pb2_grpc.HealthServicer):
         implementation that never sends a first status would leave waiting.
         """
         if request.service not in (_OVERALL,):
-            context.abort(
+            await context.abort(
                 grpc.StatusCode.NOT_FOUND,
                 f"the health protocol carries no service named {request.service!r}",
             )
