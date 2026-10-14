@@ -36,17 +36,29 @@ section 9's boundary, and this module is the policy side of it:
   the primary route and the fallbacks that could serve the request;
   :meth:`InferenceService._invoke_on` anchors a single
   :class:`~model_gateway.reliability.Deadline` when the invocation begins and
-  walks that route order: the primary route is attempted first, a failure
-  :func:`~model_gateway.reliability.is_retryable` classifies as worth repeating
-  is retried on the same route within the configured retry count, waiting
-  :func:`~model_gateway.reliability.backoff_seconds` between attempts, and a
-  route whose attempts are used up hands the invocation to the next fallback.
+  walks that route order, asking two separate questions about every failure.
+  *May another attempt on this route help?*
+  (:func:`~model_gateway.reliability.is_retryable`) decides whether the route is
+  retried, within the configured retry count, waiting
+  :func:`~model_gateway.reliability.backoff_seconds` between attempts. *May
+  another route help?* (:func:`~model_gateway.reliability.is_fallback_eligible`)
+  decides whether the invocation moves on to the next fallback. The two answers
+  differ for the same failure, and the difference is the point: an upstream rate
+  limit is worth another route but not another attempt at the route that refused,
+  while a request the upstream rejected as invalid is worth neither — repeating
+  it there cannot change the answer, and no other provider can change it either,
+  because the answer is a property of the request. A failure that is neither
+  retryable nor fallback-eligible therefore terminates the invocation where it
+  happened, rather than spending another provider's capacity on a request that
+  cannot succeed.
   Every attempt derives its budget from the one deadline, so a retry or a
   fallback consumes what is left rather than starting a fresh budget, and no
-  attempt is started once that budget is gone. When no route could serve the
-  invocation, the failure reported is the last attempt's, which is the most
-  informative one; a deadline that ran out before another attempt could begin is
-  reported as a deadline error instead.
+  attempt is started once that budget is gone; the backoff schedule counts a
+  route's own retries rather than the invocation's attempts, so a fallback's
+  first retry waits one base instead of inheriting the primary route's growth.
+  When no route could serve the invocation, the failure reported is the last
+  attempt's, which is the most informative one; a deadline that ran out before
+  another attempt could begin is reported as a deadline error instead.
 
 The provider performs exactly one call and owns protocol translation and
 execution and nothing else (:mod:`model_gateway.providers.base`).
@@ -81,6 +93,7 @@ from model_gateway.reliability import (
     ConcurrencyLimiter,
     Deadline,
     backoff_seconds,
+    is_fallback_eligible,
     is_retryable,
 )
 
@@ -174,14 +187,19 @@ class InferenceService:
     ) -> None:
         """Wire the service to the registry, the provider and the reliability policy.
 
-        ``attempt_timeout`` is the invocation's total budget in seconds and the
-        ceiling on every attempt inside it (PRD section 9.6). The deadline is
-        anchored when an invocation begins, and each attempt is handed the
-        smaller of this value and what is left of the deadline, so retries and
-        fallbacks draw from one budget instead of each getting a fresh one (PRD
-        section 15). ``None`` means the gateway sets no deadline at all, which is
-        not the same as a budget of zero. A value no attempt could use is refused
-        here rather than on the first request.
+        ``attempt_timeout`` is the one number the deployment configures today —
+        ``PROVIDER_TIMEOUT_SECONDS`` — and it plays two roles at once: it is the
+        invocation's total budget *and* the ceiling on each attempt inside it
+        (PRD sections 9.6 and 15). Those are logically distinct bounds and this
+        parameter does not yet separate them. The deadline is anchored from it
+        when an invocation begins, and every attempt is handed the smaller of it
+        and what is left of the deadline, so retries and fallbacks draw from one
+        budget instead of each getting a fresh one. Serving a longer invocation
+        budget with a shorter per-attempt timeout, or the reverse, needs a second
+        configured value and is a future refinement; today there is exactly one.
+        ``None`` means the gateway sets neither bound — no deadline and no
+        per-attempt ceiling — which is not the same as a budget of zero. A value
+        no attempt could use is refused here rather than on the first request.
 
         ``retry_count`` is how many times one route may be retried after its
         first attempt fails retryably — the configured ``PROVIDER_RETRY_COUNT`` —
@@ -199,7 +217,10 @@ class InferenceService:
         hold a small limit or a stub. One slot is held for the duration of one
         attempt and released before any backoff wait: holding it across a retry's
         delay would let a few slow callers occupy every slot while doing nothing,
-        and starve the callers queued behind them.
+        and starve the callers queued behind them. Waiting for a slot is bounded
+        by what is left of the invocation's deadline, so a caller that cannot be
+        served in time stops queueing rather than waiting for a slot it could no
+        longer use.
         """
         if attempt_timeout is not None and not _is_usable_budget(attempt_timeout):
             raise ValueError(
@@ -227,9 +248,12 @@ class InferenceService:
         :class:`~model_gateway.errors.ModelNotFoundError` for an unknown ID and
         :class:`~model_gateway.errors.CapabilityError` when the primary route
         cannot honour the request; otherwise raises the failure of the last
-        attempt that was made, or a
+        attempt that was made, a
         :class:`~model_gateway.errors.DeadlineExceededError` when the invocation
-        budget ran out before another attempt could begin.
+        budget ran out before another attempt could begin, or — when the failure
+        says the request itself cannot succeed — that failure, raised where it
+        happened rather than carried to another provider. See
+        :meth:`_invoke_on` for which failures are which.
 
         The returned ``attempt_count`` counts the gateway's own attempts and is
         not a count of upstream requests: the inference library can issue more
@@ -244,14 +268,29 @@ class InferenceService:
         """Serve one invocation from the configured route order, primary first.
 
         Selection decides which routes may serve the request; execution walks
-        them under the invocation's single deadline. Each route is attempted, and
-        retried on the same route while
-        :func:`~model_gateway.reliability.is_retryable` classifies the failure as
-        worth repeating and the configured retry count allows. When a route's
-        attempts are used up — because the retries ran out, or because the
-        failure was not one a repeat could change — the next route in
-        ``plan.fallbacks`` is tried. A fallback that answers is what makes
+        them under the invocation's single deadline. Each failure is asked two
+        separate questions, because the answers differ.
+
+        *May another attempt on this route help?*
+        :func:`~model_gateway.reliability.is_retryable` answers it, and a yes
+        retries the same route while the configured retry count allows.
+
+        *May another route help?* :func:`~model_gateway.reliability.is_fallback_eligible`
+        answers that one, and a yes moves the invocation on to the next route in
+        ``plan.fallbacks``. A fallback that answers is what makes
         ``fallback_used`` true (PRD section 5.2).
+
+        A failure that answers no to both terminates the invocation where it
+        happened, and the refusal raised is that failure. This is the case the
+        two questions exist to separate: a request the upstream rejected as
+        invalid, a credential it refused or a capability it does not have is a
+        property of the request or of the caller, so it would repeat identically
+        on every route — walking the rest of the fallbacks would spend their
+        capacity on a request that cannot succeed, and would make the caller's
+        answer depend on which providers happen to be configured. A route-local
+        failure that is simply not worth repeating on the same route — an
+        upstream rate limit, say — is not retried here but is still walked to
+        the next route.
 
         One :class:`~model_gateway.reliability.Deadline` is anchored here, when
         the invocation begins, and every attempt derives its budget from it, so
@@ -268,7 +307,10 @@ class InferenceService:
         The wait between attempts happens outside the concurrency slot, so a
         caller in backoff holds nothing another caller could be using, and it is
         waited only when a retry will actually follow it: the last attempt a
-        route is allowed never sleeps for a retry that will not be made.
+        route is allowed never sleeps for a retry that will not be made. A wait
+        that cannot fit inside what is left of the deadline is not made either —
+        see :func:`_back_off` — and the route is then treated as used up, so the
+        invocation either falls back or reports the failure it already has.
         """
         plan = _select_routes(routes, request)
         deadline = Deadline.after(self._attempt_timeout)
@@ -286,12 +328,16 @@ class InferenceService:
                     raise
                 except Exception as error:
                     failure = error
-                    if retry == self._retry_count or not is_retryable(
-                        error, remaining=deadline.remaining()
+                    remaining = deadline.remaining()
+                    if (
+                        retry < self._retry_count
+                        and is_retryable(error, remaining=remaining)
+                        and await _back_off(retry + 1, self._retry_backoff_ms, deadline)
                     ):
-                        break
-                    await _back_off(state.attempt_count, self._retry_backoff_ms, deadline)
-                    continue
+                        continue
+                    if not is_fallback_eligible(error, remaining=remaining):
+                        raise
+                    break
                 return _normalise(route, request, response, state)
 
         if failure is None:
@@ -311,7 +357,15 @@ class InferenceService:
         the number of attempts in flight never exceeds the configured maximum,
         and a cancelled attempt releases its slot like any other exit.
 
-        The budget handed to the provider is derived here, after the slot is
+        Waiting for that slot is bounded by what is left of the invocation's
+        deadline: the remaining time is handed to the limiter, which raises
+        :class:`~model_gateway.errors.DeadlineExceededError` rather than letting
+        an invocation that cannot be served before its deadline queue behind
+        others indefinitely. Under a saturated provider that wait is what would
+        otherwise keep an already-doomed invocation resident, still holding its
+        payload and still ahead of work that could be served.
+
+        The budget handed to the provider is derived here, *after* the slot is
         held, from the invocation's one deadline: waiting for a slot consumes
         invocation budget too, so the budget is computed at the moment the
         attempt starts rather than before the wait (PRD section 15). An attempt
@@ -319,7 +373,7 @@ class InferenceService:
         and a :class:`~model_gateway.errors.DeadlineExceededError` is raised
         instead.
         """
-        async with self._limiter.slot():
+        async with self._limiter.slot(deadline.remaining()):
             budget = deadline.budget_for(self._attempt_timeout)
             if _budget_is_spent(budget):
                 raise _deadline_exceeded(request, state)
@@ -346,27 +400,48 @@ def _require_count(name: str, value: int) -> None:
 def _budget_is_spent(budget: float | None) -> bool:
     """Whether an attempt budget is exhausted, so no attempt may be started with it.
 
-    ``None`` is the gateway's own "no budget" marker — the deployment set neither
-    a provider timeout nor an invocation deadline — and is never spent. Zero is:
-    a deadline that has run out hands back zero, and an attempt given zero
-    seconds is one the gateway has already refused (PRD section 15).
+    ``None`` is the gateway's own "no budget" marker — the deployment configured
+    no timeout, so no deadline was anchored and no attempt is handed a ceiling
+    of its own — and is never spent. Zero is: a deadline that has run out hands
+    back zero, and an attempt given zero seconds is one the gateway has already
+    refused (PRD section 15).
     """
     return budget is not None and budget <= 0.0
 
 
-async def _back_off(attempt: int, base_ms: float, deadline: Deadline) -> None:
+async def _back_off(attempt: int, base_ms: float, deadline: Deadline) -> bool:
     """Wait the delay that follows a failed attempt, when there is one to wait.
 
-    ``attempt`` is the 1-based number of the attempt that just failed, and the
-    delay is :func:`~model_gateway.reliability.backoff_seconds`'s exponential
-    schedule, clamped to what is left of ``deadline`` so a wait can never outlive
-    the invocation's budget. A delay of zero waits nothing — the retry is still
-    made, it simply does not sleep first. The sleep happens outside any
+    ``attempt`` is the 1-based number of the attempt that just failed **on this
+    route**, and the delay is
+    :func:`~model_gateway.reliability.backoff_seconds`'s exponential schedule,
+    bounded by what is left of ``deadline`` so a wait can never outlive the
+    invocation's budget. The schedule is per route, not per invocation: a
+    fallback's first retry backs off one base, exactly as the primary route's
+    first retry did, rather than inheriting exponential growth from the attempts
+    an earlier route already spent. A delay of zero waits nothing — the retry is
+    still made, it simply does not sleep first. The sleep happens outside any
     concurrency slot, so a caller in backoff occupies no upstream capacity.
+
+    Returns whether a retry still follows the wait. It does not when the delay
+    would consume the whole remaining budget: ``backoff_seconds`` refuses that
+    schedule with a :class:`~model_gateway.errors.DeadlineExceededError` rather
+    than clamping it, because sleeping until the deadline expired would spend the
+    rest of the invocation's budget on a retry that could never run. That
+    refusal ends this route's retries, not the invocation: it is reported to the
+    caller of this function as ``False`` so that
+    :meth:`InferenceService._invoke_on` treats the route as used up — falling
+    back if another route is eligible and the failure says so, and otherwise
+    reporting the attempt's own failure, which is still the more informative
+    answer while the invocation deadline itself has not expired.
     """
-    delay = backoff_seconds(attempt, base_ms, remaining=deadline.remaining())
+    try:
+        delay = backoff_seconds(attempt, base_ms, remaining=deadline.remaining())
+    except DeadlineExceededError:
+        return False
     if delay > 0:
         await asyncio.sleep(delay)
+    return True
 
 
 def _deadline_exceeded(request: InvocationRequest, state: InvocationState) -> DeadlineExceededError:
