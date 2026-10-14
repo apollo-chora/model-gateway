@@ -3,13 +3,14 @@
 The service owns policy and the provider owns translation, so these tests are
 about the policy: a public model ID resolves to configured routes before any
 provider is called, an unknown ID is a model-not-found error that reaches no
-provider, the capabilities the request needs are enforced against the route the
-gateway chose, and the provider's answer comes back stamped with the gateway's
-own facts.
+provider, the capabilities the request needs decide which configured route may
+serve it, and the provider's answer comes back stamped with the gateway's own
+facts.
 
-They also pin the boundary of this slice deliberately: there are no retries and
-no fallbacks yet, and a provider that fails on the primary route stays failed.
-The reliability slice owns that loop; these tests are what it must not change.
+They also pin the boundary of this slice deliberately: there are no retries, no
+fallbacks and no deadline policy yet, and a provider that fails on the route
+selection chose stays failed. The reliability slice owns that loop; these tests
+are what it must not change.
 """
 
 import pytest
@@ -18,10 +19,13 @@ from model_gateway.capabilities import Capability
 from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import (
     FinishReason,
+    GenerationConfig,
     ImagePart,
     InvocationRequest,
     InvocationResponse,
     Message,
+    ResponseFormat,
+    ResponseFormatMode,
     Role,
     TextPart,
     ToolCall,
@@ -71,10 +75,26 @@ def service(routes: tuple[Route, ...], spec: MockSpec | None = None) -> Inferenc
 
 def full_route(**overrides) -> Route:
     values = {
-        "capabilities": frozenset({Capability.CHAT, Capability.TOOLS, Capability.VISION}),
+        "capabilities": frozenset(
+            {
+                Capability.CHAT,
+                Capability.TOOLS,
+                Capability.VISION,
+                Capability.STRUCTURED_OUTPUT,
+            }
+        ),
     }
     values.update(overrides)
     return route(**values)
+
+
+def structured_config() -> GenerationConfig:
+    """A generation config requiring a JSON shape the provider has to honour."""
+    return GenerationConfig(
+        response_format=ResponseFormat(
+            mode=ResponseFormatMode.JSON_SCHEMA, schema={"type": "object"}
+        )
+    )
 
 
 class _FixedProvider:
@@ -84,7 +104,9 @@ class _FixedProvider:
         self._response = response
         self.calls: list[tuple[Route, InvocationRequest]] = []
 
-    async def complete(self, route: Route, request: InvocationRequest) -> InvocationResponse:
+    async def complete(
+        self, route: Route, request: InvocationRequest, context
+    ) -> InvocationResponse:
         self.calls.append((route, request))
         return self._response
 
@@ -317,19 +339,225 @@ async def test_invoke_fills_an_invocation_id_the_provider_did_not_echo():
     assert result.invocation_id == "inv-1"
 
 
-async def test_invoke_keeps_the_invocation_id_the_provider_reported():
+async def test_invoke_always_stamps_the_gateways_own_invocation_id():
+    """A provider does not get to name the invocation in the caller's record."""
     provider = _FixedProvider(
         InvocationResponse(
             model="text-default",
             upstream_model="upstream-model",
-            invocation_id="inv-2",
+            invocation_id="a-provider-chosen-id",
         )
     )
     inference = InferenceService(ModelRegistry((route(),)), provider)
 
     result = await inference.invoke(request(invocation_id="inv-1"))
 
-    assert result.invocation_id == "inv-2"
+    assert result.invocation_id == "inv-1"
+
+
+# ---------------------------------------------------------------------------
+# Structured output
+# ---------------------------------------------------------------------------
+
+
+async def test_invoke_refuses_a_schema_the_route_does_not_declare():
+    inference = service((route(capabilities=frozenset({Capability.CHAT})),))
+
+    with pytest.raises(CapabilityError) as error:
+        await inference.invoke(request(generation_config=structured_config()))
+
+    assert error.value.reason is ErrorReason.UNSUPPORTED_CAPABILITY
+    assert error.value.details["capability"] == "structured-output"
+
+
+async def test_invoke_accepts_a_schema_the_route_declares():
+    result = await service((full_route(),)).invoke(request(generation_config=structured_config()))
+
+    assert result.text == "What is the weather in Paris?"
+
+
+async def test_a_json_object_response_format_needs_the_capability_too():
+    config = GenerationConfig(response_format=ResponseFormat(mode=ResponseFormatMode.JSON_OBJECT))
+    inference = service((route(capabilities=frozenset({Capability.CHAT})),))
+
+    with pytest.raises(CapabilityError) as error:
+        await inference.invoke(request(generation_config=config))
+
+    assert error.value.details["capability"] == "structured-output"
+
+
+async def test_a_text_response_format_asks_for_nothing_beyond_chat():
+    config = GenerationConfig(response_format=ResponseFormat(mode=ResponseFormatMode.TEXT))
+
+    result = await service((route(),)).invoke(request(generation_config=config))
+
+    assert result.text == "What is the weather in Paris?"
+
+
+async def test_an_unset_response_format_asks_for_nothing_beyond_chat():
+    result = await service((route(),)).invoke(request(generation_config=GenerationConfig()))
+
+    assert result.text == "What is the weather in Paris?"
+
+
+async def test_a_structured_output_refusal_reaches_no_provider():
+    provider = MockProvider()
+    inference = InferenceService(
+        ModelRegistry((route(capabilities=frozenset({Capability.CHAT})),)), provider
+    )
+
+    with pytest.raises(CapabilityError):
+        await inference.invoke(request(generation_config=structured_config()))
+
+    assert provider.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Route selection
+# ---------------------------------------------------------------------------
+
+
+async def test_an_ineligible_primary_is_skipped_for_an_eligible_fallback():
+    """A route that cannot honour the request is passed over, not failed on."""
+    provider = MockProvider()
+    inference = InferenceService(
+        ModelRegistry(
+            (
+                route("primary", capabilities=frozenset({Capability.CHAT})),
+                route("fallback", capabilities=frozenset({Capability.CHAT, Capability.TOOLS})),
+            )
+        ),
+        provider,
+    )
+
+    result = await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
+
+    assert [call[0].model_id for call in provider.calls] == ["fallback"]
+    assert result.upstream_model == "fallback"
+    assert result.attempt_count == 1
+    assert result.fallback_used is True
+
+
+async def test_selection_skips_a_route_that_cannot_honour_the_output_shape():
+    provider = MockProvider()
+    inference = InferenceService(
+        ModelRegistry(
+            (
+                route("primary", capabilities=frozenset({Capability.CHAT})),
+                route(
+                    "fallback",
+                    capabilities=frozenset({Capability.CHAT, Capability.STRUCTURED_OUTPUT}),
+                ),
+            )
+        ),
+        provider,
+    )
+
+    result = await inference.invoke(request(generation_config=structured_config()))
+
+    assert [call[0].model_id for call in provider.calls] == ["fallback"]
+    assert result.fallback_used is True
+
+
+async def test_the_primary_route_is_still_used_first_when_it_is_eligible():
+    provider = MockProvider()
+    inference = InferenceService(
+        ModelRegistry(
+            (
+                route("primary", capabilities=frozenset({Capability.CHAT, Capability.TOOLS})),
+                route("fallback", capabilities=frozenset({Capability.CHAT, Capability.TOOLS})),
+            )
+        ),
+        provider,
+    )
+
+    result = await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
+
+    assert [call[0].model_id for call in provider.calls] == ["primary"]
+    assert result.fallback_used is False
+
+
+async def test_an_ineligible_route_is_skipped_rather_than_fatal():
+    """Two routes that cannot serve the request refuse it without calling either."""
+    provider = MockProvider()
+    inference = InferenceService(
+        ModelRegistry(
+            (
+                route("primary", capabilities=frozenset({Capability.CHAT})),
+                route("fallback", capabilities=frozenset({Capability.CHAT})),
+            )
+        ),
+        provider,
+    )
+
+    with pytest.raises(CapabilityError):
+        await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
+
+    assert provider.calls == []
+
+
+async def test_the_refusal_names_the_first_configured_routes_missing_capability():
+    inference = service(
+        (
+            route("primary", capabilities=frozenset({Capability.CHAT})),
+            route("fallback", capabilities=frozenset({Capability.CHAT, Capability.VISION})),
+        )
+    )
+
+    with pytest.raises(CapabilityError) as error:
+        await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
+
+    assert error.value.details["capability"] == "tools"
+
+
+# ---------------------------------------------------------------------------
+# The attempt the provider is handed
+# ---------------------------------------------------------------------------
+
+
+async def test_the_attempt_context_carries_the_invocation_and_the_attempt_number():
+    provider = MockProvider()
+    inference = InferenceService(ModelRegistry((route(),)), provider)
+
+    await inference.invoke(request(invocation_id="inv-1"))
+
+    context = provider.calls[0][2]
+    assert context.invocation_id == "inv-1"
+    assert context.attempt_number == 1
+
+
+async def test_the_attempt_context_carries_the_budget_the_gateway_set():
+    provider = MockProvider()
+    inference = InferenceService(ModelRegistry((route(),)), provider, attempt_timeout=12.5)
+
+    await inference.invoke(request())
+
+    assert provider.calls[0][2].timeout == 12.5
+
+
+async def test_an_unset_budget_is_no_budget_rather_than_zero():
+    provider = MockProvider()
+    inference = InferenceService(ModelRegistry((route(),)), provider)
+
+    await inference.invoke(request())
+
+    assert provider.calls[0][2].timeout is None
+
+
+async def test_the_attempt_context_carries_no_routing_policy():
+    """The route travels beside the context, never inside it (PRD section 9.2)."""
+    provider = MockProvider()
+    inference = InferenceService(ModelRegistry((route(),)), provider)
+
+    await inference.invoke(request())
+
+    assert set(vars(provider.calls[0][2])) == {"invocation_id", "attempt_number", "timeout"}
+
+
+@pytest.mark.parametrize("budget", [0.0, -1.0, float("inf"), float("nan")])
+def test_a_budget_no_attempt_could_use_is_refused_at_construction(budget):
+    with pytest.raises(ValueError, match="attempt_timeout must be a positive number"):
+        InferenceService(ModelRegistry((route(),)), MockProvider(), attempt_timeout=budget)
 
 
 # ---------------------------------------------------------------------------
