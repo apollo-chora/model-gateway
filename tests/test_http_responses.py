@@ -16,6 +16,7 @@ from model_gateway.domain import (
     Role,
     TextPart,
     ToolCall,
+    ToolChoiceMode,
     Usage,
 )
 from model_gateway.errors import CapabilityError, UnavailableError
@@ -28,9 +29,12 @@ SECRET_KEY = "sk-upstream-secret-key"
 UPSTREAM_ENDPOINT = "https://upstream.internal.example/v1"
 
 _TEXT_CAPABILITIES = frozenset({Capability.CHAT, Capability.TOOLS, Capability.STRUCTURED_OUTPUT})
+_VISION_CAPABILITIES = frozenset(
+    {Capability.CHAT, Capability.TOOLS, Capability.STRUCTURED_OUTPUT, Capability.VISION}
+)
 
 
-def make_registry() -> ModelRegistry:
+def make_registry(capabilities: frozenset = _TEXT_CAPABILITIES) -> ModelRegistry:
     return ModelRegistry(
         (
             Route(
@@ -41,7 +45,7 @@ def make_registry() -> ModelRegistry:
                 model_id="upstream-text",
                 format="openai",
                 api_key=SECRET_KEY,
-                capabilities=_TEXT_CAPABILITIES,
+                capabilities=capabilities,
                 extra_headers={},
                 allow_absolute_path_url=False,
             ),
@@ -87,16 +91,17 @@ class FakeTextProvider:
         return self.result
 
 
-def build_app(provider: FakeTextProvider) -> Application:
+def build_app(provider: FakeTextProvider, *, vision: bool = False) -> Application:
+    registry = make_registry(_VISION_CAPABILITIES if vision else _TEXT_CAPABILITIES)
     app = Application(router=Router())
     register_error_handlers(app)
-    register_responses_routes(app.router, InferenceService(make_registry(), provider))
+    register_responses_routes(app.router, InferenceService(registry, provider))
     return app
 
 
-async def call(provider: FakeTextProvider, body) -> tuple[int, object]:
+async def call(provider: FakeTextProvider, body, *, vision: bool = False) -> tuple[int, object]:
     """Send one request through a freshly built application, without a socket."""
-    app = build_app(provider)
+    app = build_app(provider, vision=vision)
     await app.start()
     try:
         response = await TestClient(app).post("/v1/responses", content=JSONContent(body))
@@ -366,12 +371,69 @@ async def test_instructions_map_onto_the_invocation_level_instruction(client, pr
     assert [message.role.value for message in invocation.messages] == ["user"]
 
 
+async def test_metadata_reaches_the_invocation(client, provider):
+    await post(client, payload(metadata={"trace": "abc"}))
+
+    _, invocation = provider.calls[0]
+    assert invocation.metadata == {"trace": "abc"}
+
+
+async def test_metadata_is_never_forwarded_as_a_model_parameter(client, provider):
+    """Metadata is request metadata only: it is held, not sent upstream."""
+    await post(client, payload(metadata={"trace": "abc"}))
+
+    _, invocation = provider.calls[0]
+    assert invocation.metadata == {"trace": "abc"}
+    assert invocation.forwardable_metadata == {}
+
+
+async def test_a_reserved_metadata_key_is_refused_naming_the_rule(client, provider):
+    status, body = await call(provider, payload(metadata={"model": "text-default"}))
+
+    assert status == 400
+    assert body["reason"] == "invalid_request"
+    assert "canonical invocation field name" in body["message"]
+    assert provider.calls == []
+
+
+async def test_a_generation_parameter_metadata_key_is_refused(client, provider):
+    status, body = await call(provider, payload(metadata={"temperature": 0.5}))
+
+    assert status == 400
+    assert body["reason"] == "invalid_request"
+    assert "canonical invocation field name" in body["message"]
+    assert provider.calls == []
+
+
 async def test_the_generation_parameters_reach_the_provider(client, provider):
     await post(client, payload(temperature=0.7, max_output_tokens=2048))
 
     _, invocation = provider.calls[0]
     assert invocation.generation_config.temperature == 0.7
     assert invocation.generation_config.max_output_tokens == 2048
+
+
+async def test_top_p_reaches_the_provider(client, provider):
+    await post(client, payload(top_p=0.9))
+
+    _, invocation = provider.calls[0]
+    assert invocation.generation_config.top_p == 0.9
+
+
+async def test_an_integer_top_p_is_accepted(client, provider):
+    await post(client, payload(top_p=1))
+
+    _, invocation = provider.calls[0]
+    assert invocation.generation_config.top_p == 1.0
+
+
+async def test_a_top_p_above_one_is_refused_by_the_canonical_bound(client, provider):
+    status, body = await call(provider, payload(top_p=1.5))
+
+    assert status == 400
+    assert body["reason"] == "invalid_request"
+    assert "top_p" in body["message"]
+    assert provider.calls == []
 
 
 async def test_tool_declarations_reach_the_provider(client, provider):
@@ -430,6 +492,75 @@ async def test_a_false_strict_flag_is_accepted(client, provider):
     response = await post(client, body)
 
     assert response.status == 200
+
+
+async def test_tool_choice_auto_reaches_the_provider(client, provider):
+    await post(client, payload(tool_choice="auto"))
+
+    _, invocation = provider.calls[0]
+    assert invocation.tool_choice is not None
+    assert invocation.tool_choice.mode is ToolChoiceMode.AUTO
+
+
+async def test_tool_choice_none_reaches_the_provider(client, provider):
+    await post(client, payload(tool_choice="none"))
+
+    _, invocation = provider.calls[0]
+    assert invocation.tool_choice.mode is ToolChoiceMode.NONE
+
+
+async def test_tool_choice_required_reaches_the_provider(client, provider):
+    await post(
+        client,
+        payload(
+            tool_choice="required",
+            tools=[{"type": "function", "name": "get_weather"}],
+        ),
+    )
+
+    _, invocation = provider.calls[0]
+    assert invocation.tool_choice.mode is ToolChoiceMode.REQUIRED
+
+
+async def test_a_named_tool_choice_reaches_the_provider(client, provider):
+    await post(
+        client,
+        payload(
+            tool_choice={"type": "function", "function": {"name": "get_weather"}},
+            tools=[{"type": "function", "name": "get_weather"}],
+        ),
+    )
+
+    _, invocation = provider.calls[0]
+    assert invocation.tool_choice.mode is ToolChoiceMode.SPECIFIC
+    assert invocation.tool_choice.name == "get_weather"
+
+
+async def test_a_required_tool_choice_without_declared_tools_is_refused(client, provider):
+    status, body = await call(provider, payload(tool_choice="required"))
+
+    assert status == 400
+    assert body["reason"] == "invalid_request"
+    assert "tool_choice" in body["message"]
+    assert provider.calls == []
+
+
+async def test_an_unknown_tool_choice_mode_is_refused(client, provider):
+    status, body = await call(provider, payload(tool_choice="sometimes"))
+
+    assert status == 400
+    assert body["reason"] == "invalid_request"
+    assert "tool_choice" in body["message"]
+    assert provider.calls == []
+
+
+async def test_a_tool_choice_object_of_another_type_is_refused(client, provider):
+    status, body = await call(provider, payload(tool_choice={"type": "web_search"}))
+
+    assert status == 400
+    assert body["reason"] == "invalid_request"
+    assert "tool_choice" in body["message"]
+    assert provider.calls == []
 
 
 async def test_response_format_maps_onto_the_canonical_requirement(client, provider):
@@ -608,15 +739,12 @@ async def test_an_unknown_model_is_a_model_not_found_error(client, provider):
 
 
 UNSUPPORTED_PARAMETERS = [
-    {"top_p": 0.9},
-    {"tool_choice": "auto"},
     {"previous_response_id": "resp_1"},
     {"store": True},
     {"background": True},
     {"conversation": "conv_1"},
     {"include": ["reasoning.encrypted_content"]},
     {"max_tool_calls": 2},
-    {"metadata": {"trace": "abc"}},
     {"moderation": {"model": "omni-moderation-latest"}},
     {"parallel_tool_calls": True},
     {"parallel_tool_calls": False},
@@ -764,7 +892,7 @@ async def test_an_input_item_type_this_endpoint_does_not_carry_is_refused(client
     assert provider.calls == []
 
 
-async def test_an_input_image_part_is_refused_naming_it(client, provider):
+async def test_an_input_image_part_becomes_an_image_part(provider):
     body = payload(
         input=[
             {
@@ -777,11 +905,96 @@ async def test_an_input_image_part_is_refused_naming_it(client, provider):
         ]
     )
 
+    status, response = await call(provider, body, vision=True)
+
+    assert status == 200
+    _, invocation = provider.calls[0]
+    assert invocation.messages[0].content == (
+        TextPart("What is this?"),
+        ImagePart(data="aGVsbG8=", media_type="image/png"),
+    )
+
+
+async def test_an_input_image_requires_the_vision_capability(client, provider):
+    """The image is carried to the core, which refuses a route that cannot see it."""
+    body = payload(
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+                ],
+            }
+        ]
+    )
+
     status, response = await call(provider, body)
 
     assert status == 422
     assert response["reason"] == "unsupported_capability"
-    assert "input_image" in response["message"]
+    assert "vision" in response["message"]
+    assert provider.calls == []
+
+
+async def test_a_remote_input_image_url_is_refused_with_a_capability_error(client, provider):
+    body = payload(
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "https://example.com/cat.png"},
+                ],
+            }
+        ]
+    )
+
+    status, response = await call(provider, body)
+
+    assert status == 422
+    assert response["reason"] == "unsupported_capability"
+    assert provider.calls == []
+
+
+async def test_an_input_image_url_of_any_other_scheme_is_malformed(client, provider):
+    body = payload(
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "file:///tmp/cat.png"},
+                ],
+            }
+        ]
+    )
+
+    status, response = await call(provider, body)
+
+    assert status == 400
+    assert response["reason"] == "invalid_request"
+    assert provider.calls == []
+
+
+async def test_an_input_image_detail_is_refused_as_a_capability_gap(client, provider):
+    body = payload(
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,aGVsbG8=",
+                        "detail": "high",
+                    },
+                ],
+            }
+        ]
+    )
+
+    status, response = await call(provider, body)
+
+    assert status == 422
+    assert response["reason"] == "unsupported_capability"
+    assert "detail" in response["message"]
     assert provider.calls == []
 
 
