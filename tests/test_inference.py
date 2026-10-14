@@ -1,16 +1,17 @@
-"""The inference service: gateway-owned policy around one provider call (PRD 9, 9.5, 10, 11.3).
+"""The inference service: gateway-owned policy around one provider call (PRD 4.3, 9.5, 10, 11.2).
 
 The service owns policy and the provider owns translation, so these tests are
 about the policy: a public model ID resolves to configured routes before any
 provider is called, an unknown ID is a model-not-found error that reaches no
-provider, the capabilities the request needs decide which configured route may
-serve it, and the provider's answer comes back stamped with the gateway's own
-facts.
+provider, the capabilities the request needs are validated against the primary
+route — the one whose capabilities the public model advertises — so a fallback
+may preserve the advertised capabilities but never expand them, and the
+provider's answer comes back stamped with the gateway's own facts.
 
-They also pin the boundary of this slice deliberately: there are no retries, no
-fallbacks and no deadline policy yet, and a provider that fails on the route
-selection chose stays failed. The reliability slice owns that loop; these tests
-are what it must not change.
+They also pin the boundary of this slice deliberately: there are no retries and
+no failure fallbacks yet, so a provider that fails on the primary route stays
+failed and ``fallback_used`` is false. The reliability slice owns that loop;
+these tests are what it must not change.
 """
 
 import pytest
@@ -33,7 +34,7 @@ from model_gateway.domain import (
     Usage,
 )
 from model_gateway.errors import CapabilityError, ErrorReason, ModelNotFoundError, UnavailableError
-from model_gateway.inference import InferenceService
+from model_gateway.inference import InferenceService, InvocationState, _select_routes
 from model_gateway.providers.mock import MockProvider, MockSpec
 from model_gateway.registry import ModelRegistry
 
@@ -413,12 +414,12 @@ async def test_a_structured_output_refusal_reaches_no_provider():
 
 
 # ---------------------------------------------------------------------------
-# Route selection
+# A fallback may preserve the advertised capabilities, never expand them
 # ---------------------------------------------------------------------------
 
 
-async def test_an_ineligible_primary_is_skipped_for_an_eligible_fallback():
-    """A route that cannot honour the request is passed over, not failed on."""
+async def test_a_fallback_cannot_add_tools_the_primary_does_not_advertise():
+    """The public model advertises the primary route's capabilities, and only those."""
     provider = MockProvider()
     inference = InferenceService(
         ModelRegistry(
@@ -430,15 +431,31 @@ async def test_an_ineligible_primary_is_skipped_for_an_eligible_fallback():
         provider,
     )
 
-    result = await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
+    with pytest.raises(CapabilityError) as error:
+        await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
 
-    assert [call[0].model_id for call in provider.calls] == ["fallback"]
-    assert result.upstream_model == "fallback"
-    assert result.attempt_count == 1
-    assert result.fallback_used is True
+    assert error.value.reason is ErrorReason.UNSUPPORTED_CAPABILITY
+    assert error.value.details["capability"] == "tools"
+    assert provider.calls == []
 
 
-async def test_selection_skips_a_route_that_cannot_honour_the_output_shape():
+async def test_the_refusal_follows_the_capabilities_the_registry_advertises():
+    """What `GET /v1/models` publishes for the model is what a request is checked against."""
+    routes = (
+        route("primary", capabilities=frozenset({Capability.CHAT})),
+        route("fallback", capabilities=frozenset({Capability.CHAT, Capability.TOOLS})),
+    )
+    registry = ModelRegistry(routes)
+    inference = InferenceService(registry, MockProvider())
+
+    advertised = registry.get("text-default").capabilities
+
+    assert advertised == frozenset({Capability.CHAT})
+    with pytest.raises(CapabilityError):
+        await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
+
+
+async def test_a_fallback_cannot_add_the_output_shape_the_primary_does_not_advertise():
     provider = MockProvider()
     inference = InferenceService(
         ModelRegistry(
@@ -453,10 +470,79 @@ async def test_selection_skips_a_route_that_cannot_honour_the_output_shape():
         provider,
     )
 
-    result = await inference.invoke(request(generation_config=structured_config()))
+    with pytest.raises(CapabilityError) as error:
+        await inference.invoke(request(generation_config=structured_config()))
 
-    assert [call[0].model_id for call in provider.calls] == ["fallback"]
-    assert result.fallback_used is True
+    assert error.value.details["capability"] == "structured-output"
+    assert provider.calls == []
+
+
+async def test_a_fallback_cannot_add_vision_the_primary_does_not_advertise():
+    conversation = request(
+        messages=(
+            Message(
+                role=Role.USER,
+                content=(
+                    TextPart(text="what is in this image?"),
+                    ImagePart(data="AAAA", media_type="image/png"),
+                ),
+            ),
+        )
+    )
+    provider = MockProvider()
+    inference = InferenceService(
+        ModelRegistry(
+            (
+                route("primary", capabilities=frozenset({Capability.CHAT})),
+                route("fallback", capabilities=frozenset({Capability.CHAT, Capability.VISION})),
+            )
+        ),
+        provider,
+    )
+
+    with pytest.raises(CapabilityError) as error:
+        await inference.invoke(conversation)
+
+    assert error.value.details["capability"] == "vision"
+    assert provider.calls == []
+
+
+async def test_a_request_the_advertised_model_cannot_serve_reaches_no_route():
+    """Two routes that cannot serve the request refuse it without calling either."""
+    provider = MockProvider()
+    inference = InferenceService(
+        ModelRegistry(
+            (
+                route("primary", capabilities=frozenset({Capability.CHAT})),
+                route("fallback", capabilities=frozenset({Capability.CHAT})),
+            )
+        ),
+        provider,
+    )
+
+    with pytest.raises(CapabilityError):
+        await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
+
+    assert provider.calls == []
+
+
+async def test_the_refusal_names_the_capability_the_advertised_model_lacks():
+    inference = service(
+        (
+            route("primary", capabilities=frozenset({Capability.CHAT})),
+            route("fallback", capabilities=frozenset({Capability.CHAT, Capability.VISION})),
+        )
+    )
+
+    with pytest.raises(CapabilityError) as error:
+        await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
+
+    assert error.value.details["capability"] == "tools"
+
+
+# ---------------------------------------------------------------------------
+# Which routes may serve an invocation
+# ---------------------------------------------------------------------------
 
 
 async def test_the_primary_route_is_still_used_first_when_it_is_eligible():
@@ -477,8 +563,98 @@ async def test_the_primary_route_is_still_used_first_when_it_is_eligible():
     assert result.fallback_used is False
 
 
-async def test_an_ineligible_route_is_skipped_rather_than_fatal():
-    """Two routes that cannot serve the request refuse it without calling either."""
+async def test_a_fallback_that_cannot_honour_the_request_is_not_a_candidate():
+    """Primary, a chat-only fallback and a capable fallback: only the capable one may serve."""
+    primary = route("primary", capabilities=frozenset({Capability.CHAT, Capability.TOOLS}))
+    chat_only = route("chat-only", capabilities=frozenset({Capability.CHAT}))
+    capable = route("capable", capabilities=frozenset({Capability.CHAT, Capability.TOOLS}))
+
+    plan = _select_routes(
+        (primary, chat_only, capable), request(tools=(ToolDefinition(name="get_weather"),))
+    )
+
+    assert plan.primary is primary
+    assert plan.fallbacks == (capable,)
+
+
+async def test_a_fallback_that_preserves_the_advertised_capabilities_is_a_candidate():
+    primary = full_route(model_id="primary")
+    fallback = full_route(model_id="fallback")
+
+    plan = _select_routes(
+        (primary, fallback), request(tools=(ToolDefinition(name="get_weather"),))
+    )
+
+    assert plan.primary is primary
+    assert plan.fallbacks == (fallback,)
+
+
+async def test_a_model_with_one_route_has_no_fallback_candidates():
+    primary = route("primary")
+
+    plan = _select_routes((primary,), request())
+
+    assert plan.primary is primary
+    assert plan.fallbacks == ()
+
+
+async def test_the_primary_route_is_attempted_whatever_fallbacks_are_configured():
+    """The fallback walk is the later slice's: today the primary route is the route."""
+    provider = MockProvider(MockSpec(error=UnavailableError("the primary route is down")))
+    inference = InferenceService(
+        ModelRegistry(
+            (
+                route("primary", capabilities=frozenset({Capability.CHAT, Capability.TOOLS})),
+                route("chat-only", capabilities=frozenset({Capability.CHAT})),
+                route("capable", capabilities=frozenset({Capability.CHAT, Capability.TOOLS})),
+            )
+        ),
+        provider,
+    )
+
+    with pytest.raises(UnavailableError):
+        await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
+
+    assert [call[0].model_id for call in provider.calls] == ["primary"]
+
+
+# ---------------------------------------------------------------------------
+# What `fallback_used` means
+# ---------------------------------------------------------------------------
+
+
+async def test_the_primary_route_serving_the_invocation_is_not_a_fallback():
+    """Configured fallbacks behind the primary do not make the primary a fallback."""
+    provider = MockProvider()
+    inference = InferenceService(
+        ModelRegistry((full_route(model_id="primary"), full_route(model_id="fallback"))),
+        provider,
+    )
+
+    result = await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
+
+    assert result.upstream_model == "primary"
+    assert result.attempt_count == 1
+    assert result.fallback_used is False
+
+
+async def test_an_attempt_on_a_fallback_route_is_what_sets_the_flag():
+    """A non-primary route serving the invocation after the primary path could not."""
+    state = InvocationState().with_attempt()
+
+    assert state.fallback_used is False
+    assert state.with_attempt(on_fallback=True).fallback_used is True
+
+
+async def test_the_flag_stays_set_once_a_fallback_route_has_been_used():
+    """Sticky, because one route other than the primary is enough to have fallen back."""
+    state = InvocationState().with_attempt(on_fallback=True).with_attempt()
+
+    assert (state.attempt_count, state.fallback_used) == (2, True)
+
+
+async def test_a_response_never_claims_a_fallback_capability_routing_did_not_take():
+    """A request the primary route serves reports no fallback, however many routes exist."""
     provider = MockProvider()
     inference = InferenceService(
         ModelRegistry(
@@ -490,24 +666,10 @@ async def test_an_ineligible_route_is_skipped_rather_than_fatal():
         provider,
     )
 
-    with pytest.raises(CapabilityError):
-        await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
+    result = await inference.invoke(request())
 
-    assert provider.calls == []
-
-
-async def test_the_refusal_names_the_first_configured_routes_missing_capability():
-    inference = service(
-        (
-            route("primary", capabilities=frozenset({Capability.CHAT})),
-            route("fallback", capabilities=frozenset({Capability.CHAT, Capability.VISION})),
-        )
-    )
-
-    with pytest.raises(CapabilityError) as error:
-        await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
-
-    assert error.value.details["capability"] == "tools"
+    assert result.attempt_count == 1
+    assert result.fallback_used is False
 
 
 # ---------------------------------------------------------------------------
