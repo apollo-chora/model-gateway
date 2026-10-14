@@ -395,3 +395,62 @@ async def test_an_injected_service_is_used_verbatim(provider):
         assert (await client.get("/readyz")).status == 200
     finally:
         await app.stop()
+
+
+async def test_the_completions_endpoint_is_installed():
+    """The factory's own application answers ``POST /v1/completions`` (PRD section 4.4).
+
+    The handler's own tests build their own application, so none of them can tell
+    whether the factory registers the route at all — which is how the embeddings
+    endpoint came to answer on a hand-built application and 404 on one started
+    from configuration alone.
+    """
+    models = registry()
+    provider = FakeTextProvider()
+    app = create_app(
+        Settings.from_env({}),
+        registry=models,
+        service=InferenceService(models, provider),
+    )
+    await app.start()
+    try:
+        response = await TestClient(app).post(
+            "/v1/completions",
+            content=JSONContent({"model": "text-default", "prompt": "Explain recursion."}),
+        )
+    finally:
+        await app.stop()
+
+    assert response.status == 200
+    payload = await response.json()
+    assert payload["object"] == "text_completion"
+    assert payload["choices"][0]["text"]
+    assert payload["usage"]["total_tokens"] == 67
+    assert provider.calls == 1
+
+
+async def test_the_responses_endpoint_is_installed():
+    """The factory's own application answers ``POST /v1/responses`` (PRD section 4.5)."""
+    models = registry()
+    provider = FakeTextProvider()
+    app = create_app(
+        Settings.from_env({}),
+        registry=models,
+        service=InferenceService(models, provider),
+    )
+    await app.start()
+    try:
+        response = await TestClient(app).post(
+            "/v1/responses",
+            content=JSONContent({"model": "text-default", "input": "Explain recursion."}),
+        )
+    finally:
+        await app.stop()
+
+    assert response.status == 200
+    payload = await response.json()
+    assert payload["object"] == "response"
+    assert payload["status"] == "completed"
+    assert payload["output"]
+    assert payload["usage"]["total_tokens"] == 67
+    assert provider.calls == 1

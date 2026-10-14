@@ -38,10 +38,12 @@ from model_gateway.errors import FailedPreconditionError
 from model_gateway.health import healthz, readyz
 from model_gateway.http import (
     register_chat_routes,
+    register_completions_routes,
     register_embeddings_routes,
     register_error_handlers,
     register_image_routes,
     register_model_routes,
+    register_responses_routes,
 )
 from model_gateway.http.auth import create_auth_middleware
 from model_gateway.inference import InferenceService
@@ -200,6 +202,8 @@ def create_app(
     app.router.add_get("/readyz", readyz)
     register_model_routes(app.router, registry)
     register_chat_routes(app.router, service)
+    register_completions_routes(app.router, service)
+    register_responses_routes(app.router, service)
     register_embeddings_routes(app.router, service)
     register_image_routes(app.router, service)
     register_error_handlers(app)

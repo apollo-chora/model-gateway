@@ -27,6 +27,10 @@ draws rather than the file sizes:
     ``GET /v1/models`` and ``GET /v1/models/{model_id}``.
 :mod:`~model_gateway.http.chat`
     ``POST /v1/chat/completions``.
+:mod:`~model_gateway.http.completions`
+    ``POST /v1/completions``, the legacy text-completion shape.
+:mod:`~model_gateway.http.responses`
+    ``POST /v1/responses``.
 :mod:`~model_gateway.http.embeddings`
     ``POST /v1/embeddings``.
 :mod:`~model_gateway.http.errors``
@@ -48,6 +52,10 @@ northbound interface, and the application factory is where the two meet
 """
 
 from model_gateway.http.chat import create_chat_completion, register_chat_routes
+from model_gateway.http.completions import (
+    create_completions,
+    register_completions_routes,
+)
 from model_gateway.http.dto import (
     ChatCompletion,
     ChatMessage,
@@ -73,6 +81,12 @@ from model_gateway.http.images import (
     register_image_routes,
 )
 from model_gateway.http.models import get_model, list_models, register_model_routes
+from model_gateway.http.responses import (
+    ResponseObject,
+    ResponsesRequest,
+    create_response,
+    register_responses_routes,
+)
 
 __all__ = [
     "ChatCompletion",
@@ -81,9 +95,13 @@ __all__ = [
     "EmbeddingsResponse",
     "ImageGenerationResponse",
     "ModelCard",
+    "ResponseObject",
+    "ResponsesRequest",
     "create_chat_completion",
+    "create_completions",
     "create_embeddings",
     "create_image_generations",
+    "create_response",
     "embedding_request_from_payload",
     "get_model",
     "handle_gateway_error",
@@ -92,8 +110,10 @@ __all__ = [
     "list_models",
     "model_list_payload",
     "register_chat_routes",
+    "register_completions_routes",
     "register_embeddings_routes",
     "register_error_handlers",
     "register_image_routes",
     "register_model_routes",
+    "register_responses_routes",
 ]
