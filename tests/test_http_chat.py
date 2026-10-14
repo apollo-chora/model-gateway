@@ -1,5 +1,8 @@
 """Tests for the chat completions endpoint (PRD sections 4.4, 9.5 and 16)."""
 
+import asyncio
+import json
+
 import pytest
 from blacksheep import Application, Content, JSONContent
 from blacksheep.server.routing import Router
@@ -10,6 +13,8 @@ from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import (
     FinishReason,
     InvocationResponse,
+    StreamEvent,
+    StreamEventKind,
     TextPart,
     ToolCall,
     Usage,
@@ -73,6 +78,65 @@ class FakeTextProvider:
         if self.error is not None:
             raise self.error
         return self.result
+
+
+class FakeStreamingProvider:
+    """A provider double that can both complete and stream (PRD 16).
+
+    ``complete`` behaves like :class:`FakeTextProvider`. ``stream`` yields one
+    content event per scripted delta and then a finish event, or raises the
+    scripted error — before any event if ``stream_error`` is set, or after the
+    deltas if an exception appears among them. The invocation id on every event
+    is the one the handler minted for the request.
+    """
+
+    def __init__(
+        self,
+        *,
+        deltas: list[object] | None = None,
+        stream_error: Exception | None = None,
+        error: Exception | None = None,
+        result: InvocationResponse | None = None,
+    ):
+        self.calls: list[tuple[Route, object]] = []
+        self.result = result if result is not None else completion()
+        self.error = error
+        self.deltas = deltas
+        self.stream_error = stream_error
+
+    async def complete(self, route: Route, request, context) -> InvocationResponse:
+        self.calls.append((route, request))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    async def stream(self, route: Route, request, context):
+        self.calls.append((route, request))
+        if self.stream_error is not None:
+            raise self.stream_error
+        invocation_id = request.invocation_id or ""
+        items = self.deltas
+        if items is None:
+            text = self.result.text
+            items = [text] if text else []
+        sequence = 0
+        for item in items:
+            if isinstance(item, Exception):
+                raise item
+            yield StreamEvent(
+                kind=StreamEventKind.CONTENT,
+                sequence=sequence,
+                invocation_id=invocation_id,
+                text=item,
+            )
+            sequence += 1
+        yield StreamEvent(
+            kind=StreamEventKind.FINISH,
+            sequence=sequence,
+            invocation_id=invocation_id,
+            finish_reason=self.result.finish_reason,
+            raw_finish_reason=self.result.raw_finish_reason,
+        )
 
 
 def build_app(provider: FakeTextProvider) -> Application:
@@ -219,21 +283,181 @@ async def test_an_unknown_model_is_a_model_not_found_error(client, provider):
     assert provider.calls == []
 
 
-async def test_a_streaming_request_is_refused_as_an_unsupported_capability(client, provider):
+async def test_a_streaming_request_is_served_as_server_sent_events():
+    """A streaming request is answered with SSE in the OpenAI chunk shape, ended by [DONE]."""
+    provider = FakeStreamingProvider()
+    app = build_app(provider)
+    await app.start()
+    try:
+        response = await post(TestClient(app), payload(stream=True))
+    finally:
+        await app.stop()
+
+    assert response.status == 200
+    assert response.content_type() == b"text/event-stream"
+    frames = _sse_data_frames(await response.text())
+    # The stream is terminated by [DONE].
+    assert frames[-1] == "[DONE]"
+    chunks = [json.loads(frame) for frame in frames[:-1]]
+    assert chunks, "a streaming answer carries at least one chunk"
+    for chunk in chunks:
+        assert chunk["object"] == "chat.completion.chunk"
+        assert chunk["model"] == "text-default"
+        assert chunk["id"].startswith("chatcmpl-")
+    assert chunks[0]["choices"][0]["delta"]["content"] == "Recursion is a technique..."
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+async def test_a_streaming_request_never_returns_a_whole_body():
+    """A streaming request is answered with chunks, not a single complete body."""
+    provider = FakeStreamingProvider()
+    app = build_app(provider)
+    await app.start()
+    try:
+        response = await post(TestClient(app), payload(stream=True))
+    finally:
+        await app.stop()
+
+    assert response.status == 200
+    body = await response.text()
+    assert "chat.completion\n" not in body
+    assert '"object": "chat.completion"' not in body
+
+
+async def test_a_streaming_request_with_a_provider_that_cannot_stream_is_refused(client, provider):
+    """A provider that cannot stream is refused, not faked (PRD 16)."""
     response = await post(client, payload(stream=True))
 
     assert response.status == 422
     body = await response.json()
     assert body["reason"] == "unsupported_capability"
-    assert "stream" in body["message"]
     assert provider.calls == []
 
 
-async def test_a_streaming_request_never_returns_a_whole_body(client):
-    body = await (await post(client, payload(stream=True))).text()
+async def test_a_streaming_request_with_an_unknown_model_is_refused_before_the_stream_starts():
+    """A pre-stream refusal is an ordinary error response, not an SSE stream."""
+    provider = FakeStreamingProvider()
+    app = build_app(provider)
+    await app.start()
+    try:
+        response = await post(TestClient(app), payload(model="no-such-model", stream=True))
+    finally:
+        await app.stop()
 
-    assert "chat.completion" not in body
-    assert "choices" not in body
+    assert response.status == 404
+    assert (await response.json())["reason"] == "model_not_found"
+    assert provider.calls == []
+
+
+async def test_a_streaming_request_with_a_capability_gap_is_refused_before_the_stream_starts():
+    """A capability gap refuses the request before the SSE response starts."""
+    provider = FakeStreamingProvider()
+    app = build_app(provider)
+    await app.start()
+    try:
+        response = await post(
+            TestClient(app),
+            payload(stream=True, response_format={"type": "json_object"}),
+        )
+    finally:
+        await app.stop()
+
+    assert response.status == 422
+    assert (await response.json())["reason"] == "unsupported_capability"
+    assert provider.calls == []
+
+
+async def test_a_mid_stream_failure_ends_the_stream_without_done():
+    """A failure after the first chunk ends the stream with an error, not [DONE]."""
+    provider = FakeStreamingProvider(
+        deltas=["Recursion is a technique...", UnavailableError("the connection dropped")]
+    )
+    app = build_app(provider)
+    await app.start()
+    try:
+        response = await post(TestClient(app), payload(stream=True))
+    finally:
+        await app.stop()
+
+    assert response.status == 200
+    frames = _sse_data_frames(await response.text())
+    # The stream ended without [DONE], because the answer did not complete.
+    assert "[DONE]" not in frames
+    # The last chunk is the terminal error event.
+    last_chunk = json.loads(frames[-1])
+    assert last_chunk["choices"][0]["finish_reason"] == "provider_unavailable"
+
+
+async def test_a_client_disconnect_stops_upstream_work():
+    """Closing the SSE stream mid-answer stops the provider's upstream work."""
+    provider = _BlockingStreamProvider()
+    app = build_app(provider)
+    await app.start()
+    try:
+        client = TestClient(app)
+        response = await client.post(
+            "/v1/chat/completions", content=JSONContent(payload(stream=True))
+        )
+        assert response.status == 200
+
+        stream_iter = response.stream().__aiter__()
+        chunk = await stream_iter.__anext__()
+        assert chunk.startswith(b"data:")
+        await provider.started.wait()
+        # A client disconnect closes the stream iterator.
+        await stream_iter.aclose()
+        for _ in range(50):
+            await asyncio.sleep(0)
+        # The stream was closed mid-stream: the upstream work was stopped.
+        assert provider.closed
+        assert not provider.completed
+    finally:
+        await app.stop()
+
+
+class _BlockingStreamProvider:
+    """A streaming provider that yields one event and then blocks until closed.
+
+    ``closed`` records that the stream was closed — normally, or because the
+    consumer went away — and ``completed`` records that it ran to its finish
+    event. A client disconnect closes the stream before it completes, so the
+    upstream work is stopped mid-stream.
+    """
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.closed = False
+        self.completed = False
+
+    async def complete(self, route, request, context) -> InvocationResponse:
+        return completion()
+
+    async def stream(self, route: Route, request, context):
+        self.started.set()
+        invocation_id = request.invocation_id or ""
+        try:
+            yield StreamEvent(
+                kind=StreamEventKind.CONTENT,
+                sequence=0,
+                invocation_id=invocation_id,
+                text="Recursion is a technique...",
+            )
+            await asyncio.Event().wait()
+            yield StreamEvent(
+                kind=StreamEventKind.FINISH,
+                sequence=1,
+                invocation_id=invocation_id,
+                finish_reason=FinishReason.STOP,
+                raw_finish_reason="stop",
+            )
+            self.completed = True
+        finally:
+            self.closed = True
+
+
+def _sse_data_frames(body: str) -> list[str]:
+    """Extract the ``data`` payloads from a Server-Sent Events body, in order."""
+    return [line[len("data: "):] for line in body.splitlines() if line.startswith("data: ")]
 
 
 async def test_a_remote_image_url_is_refused_before_the_provider_is_called(client, provider):
