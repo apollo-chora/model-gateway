@@ -5,76 +5,36 @@ The protocol is the one load balancers, service meshes and orchestrators probe:
 streams the state as it changes. The gateway registers the empty service name,
 which is the server's overall health rather than any one RPC.
 
-The servicer holds no state of its own: it reports the serving state the server
-was started with. A gateway that has not started is not serving, one that has is,
-and one that is shutting down is not — so ``Check`` before the listener starts
-reports ``NOT_SERVING`` rather than answering for a server that would reject the
-connection anyway.
+The servicer is the ``grpcio-health-checking`` package's own implementation
+rather than a clone written here. A clone that answers the protocol's shapes
+while diverging from its rules — an unknown service name refused rather than
+answered ``SERVICE_UNKNOWN``, a ``Watch`` that ends instead of holding the call
+open — is a probe that reads a healthy gateway as sick or a sick one as well,
+and the divergence surfaces only when a deployment's probes disagree with the
+gateway. The package's implementation is the protocol's reference, so the
+gateway serves that.
+
+The re-exported implementation is the package's AsyncIO one, because the
+listener is an ``grpc.aio.server``: the synchronous implementation serves
+``Watch`` from a blocking iterator that runs on gRPC's migration thread pool,
+and when such a call ends the pool's close callback never fires on this
+server, so its iterator stays blocked forever and the process cannot exit.
+The AsyncIO implementation serves the same protocol on the event loop.
+
+The protocol is served without authentication. It is registered on the listener
+directly, outside the gateway's authenticator, which only the gateway's own RPC
+handlers consult: a prober presents no API key and has none to present, and the
+gateway answers health on the same port as the service it probes, so one
+listener serves both.
+
+The servicer holds no state of its own beyond the serving state the listener
+reports. A gateway that has not started is not serving, one that has is, and
+one that is shutting down is not — so the listener sets the overall service to
+``NOT_SERVING`` before it starts, ``SERVING`` in ``start`` (which notifies any
+watchers), and enters graceful shutdown in ``stop`` before stopping the server,
+so a watcher is told the transition rather than left with a vanished connection.
 """
 
-import asyncio
-
-import grpc
-from grpc_health.v1 import health_pb2, health_pb2_grpc
+from grpc_health.v1._async import HealthServicer
 
 __all__ = ["HealthServicer"]
-
-_OVERALL = ""
-_POLL_SECONDS = 5.0
-
-
-class HealthServicer(health_pb2_grpc.HealthServicer):
-    """Answers the health protocol from the serving state the listener reports.
-
-    The state is set rather than fixed, because it changes over the listener's
-    lifetime: a listener that has not started is not serving, one that has is.
-    ``start`` flips it, so a probe answered before the listener is up is told
-    ``NOT_SERVING`` rather than reading as a server that would reject the
-    connection anyway.
-    """
-
-    def __init__(self, *, serving: bool = False) -> None:
-        self._serving = serving
-
-    def set_serving(self, serving: bool) -> None:
-        """Record whether the listener is serving calls."""
-        self._serving = serving
-
-    def _status(self) -> "health_pb2.HealthCheckResponse.ServingStatus":
-        return (
-            health_pb2.HealthCheckResponse.SERVING
-            if self._serving
-            else health_pb2.HealthCheckResponse.NOT_SERVING
-        )
-
-    async def Check(self, request, context):
-        """The serving state of one service name.
-
-        An unknown service name is ``NOT_SERVING`` rather than ``UNKNOWN``: the
-        name is not one this server carries, which for a health probe is the same
-        statement as not serving, and it keeps the protocol's three-value
-        vocabulary.
-        """
-        if request.service not in (_OVERALL,):
-            await context.abort(
-                grpc.StatusCode.NOT_FOUND,
-                f"the health protocol carries no service named {request.service!r}",
-            )
-        return health_pb2.HealthCheckResponse(status=self._status())
-
-    async def Watch(self, request, context):
-        """The serving state, and the change to it, as the call waits.
-
-        The gateway does not move between serving states on its own, so this
-        reports the current state once and then holds the call open until the
-        consumer cancels it — which is what a probe wants, and what an
-        implementation that never sends a first status would leave waiting.
-        """
-        if request.service not in (_OVERALL,):
-            await context.abort(
-                grpc.StatusCode.NOT_FOUND,
-                f"the health protocol carries no service named {request.service!r}",
-            )
-        yield health_pb2.HealthCheckResponse(status=self._status())
-        while not context.is_cancelled():
-            await asyncio.sleep(_POLL_SECONDS)
