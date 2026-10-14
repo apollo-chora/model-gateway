@@ -15,30 +15,49 @@ whatever opens the socket, which is this module:
   sent: there is no fall-through to a direct connection.
 * **No automatic redirect following.** :func:`build_async_client` returns a
   client built with ``follow_redirects=False``, so a 3xx surfaces to the caller
-  as the response it is. The gateway then decides the hop through
-  :func:`~model_gateway.security.url_policy.evaluate_redirect`, which revalidates
-  the destination and refuses an origin change unless the route opted in. This
-  transport neither follows nor evaluates a redirect: connecting is its job,
-  deciding is the gateway's.
+  as the response it is and is never followed. The gateway has no redirect-
+  evaluation step, so the hop is refused rather than assessed and surfaces to
+  the caller as an upstream error (PRD section 14.1). This transport neither
+  follows nor evaluates a redirect: connecting is its job.
 
 Pinning would be worthless if it changed who the upstream thinks it is talking
 to, so the original hostname survives it. The socket goes to the validated
 address while the ``Host`` header and the TLS server name — and therefore
 certificate validation — stay the hostname the caller asked for.
 
-Why the client must be passed to the binding per call
------------------------------------------------------
+Why a client must be passed to the binding per call
+---------------------------------------------------
 LiteLLM builds its own HTTP client when the caller does not supply one, and it
-hardcodes ``follow_redirects=True`` while doing so. The client this module
-returns is therefore the only way either control reaches the wire: passed as
-``client=`` to ``litellm.acompletion``, the connection is pinned and redirects
-surface; omitted, redirects are followed automatically and the connection is
-made to whatever the hostname resolves to at connect time. Omitting it loses
-both controls silently — no error, no warning, and no visible difference until a
-rebinding or a redirect is attempted. The same call site must keep
-``num_retries=0``, because a client supplied without it leaves the retry count at
-LiteLLM's own default and would stack a second retry loop on the gateway's (PRD
-section 11.3).
+hardcodes ``follow_redirects=True`` while doing so. A client supplied as
+``client=`` to ``litellm.acompletion`` is therefore the only way either control
+reaches the wire; omitted, redirects are followed automatically and the
+connection is made to whatever the hostname resolves to at connect time.
+Omitting it loses both controls silently — no error, no warning, and no visible
+difference until a rebinding or a redirect is attempted. The same call site must
+keep ``num_retries=0``, because a client supplied without it leaves the retry
+count at LiteLLM's own default and would stack a second retry loop on the
+gateway's (PRD section 11.3).
+
+Which client that is has two answers, because the pinned library does not accept
+the same object on every provider path, and the difference is a security
+boundary rather than a preference. Both shapes are built from the transport
+here; :mod:`model_gateway.providers.litellm_provider` is where one is chosen per
+dialect, and only for dialects whose path it has verified:
+
+* The OpenAI SDK path takes an ``openai.AsyncOpenAI``. A bare httpx client is
+  rejected by it (the SDK reads ``api_key`` and ``base_url`` off the client it
+  is handed), so :func:`build_async_client` supplies the httpx client that the
+  SDK object is built around.
+* The generic httpx path — the shared ``base_llm_http_handler`` and the
+  Anthropic handler both use it — takes an ``AsyncHTTPHandler``. Anything else
+  is *silently discarded*: the handler substitutes its own default client, which
+  re-resolves the hostname and follows redirects, and raises nothing. That path
+  also retries a connection error by rebuilding a client through
+  ``AsyncHTTPHandler.create_client``, and the rebuild is constructed from the
+  handler's own ``transport`` attribute. :func:`build_pinned_transport` exists
+  so the binding can hand the handler the pinned transport itself: every client
+  that handler creates, first or rebuilt, then carries the pinning and the
+  disabled redirect following, and the retry cannot leave the controls.
 
 A refusal raised here does not arrive at the gateway as its own type. The
 provider SDK beneath LiteLLM catches anything its own hierarchy does not name
@@ -61,7 +80,12 @@ from model_gateway.security.url_policy import (
     system_resolver,
 )
 
-__all__ = ["PinnedAddressTransport", "attempt_timeout", "build_async_client"]
+__all__ = [
+    "PinnedAddressTransport",
+    "attempt_timeout",
+    "build_async_client",
+    "build_pinned_transport",
+]
 
 _SECURE_SCHEME = "https"
 _INSECURE_SCHEME = "http"
@@ -122,9 +146,9 @@ class PinnedAddressTransport(httpx.AsyncBaseTransport):
 
         A redirect response is returned to the caller unchanged, and the
         destination is not even resolved. This transport follows no redirect and
-        evaluates none; the gateway decides through
-        :func:`~model_gateway.security.url_policy.evaluate_redirect` whether a hop
-        may proceed (PRD section 14.1).
+        evaluates none; the gateway has no redirect-evaluation step, so the hop
+        is refused rather than assessed and surfaces to the caller as an
+        upstream error (PRD section 14.1).
         """
         return await self._inner.handle_async_request(self._pin(request))
 
@@ -199,6 +223,36 @@ def attempt_timeout(
     return httpx.Timeout(timeout=budget, connect=connect)
 
 
+def build_pinned_transport(
+    *,
+    resolver: Resolver = system_resolver,
+    allow_insecure_transport: bool = False,
+    verify: ssl.SSLContext | bool = True,
+    inner: httpx.AsyncBaseTransport | None = None,
+) -> PinnedAddressTransport:
+    """Build the transport that pins every connection to a validated address.
+
+    This is the control itself, without a client wrapped around it. A binding
+    that must hand LiteLLM something other than an httpx client — the generic
+    httpx path takes an ``AsyncHTTPHandler``, and that handler rebuilds its
+    client from its own ``transport`` attribute — supplies this to it, so every
+    client the library creates from then on, first or rebuilt, is pinned and
+    does not follow redirects. See the module docstring.
+
+    ``verify`` is httpx's TLS verification setting: ``True`` for the default
+    trust store, ``False`` to disable verification, or an
+    :class:`ssl.SSLContext` for a private CA
+    (``ssl.create_default_context(cafile=...)``). It reaches the inner transport,
+    so it does not apply when one is supplied — a supplied transport owns its own
+    TLS configuration.
+    """
+    return PinnedAddressTransport(
+        resolver=resolver,
+        allow_insecure_transport=allow_insecure_transport,
+        inner=inner if inner is not None else httpx.AsyncHTTPTransport(verify=verify),
+    )
+
+
 def build_async_client(
     *,
     budget: float | None,
@@ -208,12 +262,13 @@ def build_async_client(
     verify: ssl.SSLContext | bool = True,
     inner: httpx.AsyncBaseTransport | None = None,
 ) -> httpx.AsyncClient:
-    """Build the client the inference binding must use for one attempt.
+    """Build the httpx client one attempt is made through.
 
     The returned client pins every connection to a validated address, never
     follows a redirect, and carries the attempt's timeout (PRD sections 9, 14.1
-    and 15). See the module docstring for why both controls are required and why
-    LiteLLM's own client cannot supply them.
+    and 15). See the module docstring for why both controls are required, why
+    LiteLLM's own client cannot supply them, and which provider paths accept this
+    client rather than :func:`build_pinned_transport`.
 
     One client per attempt: it is cheap, it owns a connection pool, and its
     timeout is this attempt's. Close it when the attempt ends — ``async with
@@ -233,13 +288,13 @@ def build_async_client(
     supplying the transport explicitly is what keeps the environment from
     installing one between the gateway and the upstream.
     """
-    pinned = PinnedAddressTransport(
-        resolver=resolver,
-        allow_insecure_transport=allow_insecure_transport,
-        inner=inner if inner is not None else httpx.AsyncHTTPTransport(verify=verify),
-    )
     return httpx.AsyncClient(
-        transport=pinned,
+        transport=build_pinned_transport(
+            resolver=resolver,
+            allow_insecure_transport=allow_insecure_transport,
+            verify=verify,
+            inner=inner,
+        ),
         timeout=attempt_timeout(budget, connect_timeout=connect_timeout),
         follow_redirects=False,
         trust_env=False,

@@ -31,7 +31,9 @@ from blacksheep import Application
 from blacksheep.settings.json import json_settings
 
 from model_gateway.app_logging import configure_logging
-from model_gateway.config import Settings
+from model_gateway.config import ConfigurationError, Settings
+from model_gateway.config.routes import Operation
+from model_gateway.errors import FailedPreconditionError
 from model_gateway.health import healthz, readyz
 from model_gateway.http import (
     register_chat_routes,
@@ -40,11 +42,38 @@ from model_gateway.http import (
 )
 from model_gateway.http.auth import create_auth_middleware
 from model_gateway.inference import InferenceService
-from model_gateway.providers.litellm_provider import LiteLLMProvider
+from model_gateway.providers.litellm_provider import (
+    LiteLLMProvider,
+    ensure_supported_dialect,
+)
 from model_gateway.registry import ModelRegistry
 from model_gateway.security.api_keys import ApiKeySet
 
 logger = structlog.get_logger(__name__)
+
+
+def _ensure_binding_can_run(registry: ModelRegistry) -> None:
+    """Refuse to start when a configured text route names a dialect the binding cannot run.
+
+    The binding refuses such a route at the attempt too, and this is not a
+    duplicate of that check: a deployment whose configuration the transport
+    controls cannot survive should not reach the point of serving requests at
+    all (PRD sections 6, 14.1 and 21). Only the text operation is checked,
+    because the text binding is the only one that exists; the check runs only
+    when this factory builds the binding, since an injected service brings its
+    own provider.
+    """
+    for model in registry.list_models():
+        if model.operation is not Operation.TEXT:
+            continue
+        for route in registry.routes_for(model.id):
+            try:
+                ensure_supported_dialect(route.format)
+            except FailedPreconditionError as error:
+                raise ConfigurationError(
+                    f"{model.id}: {error}. The gateway does not start with a route it cannot "
+                    f"run behind its transport controls"
+                ) from error
 
 
 def _orjson_dumps(obj) -> str:
@@ -73,6 +102,12 @@ def create_app(
     provider's own ceiling today; a later slice makes it the minimum of the
     configured timeout and the invocation deadline remaining when the attempt
     begins (PRD section 15), so a retry can never outlive the caller's budget.
+
+    Building that binding also validates the routes it would run: a text route
+    whose dialect the binding cannot keep behind the transport controls fails
+    the start (PRD section 14.1). An injected service is not validated, because
+    it brings its own provider and this factory cannot know what that provider
+    can run.
     """
     settings = settings or Settings.from_env()
     configure_logging(settings.log_level)
@@ -81,6 +116,7 @@ def create_app(
     registry = registry or ModelRegistry.from_env()
 
     if service is None:
+        _ensure_binding_can_run(registry)
         service = InferenceService(
             registry,
             LiteLLMProvider(),

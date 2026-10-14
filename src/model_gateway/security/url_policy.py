@@ -9,10 +9,13 @@ setting is refused unless the route opts in explicitly.
 Every URL the gateway is about to contact is validated first: the scheme must
 be HTTPS unless insecure transport is explicitly enabled for development, and
 every address a host resolves to must be publicly routable (PRD sections 9.4
-and 14). Redirects are revalidated; a redirect that stays within one origin
-proceeds, a cross-origin redirect is refused unless the caller opts in, and a
-route's credentials never cross an origin change (PRD section 7). Credentials
-must arrive through route configuration; a URL that embeds userinfo is refused.
+and 14). The redirect decision below — a same-origin hop permitted after
+revalidation, a cross-origin hop refused unless the caller opts in, credentials
+never carried across an origin change — is specified as policy (PRD sections 7
+and 14.1) but has no caller in a request path: the binding has no redirect-
+evaluation step, so a redirect is refused rather than assessed (PRD section
+14.1). Credentials must arrive through route configuration; a URL that embeds
+userinfo is refused.
 
 Transport contract
 ------------------
@@ -23,9 +26,11 @@ performs the outbound request is required to:
 
 - connect to the address that was validated (DNS pinning) instead of
   re-resolving the hostname and connecting wherever it now points, and
-- disable automatic redirect following, so that every hop passes through
-  :func:`evaluate_redirect`, which refuses a cross-origin hop unless the caller
-  opted in and never carries credentials across one.
+- disable automatic redirect following, so that a redirect surfaces instead of
+  being followed silently. No hop is evaluated today: the binding has no
+  redirect-evaluation step, so every redirect is refused and surfaces to the
+  caller as an upstream error, and :func:`evaluate_redirect` has no caller in a
+  request path (PRD section 14.1).
 
 Without both obligations met, this module is advisory only.
 """
@@ -172,8 +177,10 @@ def validate_upstream_url(
     Configuration-time screening only, not a guarantee of SSRF prevention: the
     checks run once, against a DNS answer the transport will obtain again. The
     transport that performs the outbound request is required to pin the
-    validated address and to disable automatic redirect following, so that every
-    hop passes through :func:`evaluate_redirect` (module docstring).
+    validated address and to disable automatic redirect following, so that a
+    redirect surfaces instead of being followed silently. No hop is evaluated:
+    the binding refuses redirects rather than assessing them (module docstring,
+    PRD section 14.1).
     """
     parsed = _parse_url(url, what="URL")
     _check_scheme(parsed.scheme, allow_insecure_transport=allow_insecure_transport)
@@ -224,9 +231,11 @@ def evaluate_redirect(
     the hop proceeds, but credentials are never forwarded across the origin
     change (PRD sections 7 and 14).
 
-    This helper only has an effect when the transport disables automatic
-    redirect following; a transport that follows redirects on its own never
-    consults it (module docstring).
+    No request path calls this helper. It states the policy for controlled
+    redirect handling, which is not yet implemented: the binding has no
+    redirect-evaluation step, so a transport that disables automatic redirect
+    following returns the 3xx to the caller unchanged and the hop is refused
+    rather than assessed (PRD section 14.1).
 
     ``source_url`` is the URL the gateway already validated, so a malformed
     source raises :class:`UrlPolicyError`; a malformed target is a refusal.
