@@ -8,10 +8,10 @@ payload — so what runs is exactly what the installed binding does with a real
 provider's answer.
 
 The failure paths construct LiteLLM's and the OpenAI SDK's exception classes
-in memory, which is where the mapping of PRD section 5.4 lives. The two tests
-that pin the ``.env`` guard run the binding's import in a subprocess with a
+in memory, which is where the mapping of PRD section 5.4 lives. The tests that
+pin the ``.env`` guard run a binding module's import in a subprocess with a
 ``.env`` in its working directory: that side effect only exists at import time,
-and only a fresh process can show whether the binding suppressed it.
+and only a fresh process can show whether the seam suppressed it.
 """
 
 import asyncio
@@ -624,7 +624,18 @@ class TestTheProtocol:
 
 
 class TestTheEnvGuard:
-    """Importing the binding must not load a working-directory ``.env`` (PRD section 6)."""
+    """Importing the binding must not load a working-directory ``.env`` (PRD section 6).
+
+    The guard lives in :mod:`model_gateway.providers._litellm`, the seam every
+    binding module imports the library through, and it *forces* the mode. These
+    tests import a binding module in a subprocess — the provider on its own, and
+    the translation module on its own, which crosses the seam with no other
+    binding module imported first — with a ``.env`` in the working directory and
+    no ``LITELLM_MODE`` in the environment, plus one run with an ambient
+    ``LITELLM_MODE=DEV`` to prove the forced mode overrides even an explicit
+    value: the mode is gateway-owned implementation state, not operator
+    configuration.
+    """
 
     PROBE = "GATEWAY_GUARD_PROBE_VARIABLE"
 
@@ -657,14 +668,38 @@ class TestTheEnvGuard:
 
         assert result.returncode == 0, result.stderr
 
-    def test_an_explicit_operator_mode_is_respected(self, tmp_path: Path) -> None:
-        """``setdefault``: the operator's own ``LITELLM_MODE`` choice wins over the guard."""
+    def test_importing_the_translation_module_directly_leaves_the_env_unloaded(
+        self, tmp_path: Path
+    ) -> None:
+        """The translation module crosses the seam too: its direct import is guarded.
+
+        Importing :mod:`model_gateway.providers.litellm_translation` on its own
+        — without the provider module, and without this session's conftest guard —
+        must still force the mode, because the seam is the one place the guard
+        lives and every binding module imports the library through it rather than
+        importing ``litellm`` directly.
+        """
+        (tmp_path / ".env").write_text(f"{self.PROBE}=from-env-file\n", encoding="utf-8")
+        # The probe must start unset, or the test would pass for the wrong reason.
+        env = {key: value for key, value in os.environ.items() if key != "LITELLM_MODE"}
+        code = (
+            "import model_gateway.providers.litellm_translation\n"
+            "import os\n"
+            f"raise SystemExit(0 if os.environ.get({self.PROBE!r}) is None else 1)\n"
+        )
+
+        result = self._run_import(code, tmp_path, env)
+
+        assert result.returncode == 0, result.stderr
+
+    def test_the_forced_mode_overrides_an_ambient_dev_value(self, tmp_path: Path) -> None:
+        """An ambient ``LITELLM_MODE=DEV`` does not survive the seam's forced mode."""
         (tmp_path / ".env").write_text(f"{self.PROBE}=from-env-file\n", encoding="utf-8")
         env = {**os.environ, "LITELLM_MODE": "DEV"}
         code = (
             "import model_gateway.providers.litellm_provider\n"
             "import os\n"
-            f"raise SystemExit(0 if os.environ.get({self.PROBE!r}) == 'from-env-file' else 1)\n"
+            f"raise SystemExit(0 if os.environ.get({self.PROBE!r}) is None else 1)\n"
         )
 
         result = self._run_import(code, tmp_path, env)

@@ -5,11 +5,20 @@ its DEV-mode default calls ``dotenv.load_dotenv()`` at import time. That
 side effect would leak the deployment's configured endpoints and credentials
 into ``os.environ`` for the whole test session, polluting tests that read the
 process environment (for example the route parser's default-environment
-test). Setting ``LITELLM_MODE`` to a non-DEV value before the first LiteLLM
-import keeps the session's environment clean. The mode otherwise only affects
-the proxy CLI, which these tests never run.
+test).
+
+The production import path is guarded at :mod:`model_gateway.providers._litellm`,
+the seam every binding module imports the library through: it forces
+``LITELLM_MODE`` to ``PRODUCTION`` before the first ``import litellm``, so no
+ambient value — not even an explicit ``LITELLM_MODE=DEV`` — can re-enable the
+load. This file must stay the test session's own copy of that guard because
+the binding tests import ``litellm`` and its fixture types directly, to build
+upstream shapes from the library's own types, and pytest imports this file
+before any test module: without it, the session's first direct import would
+run before any seam. The mode is gateway-owned implementation state, not
+operator configuration, so it is forced here exactly as the seam forces it.
 """
 
 import os
 
-os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+os.environ["LITELLM_MODE"] = "PRODUCTION"
