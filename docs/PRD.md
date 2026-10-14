@@ -1,17 +1,18 @@
 # Product Requirements Document
 # Vendor-Neutral AI Model Gateway
 
-**Version:** 1.7  
+**Version:** 1.8  
 **Status:** Implementation-ready specification  
 **Implementation language:** Python  
 **Architecture:** Standalone, self-hostable, multi-provider AI gateway  
 **Protocols:** gRPC, HTTP/JSON  
 **Configuration:** Environment variables  
 **Primary deployment:** Containerized service  
-**Supported capabilities:** Text generation, chat, tool calling, vision, image generation, embeddings
+**Supported capabilities:** Text generation, chat, tool calling, vision, structured output, image generation, embeddings
 
 **Revision history:**
 
+- **1.8** — Adds the `structured-output` route capability to the capability vocabulary (§4.3, §6, §18) and requires a route that cannot honour a structured-output requirement to be refused with a capability error rather than handed the request and allowed to answer with free text (§9.5); records that a system instruction is baseline chat semantics with no capability of its own, and that the gateway forwards an invocation-level instruction and a `system` message without merging either (§5.1, §9.5); and states the OpenAI compatibility boundary in §4 — the HTTP inference endpoints follow the compatible shapes for a supported subset rather than being drop-in compatible, and an unknown parameter is rejected as an invalid request rather than ignored, so a client SDK that serialises a new default parameter receives an error the caller can act on instead of a false assurance that its request was honoured.
 - **1.7** — Closes a gap in the binding contract: adds §9.1, which requires every binding translator to account for every semantically relevant field of the upstream response and request — mapping it into the canonical model or rejecting the response as unsupported — states that rejecting unknown canonical keys is one layer of that defence rather than the enforcement point for upstream translation, and requires binding tests to use upstream fixtures carrying additional semantic fields so a drop cannot pass undetected; renumbers §9's remaining subsections and their cross-references. Also states at the canonical model's definition (§5.1) that request `metadata` is never forwarded to the model or provider unless a separately specified feature explicitly consumes a named key, so metadata cannot become an untyped provider-parameter bag.
 - **1.6** — Replaces §8's stale path-joining prohibition with a rule against stripping, deduplicating, reordering or reinterpreting configured path components, so configured repetition is preserved; rewrites §14.1's network-level fallback as a compensating control that must block the prohibited address classes rather than claim equivalence to exact address pinning; and requires cross-origin redirects to be rejected by default unless a route opts in explicitly (§7, §14.1).
 - **1.5** — Adds §14.1, which states that configuration-time URL screening alone is not SSRF prevention and requires the outbound transport to pin the connection to a validated address and to disable automatic redirect following, with a network-level egress restriction as the fallback where the binding cannot provide those controls; cross-references the obligation from §9 and narrows the SSRF wording in §9.2 and §14.
@@ -143,6 +144,10 @@ The gateway must expose the following endpoints.
 
 The inference endpoints should follow their commonly used OpenAI-compatible response shapes where applicable.
 
+**Compatibility boundary.** That compatibility covers a supported subset of the OpenAI API; it is not drop-in compatibility with it. A request is honoured only when the gateway understands every parameter it carries, so an unknown parameter is rejected as an invalid request rather than ignored. A client SDK that serialises a parameter this gateway does not implement — most often a newly introduced default in a newer SDK release — therefore receives an invalid-request error, and the caller either removes the parameter or the gateway is extended to support it.
+
+The rejection is deliberate. Silently accepting an unknown parameter would tell the caller its request was honoured while the gateway does not know what the parameter means. Such a parameter may change the result, and a gateway that ignored it would report an answer to a request it never fully understood; refusing it keeps the caller's view of the request and the gateway's view of it identical. It is the same unknown-key rule the canonical boundary applies everywhere (§9.1), applied to the wire format itself.
+
 ## 4.1 Health
 
 `GET /healthz`
@@ -182,7 +187,7 @@ Example response:
       "owned_by": "gateway",
       "context_window": 1048576,
       "max_output_tokens": 131072,
-      "capabilities": ["chat", "tools", "vision"]
+      "capabilities": ["chat", "tools", "vision", "structured-output"]
     },
     {
       "id": "embedding-default",
@@ -250,6 +255,8 @@ Response:
 ```
 
 The endpoint must support system, developer, user, assistant, and tool messages where the selected provider supports their semantics.
+
+A `system` message is conversation-level. The invocation-level instruction a caller gives is a separate element — `instructions` on the Responses API (§4.5), `system_prompt` in the canonical request (§5.1) — and the gateway forwards both without merging either, because folding one into the other would change what the provider sees.
 
 ## 4.5 Responses API
 
@@ -388,6 +395,8 @@ The canonical gRPC request must represent:
 
 Request `metadata` is bookkeeping for the caller — routing hints, correlation and provenance attributes, telemetry annotations. It is never forwarded to the model or to the upstream provider. Metadata reaches an upstream call only when a separately specified feature of this gateway explicitly names a key and defines its meaning; absent such a specification, no metadata key is copied into the request the binding constructs. Metadata must not become an untyped bag of provider parameters: forwarding caller-supplied keys into `litellm.completion`, `litellm.embedding` or `litellm.image_generation` would give an inbound caller control over parameters the canonical contract does not type, and would let a provider-specific key override gateway-owned policy.
 
+`system_prompt` is the invocation-level instruction, and it is not interchangeable with a `system`-role message in `messages`: the first instructs the invocation, the second is part of the conversation the caller supplied, and the gateway forwards both without merging either (§9.5). An instruction needs no route capability of its own, because it is baseline chat semantics rather than an optional behaviour: the route's `chat` capability carries it, and a binding that cannot map an instruction must reject the invocation as unsupported rather than drop it (§9.1).
+
 The protobuf schema must assign stable field numbers and preserve backward compatibility after publication.
 
 ## 5.2 InvokeResponse
@@ -452,6 +461,8 @@ An absent optional capability is disabled rather than preventing unrelated capab
 
 `*_FORMAT` keeps its name in every capability block. Its value is the provider dialect name understood by the inference binding — a LiteLLM provider name such as `openai` or `vertex_ai`, not the company operating the endpoint. The operation performed (chat, embedding, image generation) is determined by which capability block the variable belongs to, not by the variable name: `TEXT_LLM_FORMAT` selects the dialect for chat and text, `EMBEDDINGS_FORMAT` for embeddings, and `IMAGE_GEN_FORMAT` for image generation.
 
+`*_CAPABILITIES` names the behaviours a route declares, drawn from one shared vocabulary: `chat`, `tools`, `vision`, `structured-output`, `generation`, `editing`, and `embeddings`. Which values are meaningful follows from the operation the block configures: a text route uses `chat`, `tools`, `vision` and `structured-output`; an image route uses `generation` and `editing`; an embeddings route uses `embeddings`. A declared capability is a claim the gateway relies on when it selects a route, so it must not be declared for a provider that does not support it: the gateway would then send a request the route cannot honour, having checked the very capability that was supposed to prevent exactly that.
+
 ## 6.1 Text generation
 
 ```dotenv
@@ -462,7 +473,7 @@ TEXT_LLM_FORMAT=openai
 TEXT_LLM_AUTH_TYPE=bearer
 TEXT_LLM_PATH=
 TEXT_LLM_EXTRA_HEADERS_JSON={}
-TEXT_LLM_CAPABILITIES=chat,tools,vision
+TEXT_LLM_CAPABILITIES=chat,tools,vision,structured-output
 TEXT_LLM_CONTEXT_WINDOW=
 TEXT_LLM_MAX_OUTPUT_TOKENS=
 ```
@@ -481,6 +492,8 @@ Supported initial formats (LiteLLM provider names):
 | `azure` | Azure OpenAI |
 
 `TEXT_LLM_FORMAT` is the provider dialect name for chat and text understood by the inference binding (a LiteLLM provider name), not the company operating the endpoint.
+
+`structured-output` is what a text route must declare to serve a caller's non-text response format — `json_object` or `json_schema` (§9.5). A route that does not declare it is not selected for a request carrying one, and when no configured route declares it the invocation is refused with a capability error naming `structured-output`. A `text` response format asks for nothing beyond `chat`, because it is the provider's own default.
 
 ## 6.2 Image generation
 
@@ -504,7 +517,7 @@ Possible image formats:
 - `gemini`
 - `azure`
 
-Image editing is enabled only when explicitly supported.
+Image editing is enabled only when explicitly supported: `IMAGE_GEN_CAPABILITIES` accepts `generation` and `editing`, and a route declaring `generation` alone must not be handed an edit request (§4.6). `structured-output` is a text-route capability and is not meaningful for an image block, whose response carries image data rather than a schema-conforming document.
 
 ## 6.3 Embeddings
 
@@ -518,9 +531,12 @@ EMBEDDINGS_PATH=
 EMBEDDINGS_DIMENSIONS=
 EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM=false
 EMBEDDINGS_EXTRA_HEADERS_JSON={}
+EMBEDDINGS_CAPABILITIES=embeddings
 ```
 
 `EMBEDDINGS_FORMAT` is the provider dialect name for embeddings (`openai`, `vertex_ai`, `gemini`, `azure`, `ollama`), and `EMBEDDINGS_MODEL_ID` is the bare upstream model name.
+
+`EMBEDDINGS_CAPABILITIES` defaults to `embeddings`, the only capability an embeddings route offers.
 
 The gateway must support both fixed-dimension and configurable-dimension models.
 
@@ -696,6 +712,10 @@ Remote image fetching must satisfy the same controls as upstream calls: the gate
 When a provider does not support a requested capability, the gateway must return a structured capability error.
 
 It must not silently discard tools, images, system instructions, structured-output requirements, or other semantically important parameters.
+
+**Structured output.** A structured-output requirement is a capability in its own right, not a generation parameter the provider may treat as advice. A caller's non-text response format — `json_object` or `json_schema` — is honoured only by a route that declares the `structured-output` capability (§6). A route that does not declare it must not be handed the request, and when no configured route can honour the requirement the invocation is refused with a capability error naming `structured-output`. Answering with free text while the caller believes its output shape was guaranteed is the failure this forbids, and the caller's schema — not the provider's convenience — decides whether the requirement was met. A `text` response format needs nothing beyond `chat`.
+
+**System instructions.** A system instruction needs no capability of its own, because it is baseline chat semantics rather than an optional behaviour: a route that declares `chat` claims to handle an instruction, and a binding that cannot map one must refuse the invocation rather than drop it or fold it into the conversation. The gateway carries an instruction in the form it was given. An invocation-level instruction — `system_prompt` in the canonical request (§5.1), `instructions` on the Responses API (§4.5) — and a `system` message inside `messages` are separate elements, and the gateway forwards both without merging either, because silently folding one into the other would change what the provider sees (§9.1).
 
 ## 9.6 Route-to-invocation mapping
 
@@ -1007,7 +1027,7 @@ TEXT_LLM_FORMAT=openai
 TEXT_LLM_AUTH_TYPE=bearer
 TEXT_LLM_PATH=
 TEXT_LLM_EXTRA_HEADERS_JSON={}
-TEXT_LLM_CAPABILITIES=chat,tools,vision
+TEXT_LLM_CAPABILITIES=chat,tools,vision,structured-output
 TEXT_LLM_CONTEXT_WINDOW=
 TEXT_LLM_MAX_OUTPUT_TOKENS=
 TEXT_LLM_ROUTES_JSON=[]
@@ -1036,6 +1056,7 @@ EMBEDDINGS_AUTH_TYPE=bearer
 EMBEDDINGS_PATH=
 EMBEDDINGS_DIMENSIONS=1024
 EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM=false
+EMBEDDINGS_CAPABILITIES=embeddings
 EMBEDDINGS_ROUTES_JSON=[]
 
 # ======================================
