@@ -110,6 +110,7 @@ def test_request_fixture_pins_a_multi_turn_conversation() -> None:
         Role.ASSISTANT,
         Role.TOOL,
         Role.USER,
+        Role.ASSISTANT,
     ]
 
 
@@ -139,6 +140,17 @@ def test_request_fixture_pins_a_multimodal_message() -> None:
     assert parts[1].data is not None and parts[1].url is None
     assert parts[2].data is None and parts[2].url == "https://images.example/paris.jpg"
     assert parts[2].media_type == "image/jpeg"
+
+
+def test_request_fixture_pins_a_refusal_replayed_as_assistant_history() -> None:
+    """An assistant refusal is history, so a request may carry one (PRD 5.2)."""
+    document, _ = fixture("invocation_request.json")
+    parsed = InvocationRequest.from_dict(document)
+
+    last = parsed.messages[-1]
+    assert last.role is Role.ASSISTANT
+    assert last.content == (RefusalPart(text="I can't judge whether that photo shows Paris."),)
+    assert InvocationRequest.from_dict(parsed.to_dict()) == parsed
 
 
 def test_request_fixture_pins_a_structured_output_requirement() -> None:
@@ -625,7 +637,7 @@ def test_tool_call_output_item_refuses_an_unknown_key() -> None:
 def test_message_parses_its_content_parts() -> None:
     message = Message.from_dict(
         {
-            "role": "user",
+            "role": "assistant",
             "content": [
                 {"type": "text", "text": "hi"},
                 {"type": "image", "data": "AAAA"},
@@ -645,6 +657,26 @@ def test_assistant_history_may_carry_a_refusal() -> None:
     message = Message(role=Role.ASSISTANT, content=(RefusalPart(text="I can't help with that."),))
 
     assert Message.from_dict(message.to_dict()) == message
+
+
+@pytest.mark.parametrize("role", [Role.SYSTEM, Role.DEVELOPER, Role.USER, Role.TOOL])
+def test_message_refuses_a_refusal_in_a_context_the_caller_authors(role: Role) -> None:
+    """A refusal is the model's own decision; a caller-authored message cannot carry one."""
+    with pytest.raises(ValueError, match=f"a {role.value!r} message cannot carry a refusal part"):
+        Message(role=role, content=(RefusalPart(text="no"),))
+
+
+def test_message_refuses_a_refusal_in_a_caller_authored_message_when_parsing() -> None:
+    with pytest.raises(ValueError, match="a 'user' message cannot carry a refusal part"):
+        Message.from_dict(
+            {
+                "role": "user",
+                "content": [{"type": "refusal", "text": "no"}],
+                "name": None,
+                "tool_calls": [],
+                "tool_call_id": None,
+            }
+        )
 
 
 def test_message_round_trip() -> None:
@@ -814,12 +846,28 @@ def test_tool_result_carries_the_same_content_parts_a_message_does() -> None:
         content=(
             TextPart(text="Paris:"),
             ImagePart(data="AAAA", media_type="image/png"),
-            RefusalPart(text="the rest is restricted"),
         ),
     )
 
     assert result.text == "Paris:"
     assert ToolResult.from_dict(result.to_dict()) == result
+
+
+def test_tool_result_refuses_a_refusal_part() -> None:
+    """A tool reports an error through 'is_error'; it cannot issue a model refusal."""
+    with pytest.raises(ValueError, match="a tool result cannot carry a refusal part"):
+        ToolResult(tool_call_id="call_01", content=(RefusalPart(text="no"),))
+
+
+def test_tool_result_refuses_a_refusal_part_when_parsing() -> None:
+    with pytest.raises(ValueError, match="a tool result cannot carry a refusal part"):
+        ToolResult.from_dict(
+            {
+                "tool_call_id": "call_01",
+                "content": [{"type": "refusal", "text": "no"}],
+                "is_error": False,
+            }
+        )
 
 
 def test_tool_result_refuses_a_bare_string_as_content() -> None:
@@ -925,6 +973,14 @@ def test_generation_config_round_trip() -> None:
             "strict": True,
         },
     }
+
+
+def test_generation_config_round_trips_a_boolean_schema() -> None:
+    config = GenerationConfig(
+        response_format=ResponseFormat(mode=ResponseFormatMode.JSON_SCHEMA, schema=True)
+    )
+
+    assert GenerationConfig.from_dict(config.to_dict()) == config
 
 
 def test_generation_config_round_trips_an_unset_parameter_set() -> None:
@@ -1068,6 +1124,8 @@ def test_response_format_refuses_a_schema_in_a_mode_that_does_not_use_one(
 ) -> None:
     with pytest.raises(ValueError, match="must not carry a 'schema'"):
         ResponseFormat(mode=mode, schema={"type": "object"})
+    with pytest.raises(ValueError, match="must not carry a 'schema'"):
+        ResponseFormat(mode=mode, schema=True)
 
 
 @pytest.mark.parametrize(
@@ -1088,10 +1146,30 @@ def test_response_format_refuses_strictness_without_a_schema(mode: ResponseForma
         ResponseFormat(mode=mode, strict=True)
 
 
-def test_response_format_refuses_a_schema_that_is_not_an_object() -> None:
-    """A boolean JSON Schema is refused explicitly rather than coerced (PRD 9.1)."""
+@pytest.mark.parametrize("schema", [True, False])
+def test_response_format_accepts_a_boolean_schema(schema: bool) -> None:
+    """The specification permits a boolean as a complete schema document."""
+    response_format = ResponseFormat(mode=ResponseFormatMode.JSON_SCHEMA, schema=schema)
+
+    assert response_format.schema is schema
+    assert response_format.to_dict()["schema"] is schema
+    assert ResponseFormat.from_dict(response_format.to_dict()) == response_format
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        pytest.param("object", id="string"),
+        pytest.param(5, id="number"),
+        pytest.param(["type", "object"], id="array"),
+    ],
+)
+def test_response_format_refuses_a_schema_that_is_neither_an_object_nor_a_boolean(
+    schema: object,
+) -> None:
+    """A schema the specification does not define is refused rather than coerced (PRD 9.1)."""
     with pytest.raises(ValueError, match="must be a JSON object"):
-        ResponseFormat(mode=ResponseFormatMode.JSON_SCHEMA, schema=True)
+        ResponseFormat(mode=ResponseFormatMode.JSON_SCHEMA, schema=schema)
 
 
 def test_response_format_refuses_an_unknown_key() -> None:

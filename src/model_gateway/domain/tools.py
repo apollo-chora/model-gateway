@@ -28,6 +28,7 @@ from model_gateway.domain.parts import (
     TextPart,
     as_content_parts,
     content_part_from_dict,
+    reject_refusal_parts,
 )
 from model_gateway.domain.serialization import (
     as_enumeration,
@@ -171,7 +172,8 @@ class ToolResult:
     itself; it exists so that a trusted executor's result has a canonical form,
     and widening it now costs nothing while leaving it as ``str`` would
     knowingly require a migration as soon as a tool returns something else
-    (PRD section 9.4).
+    (PRD section 9.4). A tool result cannot carry a refusal part: a tool that
+    failed says so through ``is_error``, and a tool cannot issue a model refusal.
 
     ``is_error`` records a failed execution as a result rather than as an
     exception: a tool that failed is information the model needs, not a reason to
@@ -192,9 +194,9 @@ class ToolResult:
             "tool_call_id",
             as_required_text("tool result 'tool_call_id'", self.tool_call_id),
         )
-        object.__setattr__(
-            self, "content", as_content_parts("tool result 'content'", self.content)
-        )
+        content = as_content_parts("tool result 'content'", self.content)
+        reject_refusal_parts("a tool result", content)
+        object.__setattr__(self, "content", content)
         object.__setattr__(
             self,
             "is_error",

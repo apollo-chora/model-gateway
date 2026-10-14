@@ -98,6 +98,18 @@
       "name": null,
       "tool_calls": [],
       "tool_call_id": null
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "refusal",
+          "text": "I can't judge whether that photo shows Paris."
+        }
+      ],
+      "name": null,
+      "tool_calls": [],
+      "tool_call_id": null
     }
   ],
   "system_instruction": "Answer concisely.",

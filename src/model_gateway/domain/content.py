@@ -14,7 +14,12 @@ from enum import StrEnum
 from typing import Self
 
 from model_gateway.domain.json_value import JsonDocument
-from model_gateway.domain.parts import ContentPart, as_content_parts, content_part_from_dict
+from model_gateway.domain.parts import (
+    ContentPart,
+    as_content_parts,
+    content_part_from_dict,
+    reject_refusal_parts,
+)
 from model_gateway.domain.serialization import (
     as_enumeration,
     as_object,
@@ -59,7 +64,9 @@ class Message:
 
     ``content`` is an ordered sequence of content parts. It may be empty: a
     provider may report an assistant turn whose only content is a tool call, and
-    a tool result is not always text.
+    a tool result is not always text. Only an assistant message may carry a
+    refusal part: a refusal is the model's own decision to decline, so a message
+    the caller authors cannot contain one.
     """
 
     role: Role
@@ -75,6 +82,8 @@ class Message:
         tool_calls = as_tool_calls("message 'tool_calls'", self.tool_calls)
         tool_call_id = as_optional_text("message 'tool_call_id'", self.tool_call_id)
 
+        if role is not Role.ASSISTANT:
+            reject_refusal_parts(f"a {role.value!r} message", content)
         if tool_calls and role is not Role.ASSISTANT:
             raise ValueError(
                 f"a {role.value!r} message cannot carry tool calls; only an assistant message "
