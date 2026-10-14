@@ -324,7 +324,8 @@ async def test_an_unsupported_parameter_is_refused_with_a_capability_error(
 
 
 @pytest.mark.parametrize(
-    "overrides", [{"n": 1}, {"logprobs": False}, {"echo": False}, {"best_of": 1}]
+    "overrides",
+    [{"n": 1}, {"logprobs": False}, {"echo": False}, {"best_of": 1}, {"suffix": None}],
 )
 async def test_a_default_value_that_matches_gateway_behaviour_is_accepted(
     client, provider, overrides
@@ -333,6 +334,50 @@ async def test_a_default_value_that_matches_gateway_behaviour_is_accepted(
 
     assert response.status == 200
     assert len(provider.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("overrides", "json_type"),
+    [
+        ({"n": True}, "a boolean"),
+        ({"n": None}, "null"),
+        ({"n": "1"}, "a string"),
+        ({"best_of": True}, "a boolean"),
+        ({"logprobs": 0}, "a number"),
+        ({"echo": 0}, "a number"),
+        ({"echo": ""}, "a string"),
+        ({"echo": []}, "a JSON array"),
+        ({"echo": {}}, "a JSON object"),
+        ({"suffix": 5}, "a number"),
+        ({"suffix": True}, "a boolean"),
+    ],
+)
+async def test_an_ill_typed_parameter_is_malformed_not_a_capability_refusal(
+    client, provider, overrides, json_type
+):
+    """A value of the wrong wire type asks for no feature, so it is malformed input.
+
+    ``{"n": true}`` is the case Python reads wrongly — ``True == 1`` — and the
+    falsy values are the ones generic emptiness reads as asking for nothing.
+    """
+    response = await post(client, payload(**overrides))
+
+    assert response.status == 400
+    body = await response.json()
+    assert body["reason"] == "invalid_request"
+    assert next(iter(overrides)) in body["message"]
+    assert json_type in body["message"]
+    assert provider.calls == []
+
+
+async def test_the_wire_type_refusal_is_not_the_unknown_parameter_refusal(client):
+    """An ill-typed recognised parameter is a different error from an unknown key."""
+    response = await post(client, payload(echo=0))
+
+    body = await response.json()
+    assert response.status == 400
+    assert body["reason"] == "invalid_request"
+    assert "unsupported parameter" not in body["message"]
 
 
 async def test_a_body_with_an_unknown_parameter_is_refused(client, provider):
