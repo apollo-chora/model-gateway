@@ -33,13 +33,14 @@ from litellm.types.utils import EmbeddingResponse as LiteLLMEmbeddingResponse
 from model_gateway.capabilities import Capability
 from model_gateway.config.routes import Operation, Route
 from model_gateway.domain.embeddings import EmbeddingRequest, EmbeddingResponse
-from model_gateway.domain.generation import Usage
+from model_gateway.domain.generation import Usage, UsageSource
 from model_gateway.errors import (
     CapabilityError,
     DeadlineExceededError,
     ErrorReason,
     FailedPreconditionError,
     InternalError,
+    MalformedResponseError,
     ResourceExhaustedError,
     UnauthenticatedError,
     UnavailableError,
@@ -282,12 +283,26 @@ class TestTheCall:
 
         assert len(embedding.calls) == 1
 
-    async def test_a_stated_dimension_is_forwarded(self, wire) -> None:
+    async def test_a_stated_dimension_is_forwarded_when_the_route_enables_it(self, wire) -> None:
+        """The route's own flag decides whether the caller's ask reaches the upstream."""
+        provider, embedding = wire(response_from(embedding_payload()))
+
+        await provider.embed(
+            make_route(supports_dimensions_param=True), make_request(dimensions=256),
+            make_context(),
+        )
+
+        assert embedding.calls[0]["dimensions"] == 256
+
+    async def test_a_stated_dimension_is_not_forwarded_when_the_route_does_not_enable_it(
+        self, wire
+    ) -> None:
+        """The operator configured the route as not accepting the parameter."""
         provider, embedding = wire(response_from(embedding_payload()))
 
         await provider.embed(make_route(), make_request(dimensions=256), make_context())
 
-        assert embedding.calls[0]["dimensions"] == 256
+        assert "dimensions" not in embedding.calls[0]
 
     async def test_an_unstated_dimension_is_omitted_rather_than_defaulted(self, wire) -> None:
         """The provider's own default applies; the gateway substitutes no vendor default."""
@@ -332,7 +347,7 @@ class TestTheCall:
             (0.7, 0.8, 0.9),
         ]
         assert [embedding.index for embedding in response.data] == [0, 1]
-        assert response.usage == Usage(input_tokens=10, output_tokens=0, total_tokens=10)
+        assert response.usage == Usage(input_tokens=10, output_tokens=None, total_tokens=10)
 
     async def test_the_upstreams_own_order_and_positions_are_reported_verbatim(self, wire) -> None:
         """Ordering the vectors against the caller's input is the service's work, not this one's."""
@@ -366,10 +381,10 @@ class TestTheCall:
         )
         provider, _ = wire(response_from(payload))
 
-        with pytest.raises(InternalError) as error:
+        with pytest.raises(MalformedResponseError) as error:
             await provider.embed(make_route(), make_request(input=("one",)), make_context())
 
-        assert error.value.reason is ErrorReason.INTERNAL_ERROR
+        assert error.value.reason is ErrorReason.MALFORMED_RESPONSE
 
     async def test_a_vector_of_non_numbers_is_refused(self, wire) -> None:
         payload = embedding_payload(
@@ -377,7 +392,7 @@ class TestTheCall:
         )
         provider, _ = wire(response_from(payload))
 
-        with pytest.raises(InternalError):
+        with pytest.raises(MalformedResponseError):
             await provider.embed(make_route(), make_request(input=("one",)), make_context())
 
     async def test_a_position_that_is_not_an_integer_is_refused(self, wire) -> None:
@@ -386,18 +401,20 @@ class TestTheCall:
         )
         provider, _ = wire(response_from(payload))
 
-        with pytest.raises(InternalError):
+        with pytest.raises(MalformedResponseError):
             await provider.embed(make_route(), make_request(input=("one",)), make_context())
 
-    async def test_an_absent_usage_is_reported_as_the_library_left_it(self, wire) -> None:
-        """The library fabricates an all-zero usage for an answer that carried none.
+    async def test_an_absent_usage_is_reported_as_unknown(self, wire) -> None:
+        """The library fabricates an all-zero usage, and a zero cannot be told from a reported zero.
 
         ``EmbeddingResponse`` always holds a ``Usage`` object — the class supplies
-        its own when the upstream reported nothing — so an absent usage and a
-        reported zero are the same object at this boundary and the gateway cannot
-        tell them apart. It reports what the library reported rather than
-        inventing a distinction it cannot make, which is the same rule the
-        completion path applies to a ``Usage`` the library populated.
+        its own when the upstream reported nothing — and the converter fills the
+        counts onto that fabricated object, so an absent usage and a reported
+        zero are the same object at this boundary and the gateway cannot tell
+        them apart. Within that limit the binding reports what it can hold to
+        the upstream: every count of the placeholder is recorded as unknown,
+        because presenting the placeholder as a reported fact is the one error
+        this boundary must not make (PRD section 13).
         """
         payload = embedding_payload()
         payload.pop("usage")
@@ -405,8 +422,47 @@ class TestTheCall:
 
         response = await provider.embed(make_route(), make_request(), make_context())
 
-        assert response.usage.input_tokens == 0
-        assert response.usage.total_tokens == 0
+        assert response.usage.input_tokens is None
+        assert response.usage.total_tokens is None
+
+    async def test_a_reported_non_zero_count_is_recorded_as_reported(self, wire) -> None:
+        """A non-zero count cannot be the library's placeholder, so it is a fact it can only be.
+
+        The placeholder is all-zero by construction, so a count above zero can
+        only have come from the upstream and is recorded with provider
+        provenance. The zero counts beside it — ambiguous between a reported
+        zero, a converter default and the placeholder — stay unknown.
+        """
+        provider, _ = wire(response_from(embedding_payload()))
+
+        response = await provider.embed(make_route(), make_request(), make_context())
+
+        assert response.usage.input_tokens == 10
+        assert response.usage.total_tokens == 10
+        assert response.usage.output_tokens is None
+        assert response.usage.source_of("input_tokens") is UsageSource.PROVIDER
+        assert response.usage.source_of("total_tokens") is UsageSource.PROVIDER
+
+    async def test_a_total_of_zero_beside_reported_parts_is_derived_and_named_an_estimate(
+        self, wire
+    ) -> None:
+        """The embeddings path treats an unestablished total as the completion path does.
+
+        A total of zero beside non-zero parts is the library's placeholder
+        rather than a reported fact, so the gateway derives it from the parts
+        and names it in ``estimated_fields`` — the same rule :func:`_usage`
+        applies on the completion path, so the two cannot drift apart.
+        """
+        payload = embedding_payload(usage={"prompt_tokens": 10})
+        provider, _ = wire(response_from(payload))
+
+        response = await provider.embed(make_route(), make_request(), make_context())
+
+        assert response.usage.input_tokens == 10
+        assert response.usage.output_tokens is None
+        assert response.usage.total_tokens == 10
+        assert response.usage.estimated_fields == frozenset({"total_tokens"})
+        assert response.usage.source_of("total_tokens") is UsageSource.ESTIMATE
 
     async def test_an_answer_carrying_no_records_is_reported_as_no_vectors(self, wire) -> None:
         """A ``null`` the library passed through becomes no vectors, not a ``TypeError``.
@@ -549,6 +605,140 @@ class TestFailures:
 
         (call,) = embedding.calls
         assert closed == [pinned_transport_of(call["client"])]
+
+
+# ---------------------------------------------------------------------------
+# Usage provenance
+# ---------------------------------------------------------------------------
+
+
+class TestUsageProvenance:
+    """Whether an absent usage can be told from a reported zero at this boundary.
+
+    This is a contract probe rather than a test of the binding: it drives the
+    pinned library's own ``litellm.aembedding`` entry point with scripted wires
+    and pins what the binding receives. It exists because the mapping in
+    :func:`~model_gateway.providers.litellm_translation.from_litellm_embedding_usage`
+    rests on a measured property of the installed library — that the
+    distinction is destroyed — and a docstring describing that property can
+    be right and still go stale; this test cannot.
+    """
+
+    @pytest.mark.parametrize("dialect", ["openai", "openrouter"])
+    async def test_an_absent_usage_and_a_reported_zero_are_the_same_object(
+        self, dialect: str
+    ) -> None:
+        """Every representation the binding can read agrees between the two.
+
+        Both payloads — one with no ``usage`` key, one with an explicit
+        all-zero usage — are driven through the library's own entry point,
+        and the two answers are compared in the usage's pydantic field set,
+        its ``__dict__``, its ``model_dump()`` and its extras, and in the
+        response's own field set and the keys of its ``hidden_params``. They
+        agree, so the binding cannot tell an unreported usage from a reported
+        zero and must not present the placeholder's zeros as provider-reported
+        fact.
+        """
+        absent = await _library_embedding(dialect, _payload_without_usage())
+        reported_zero = await _library_embedding(dialect, _payload_with_zero_usage())
+
+        assert absent.usage.model_fields_set == reported_zero.usage.model_fields_set
+        assert absent.usage.__dict__ == reported_zero.usage.__dict__
+        assert absent.usage.model_dump() == reported_zero.usage.model_dump()
+        assert absent.usage.model_extra == reported_zero.usage.model_extra
+        assert absent.model_fields_set == reported_zero.model_fields_set
+        assert absent.model_extra == reported_zero.model_extra
+        assert set(absent.hidden_params) == set(reported_zero.hidden_params)
+
+    @pytest.mark.parametrize("dialect", ["openai", "openrouter"])
+    async def test_the_placeholder_the_library_fabricates_is_all_zero(self, dialect: str) -> None:
+        """The fabrication itself is pinned: an answer carrying no usage yields zeros.
+
+        Not the visible field alone — the whole object is the placeholder, and
+        it is the same object a reported zero produces, which is why the
+        binding records a zero count as unknown rather than as reported.
+        """
+        response = await _library_embedding(dialect, _payload_without_usage())
+
+        assert response.usage.prompt_tokens == 0
+        assert response.usage.completion_tokens == 0
+        assert response.usage.total_tokens == 0
+
+    async def test_the_anthropic_dialect_is_refused_by_the_library_itself(self) -> None:
+        """The library's embedding dispatch has no anthropic branch, so there is no usage to read.
+
+        The binding's SUPPORTED_DIALECTS includes anthropic for the text path;
+        on the embeddings path the pinned library raises before any client is
+        used. Pinned here because the dialect's behaviour is a property of the
+        library, not of the gateway, and an upgrade that added the branch
+        would change what a dialect's route can be.
+        """
+        with pytest.raises(litellm.BadRequestError):
+            await _library_embedding("anthropic", _payload_without_usage())
+
+
+class ScriptedWire(httpx.AsyncBaseTransport):
+    """A wire that answers every request with one scripted upstream payload."""
+
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=self.payload,
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+
+def _payload_without_usage() -> dict[str, object]:
+    """A realistic upstream embeddings payload carrying no usage at all."""
+    return {
+        "object": "list",
+        "model": UPSTREAM_MODEL,
+        "data": [{"object": "embedding", "index": 0, "embedding": [0.12, -0.34, 0.56]}],
+    }
+
+
+def _payload_with_zero_usage() -> dict[str, object]:
+    """The same payload with an explicit all-zero usage object."""
+    payload = _payload_without_usage()
+    payload["usage"] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    return payload
+
+
+async def _library_embedding(
+    dialect: str, payload: dict[str, object]
+) -> LiteLLMEmbeddingResponse:
+    """Drive the pinned library's own ``aembedding`` entry point with a scripted wire.
+
+    The client is the per-dialect construction the binding injects — an
+    ``openai.AsyncOpenAI`` on the SDK path, an ``AsyncHTTPHandler`` on the
+    generic one — around a wire that is never a socket, so what runs is
+    exactly the library's response construction for a real provider's answer.
+    """
+    wire = ScriptedWire(payload)
+    if dialect == "openai":
+        client: openai.AsyncOpenAI | AsyncHTTPHandler = openai.AsyncOpenAI(
+            api_key=SECRET_KEY,
+            base_url=ENDPOINT,
+            http_client=httpx.AsyncClient(transport=wire),
+            max_retries=0,
+        )
+    else:
+        client = AsyncHTTPHandler(timeout=30.0, transport=wire, follow_redirects=False)
+    try:
+        return await litellm.aembedding(
+            model=f"{dialect}/{UPSTREAM_MODEL}",
+            input=["hello"],
+            api_base=ENDPOINT,
+            api_key=SECRET_KEY,
+            num_retries=0,
+            client=client,
+        )
+    finally:
+        await client.close()
 
 
 # ---------------------------------------------------------------------------

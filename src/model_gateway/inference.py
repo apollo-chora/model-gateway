@@ -61,8 +61,10 @@ section 9's boundary, and this module is the policy side of it:
   attempt's, which is the most informative one; a deadline that ran out before
   another attempt could begin is reported as a deadline error instead.
 
-The provider performs exactly one call and owns protocol translation and
-execution and nothing else (:mod:`model_gateway.providers.base`).
+The provider performs one gateway attempt and owns protocol translation and
+execution and nothing else (:mod:`model_gateway.providers.base`); one attempt
+may carry more than one wire request, because a provider's library can retry
+internally (PRD section 11.3).
 
 **Cancellation propagates.** :exc:`asyncio.CancelledError` is a
 :exc:`BaseException` and is never caught here, so a cancelled invocation stops
@@ -75,12 +77,19 @@ model is resolved to the routes configured for embeddings, the primary route's
 capability contract is enforced, one deadline covers the invocation, and every
 attempt is made inside a concurrency slot whose wait is bounded by what is left
 of that deadline. The differences are the capability the route must declare
-(``embeddings``) and the answer the operation produces. Two checks belong to
-this layer because they read facts the provider does not own: the vectors are
-**ordered against the caller's input**, and their length is **checked against
-the dimensionality the route declares**, so an upstream answer that cannot be
-matched to the request is refused rather than passed on as a wrong-shaped
-answer (PRD sections 4.7 and 6.3).
+(``embeddings``), the answer the operation produces, and the route properties
+that gate the request's ``dimensions``: a stated dimension is honoured only on
+a route that accepts the parameter, where it is forwarded and becomes the
+expected output length, and is refused with a capability error naming it
+anywhere else — a fallback that cannot honour the same request is not a
+candidate, so a fallback may preserve the advertised contract but never expand
+it. Two checks belong to this layer because they read facts the provider does
+not own: the vectors are **ordered against the caller's input**, and their
+length is **checked against the dimensionality the served route declares**,
+so an upstream answer that cannot be matched to the request is refused rather
+than passed on as a wrong-shaped answer — a malformed-response error, refused
+on the route that answered wrongly and walked to an eligible fallback (PRD
+sections 4.7, 6.3, 9.5 and 11.2).
 
 **``attempt_count`` counts gateway attempts, never upstream requests.** The
 gateway counts the calls it makes. The inference library has internal retry
@@ -116,7 +125,7 @@ from model_gateway.errors import (
     CapabilityError,
     DeadlineExceededError,
     GatewayError,
-    InternalError,
+    MalformedResponseError,
     normalise_exception,
 )
 from model_gateway.providers.base import (
@@ -467,6 +476,17 @@ class InferenceService:
         capability error naming the encoding rather than answered in floats
         (PRD section 9.5).
 
+        **A caller dimension is honoured only where the route accepts one.** A
+        route declares whether it accepts a caller-selectable dimensionality
+        (``EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM``, or a
+        ``supports_dimensions_param`` entry). Where it does, the caller's
+        ``dimensions`` is forwarded to the upstream and becomes the expected
+        output length. Where it does not, the route's dimensionality is fixed at
+        the one it declares, and a request that states a dimension is refused
+        with a capability error naming the parameter before any provider is
+        called — the parameter is neither forwarded against the route's
+        configuration nor silently dropped (PRD sections 6.3 and 9.5).
+
         **The answer is checked against the request before it is returned.** Each
         vector is placed at the position the upstream reported, so ``data`` is in
         the caller's input order whatever order the upstream used, and the
@@ -474,9 +494,14 @@ class InferenceService:
         returned fewer, more or duplicated vectors has not answered the request,
         and the invocation is refused rather than answered with a vector matched
         to the wrong text (PRD section 4.7). Every vector's length must equal the
-        dimensionality the route declares — or the one the caller asked for, when
-        it asked for one — so a wrong-shaped vector is refused rather than
-        returned (PRD sections 4.7 and 6.3).
+        dimensionality the *served route* declares — read per route, not from one
+        operation-wide setting — or the one the caller asked for, when the route
+        accepts the parameter and the caller asked for one, so a wrong-shaped
+        vector is refused rather than returned (PRD sections 4.7 and 6.3). A
+        refusal of this kind is a
+        :class:`~model_gateway.errors.MalformedResponseError`: the fault lies in
+        that upstream's answer, so the invocation falls back to another eligible
+        route rather than retrying the route that answered wrongly.
 
         The response states the public model that was asked for, the upstream
         model that actually served it, and the invocation identifier the gateway
@@ -486,10 +511,11 @@ class InferenceService:
 
         Raises :class:`~model_gateway.errors.ModelNotFoundError` for an unknown
         ID, :class:`~model_gateway.errors.CapabilityError` when the primary route
-        cannot serve embeddings or the provider cannot embed, and otherwise the
-        failure of the last attempt — surfaced exactly as :meth:`invoke`
-        surfaces it, including the retry and fallback decisions, which are made
-        from the gateway's own taxonomy and never from a library exception type.
+        cannot serve embeddings, does not accept a stated caller dimension, or
+        the provider cannot embed, and otherwise the failure of the last
+        attempt — surfaced exactly as :meth:`invoke` surfaces it, including the
+        retry and fallback decisions, which are made from the gateway's own
+        taxonomy and never from a library exception type.
 
         ``attempt_count`` is not reported here, but the same limit applies to
         what this method does: it counts the calls the *gateway* makes, and the
@@ -505,25 +531,20 @@ class InferenceService:
                 details={"capability": _EMBEDDINGS_CAPABILITY},
             )
         _reject_unhonourable_encoding(request)
-        plan = _select_routes_for(routes, request.model, (Capability.EMBEDDINGS,))
-        invocation_id = uuid4().hex
-        expected_dimensions = (
-            request.dimensions
-            if request.dimensions is not None
-            else self._registry.get(request.model).dimensions
+        plan = _select_routes_for(
+            routes,
+            request.model,
+            (Capability.EMBEDDINGS,),
+            caller_dimension=request.dimensions is not None,
         )
+        _reject_unsupported_dimension(request, plan.primary)
+        invocation_id = uuid4().hex
 
         async def serve(
             route: Route, state: InvocationState, deadline: Deadline
         ) -> EmbeddingResponse:
             response = await self._embed_attempt(route, request, state, deadline, invocation_id)
-            return _normalise_embeddings(
-                route,
-                request,
-                response,
-                invocation_id=invocation_id,
-                expected_dimensions=expected_dimensions,
-            )
+            return _normalise_embeddings(route, request, response, invocation_id=invocation_id)
 
         return await self._walk(request.model, plan, serve)
 
@@ -1049,7 +1070,11 @@ def _select_routes(routes: tuple[Route, ...], request: InvocationRequest) -> _Ro
 
 
 def _select_routes_for(
-    routes: tuple[Route, ...], model: str, required: tuple[Capability, ...]
+    routes: tuple[Route, ...],
+    model: str,
+    required: tuple[Capability, ...],
+    *,
+    caller_dimension: bool = False,
 ) -> _RoutePlan:
     """The primary route that must serve a request, and the fallbacks that may.
 
@@ -1057,7 +1082,9 @@ def _select_routes_for(
     serves it: the text operation's own list for a chat invocation
     (:func:`_required_capabilities`), and the single ``embeddings`` capability
     for an embeddings one. ``model`` is the public model ID the request named,
-    carried so a refusal names the resource it was about.
+    carried so a refusal names the resource it was about. ``caller_dimension``
+    is whether an embeddings request states a caller dimension, which only a
+    route that accepts the ``dimensions`` parameter can honour unchanged.
 
     Capability enforcement happens here, in this order, because the registry
     advertises the *primary* route's capabilities as the public model's own
@@ -1075,6 +1102,13 @@ def _select_routes_for(
     filtering afterwards is what keeps a fallback from expanding the advertised
     capabilities. A fallback may preserve them, never add to them.
 
+    The primary is measured by the capability test alone, deliberately: a
+    primary that lacks the ``dimensions`` parameter is refused by the caller's
+    own dimension check — :func:`_reject_unsupported_dimension`, which names the
+    parameter — rather than by a generic capability refusal here. The
+    ``caller_dimension`` filter applies to fallbacks only, where skipping a
+    route that cannot honour the request unchanged is the whole of the rule.
+
     This is a decision about eligibility alone, not the walk itself: it retries
     nothing and abandons no route for having failed. The walk that consumes
     ``fallbacks`` is :meth:`InferenceService._walk`'s, which attempts them in
@@ -1089,9 +1123,29 @@ def _select_routes_for(
     return _RoutePlan(
         primary=primary,
         fallbacks=tuple(
-            route for route in routes[1:] if _first_missing_capability(route, required) is None
+            route for route in routes[1:] if _route_can_serve(route, required, caller_dimension)
         ),
     )
+
+
+def _route_can_serve(
+    route: Route, required: tuple[Capability, ...], caller_dimension: bool
+) -> bool:
+    """Whether ``route`` could serve this request unchanged.
+
+    The capability test first, exactly as the primary is validated: a route
+    that does not declare an operation's capability cannot serve it (PRD
+    section 9.5). The dimension test applies only when the caller stated a
+    dimension: a route that does not accept the ``dimensions`` parameter
+    cannot honour a request that asks for one, so it is not a candidate. The
+    primary route establishes whether caller-selectable dimensions are part of
+    the model's contract, and a fallback that cannot honour the same request is
+    not one — a fallback may preserve the advertised contract, never expand it
+    (PRD sections 9.5 and 11.2).
+    """
+    if _first_missing_capability(route, required) is not None:
+        return False
+    return not caller_dimension or route.supports_dimensions_param
 
 
 def _first_missing_capability(
@@ -1242,13 +1296,39 @@ def _reject_unhonourable_encoding(request: EmbeddingRequest) -> None:
     )
 
 
+def _reject_unsupported_dimension(request: EmbeddingRequest, primary: Route) -> None:
+    """Refuse a caller dimension the primary route's contract does not carry.
+
+    A route declares whether it accepts a caller-selectable dimensionality
+    (``EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM``, or a ``supports_dimensions_param``
+    entry). Where it does not, the route's dimensionality is fixed at the one
+    it declares, so a stated dimension is a parameter the route cannot honour.
+    It is refused here — before any provider is called, before the walk begins
+    — rather than forwarded against the route's configuration or silently
+    dropped, and the refusal names the parameter so a caller learns which one
+    the route does not accept (PRD sections 6.3 and 9.5).
+
+    The primary route establishes whether caller-selectable dimensions are part
+    of the model's advertised contract, and no later route can expand it
+    (PRD section 9.5): a fallback that cannot honour the same request is not a
+    candidate, which :func:`_route_can_serve` enforces the other way round.
+    """
+    if request.dimensions is None or primary.supports_dimensions_param:
+        return
+    raise CapabilityError(
+        f"model {request.model!r} does not accept a 'dimensions' parameter: its primary route "
+        f"does not declare supports_dimensions_param, so the request is refused rather than "
+        f"forwarded against the route's configuration or silently dropped",
+        details={"capability": "dimensions", "parameter": "dimensions"},
+    )
+
+
 def _normalise_embeddings(
     route: Route,
     request: EmbeddingRequest,
     response: EmbeddingResponse,
     *,
     invocation_id: str,
-    expected_dimensions: int | None,
 ) -> EmbeddingResponse:
     """Order the vectors against the caller's input and check their shape.
 
@@ -1268,24 +1348,37 @@ def _normalise_embeddings(
     position outside the input — cannot be ordered at all, so the invocation is
     refused rather than answered with a partial or misaligned result.
 
-    Every vector's length is then checked against ``expected_dimensions``, which
-    is the dimensionality the route declares (``EMBEDDINGS_DIMENSIONS``, the
-    value the model listing advertises) or, when the caller asked for one, the
-    dimensionality the caller asked for, because that is what the route was asked
-    to honour. ``None`` means nothing is declared and nothing is checked: an
-    unconfigured limit is not a limit of zero (PRD sections 4.3 and 6.3). A
-    vector of the wrong length is refused rather than returned, because a
-    wrong-shaped vector is a wrong answer that a consumer of fixed-width vectors
-    would accept and then misuse (PRD section 4.7).
+    Every vector's length is then checked against the dimensionality the
+    *route being served* declares — ``route.dimensions``, the value
+    ``EMBEDDINGS_DIMENSIONS`` gave the block's primary route, or a
+    ``dimensions`` entry gave a fallback — or, when the caller asked for one
+    and the route accepts the parameter, the dimensionality the caller asked
+    for, because that is what the route was asked to honour. A route that does
+    not accept the parameter is checked against its own declared dimensionality
+    because that is the only length it can produce, and a request that states a
+    dimension to such a route is refused before it reaches this check
+    (:func:`_reject_unsupported_dimension`). ``None`` means nothing is declared
+    and nothing is checked: an unconfigured dimensionality is not a
+    dimensionality of zero (PRD sections 4.3 and 6.3). A vector of the wrong
+    length is refused rather than returned, because a wrong-shaped vector is a
+    wrong answer that a consumer of fixed-width vectors would accept and then
+    misuse (PRD section 4.7).
 
-    Both refusals are :class:`~model_gateway.errors.InternalError`. They are
-    deterministic properties of what the upstream returned, not of the caller's
-    request: repeating the call against the same route returns the same wrong
-    shape, and every route serving a model is checked against the same declared
-    dimensionality, so no other route can change the answer either. PRD section
-    11.2 places an internal error on the neither-retried-nor-walked side of the
-    taxonomy, which is exactly the behaviour these two failures call for.
+    Both refusals are :class:`~model_gateway.errors.MalformedResponseError`.
+    They are properties of what *this upstream* returned, not of the caller's
+    request: the request was valid and the route was reachable, and the answer
+    it produced was structurally wrong. That is precisely the shape of failure
+    another eligible route can fix, so the invocation walks to the next route
+    while the route that just answered wrongly is not worth retrying immediately
+    (PRD section 11.2). A gateway defect, by contrast, is
+    :class:`~model_gateway.errors.InternalError` and terminates the invocation
+    where it happened.
     """
+    expected_dimensions = (
+        request.dimensions
+        if request.dimensions is not None and route.supports_dimensions_param
+        else route.dimensions
+    )
     return replace(
         response,
         model=request.model,
@@ -1305,7 +1398,7 @@ def _ordered_vectors(
     by_index: dict[int, Embedding] = {}
     for embedding in data:
         if embedding.index in by_index:
-            raise InternalError(
+            raise MalformedResponseError(
                 f"the upstream returned more than one embedding for input position "
                 f"{embedding.index}; the caller's inputs cannot be matched to a single vector "
                 f"each, so the answer is refused rather than misaligned"
@@ -1314,7 +1407,7 @@ def _ordered_vectors(
 
     wanted = set(range(len(inputs)))
     if set(by_index) != wanted:
-        raise InternalError(
+        raise MalformedResponseError(
             f"the upstream returned {len(by_index)} embeddings for {len(inputs)} inputs; the "
             f"answer must carry exactly one vector per input, in the caller's order, so it is "
             f"refused rather than matched to the wrong text"
@@ -1324,7 +1417,7 @@ def _ordered_vectors(
     for index in range(len(inputs)):
         vector = by_index[index]
         if expected is not None and len(vector.values) != expected:
-            raise InternalError(
+            raise MalformedResponseError(
                 f"the upstream returned an embedding of {len(vector.values)} dimensions where "
                 f"{expected} were expected; a vector of the wrong length is refused rather than "
                 f"returned as the caller's answer"

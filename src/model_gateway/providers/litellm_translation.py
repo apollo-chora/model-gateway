@@ -144,6 +144,7 @@ from model_gateway.providers._litellm import (
 
 __all__ = [
     "from_litellm_chunk",
+    "from_litellm_embedding_usage",
     "from_litellm_response",
     "map_litellm_error",
     "to_litellm_params",
@@ -686,6 +687,75 @@ def _usage(usage: LiteLLMUsage | None) -> TokenUsage:
         cached_tokens=_cached_tokens(usage),
         estimated_fields=frozenset(estimated),
     )
+
+
+def from_litellm_embedding_usage(usage: LiteLLMUsage | None) -> TokenUsage:
+    """The upstream embeddings usage as a canonical usage record (PRD section 13).
+
+    The embeddings path cannot take the library's word for a zero, and the
+    reason is a property of the pinned library rather than of this mapping.
+    ``litellm.aembedding`` always answers with a ``Usage``:
+    ``EmbeddingResponse`` fabricates an all-zero one inside its own
+    constructor when the upstream reported none, so the response object can
+    never be observed without a usage, and
+    ``convert_to_model_response_object`` then fills the three counts onto
+    that fabricated object by attribute assignment — which leaves the same
+    pydantic ``model_fields_set`` footprint a reported usage carries, because
+    ``Usage.__init__`` always passes all five of its counts to the model
+    constructor. An absent usage and a reported zero are therefore the same
+    object at this boundary in every representation the binding can read:
+    the usage's field set, its ``__dict__`` and its ``model_dump()``, and the
+    response's own field set, its ``model_extra`` and its ``hidden_params``
+    all agree between the two, on both dialects that serve embeddings. That
+    is an irrecoverable binding limitation, recorded rather than accepted:
+    the compatibility test drives the library's own entry point with scripted
+    wires and pins the indistinguishability, so an upgrade that changes the
+    shape fails loudly.
+
+    What this mapping does within that limit. A non-zero count cannot be the
+    library's all-zero placeholder, so it is recorded as the provider-
+    reported fact it can only be. A zero count — ambiguous between a
+    reported zero, a converter default and the placeholder — is recorded as
+    unknown, because the canonical usage model's rule is that a count the
+    gateway could not establish is ``None`` rather than ``0`` (PRD section
+    13), and presenting the placeholder as a reported fact is the one error
+    this boundary must not make. A total of zero beside non-zero parts is
+    derived from the parts and named in ``estimated_fields``, exactly as the
+    completion path's :func:`_usage` does, so the two operations treat an
+    unestablished total the same way.
+    """
+    if usage is None:
+        return TokenUsage()
+    input_tokens = usage.prompt_tokens
+    output_tokens = usage.completion_tokens
+    total_tokens = usage.total_tokens
+    estimated: set[str] = set()
+    if total_tokens == 0 and (input_tokens > 0 or output_tokens > 0):
+        total_tokens = input_tokens + output_tokens
+        estimated.add("total_tokens")
+    _reject_unrepresentable_usage(usage)
+    return TokenUsage(
+        input_tokens=_established(input_tokens),
+        output_tokens=_established(output_tokens),
+        total_tokens=(
+            total_tokens if "total_tokens" in estimated else _established(total_tokens)
+        ),
+        cached_tokens=_established(_cached_tokens(usage)),
+        estimated_fields=frozenset(estimated),
+    )
+
+
+def _established(count: int | None) -> int | None:
+    """A count the binding can hold to the upstream; a zero on this path cannot be one.
+
+    The library's placeholder for an unreported usage is all-zero, and a
+    reported zero is the same object, so a zero count here is never
+    establishable as a provider fact and is recorded as unknown. A non-zero
+    count cannot be the placeholder, so it is recorded as reported.
+    """
+    if count is None or count == 0:
+        return None
+    return count
 
 
 def _cached_tokens(usage: LiteLLMUsage) -> int | None:
