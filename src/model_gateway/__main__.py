@@ -8,8 +8,13 @@ from model_gateway.config import Settings
 
 
 def create_asgi_app() -> Application:
-    """Factory invoked by granian to build the ASGI application."""
-    return create_app()
+    """Factory invoked by granian to build the ASGI application.
+
+    The gRPC listener starts beside the HTTP one (PRD section 18): both are
+    started and stopped by the application, so a process serves the two
+    transports under one lifetime, configured by the same environment.
+    """
+    return create_app(serve_grpc=True)
 
 
 def main() -> None:

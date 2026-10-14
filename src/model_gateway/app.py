@@ -35,6 +35,7 @@ from model_gateway.capabilities import Capability
 from model_gateway.config import ConfigurationError, Settings
 from model_gateway.config.routes import Operation
 from model_gateway.errors import FailedPreconditionError
+from model_gateway.grpc.server import GrpcServer
 from model_gateway.health import healthz, readyz
 from model_gateway.http import (
     register_chat_routes,
@@ -143,6 +144,7 @@ def create_app(
     *,
     registry: ModelRegistry | None = None,
     service: InferenceService | None = None,
+    serve_grpc: bool = False,
 ) -> Application:
     """Build the application, ready to be started by the server.
 
@@ -190,6 +192,18 @@ def create_app(
         )
 
     api_keys = ApiKeySet.from_settings(settings)
+
+    # The gRPC listener (PRD section 5) is built only when asked for, so a test
+    # that builds an application never binds a port it does not intend to serve.
+    # The production entrypoint asks for it; the factory's own default is the
+    # HTTP-only application the tests drive. It starts and stops with the
+    # application, because the application is the process's unit of lifetime.
+    grpc_server = (
+        GrpcServer(service=service, registry=registry, settings=settings, api_keys=api_keys)
+        if serve_grpc
+        else None
+    )
+
     app = Application()
     app.middlewares.append(
         create_auth_middleware(
@@ -216,9 +230,13 @@ def create_app(
             http_port=settings.http_port,
             models=[info.id for info in registry.list_models()],
         )
+        if grpc_server is not None:
+            await grpc_server.start()
 
     @app.on_stop
     async def _on_stop(app: Application) -> None:
         logger.info("model-gateway stopped")
+        if grpc_server is not None:
+            await grpc_server.stop()
 
     return app
