@@ -211,72 +211,184 @@ changes what the gateway sends upstream (PRD section 9.1).
 """
 
 
-def _absent_when_none(value: object) -> bool:
-    return value is None
+_WIRE_BOOLEAN = "boolean"
+_WIRE_INTEGER = "integer"
+_WIRE_NUMBER = "number"
+_WIRE_STRING = "string"
+_WIRE_OBJECT = "object"
+_WIRE_ARRAY = "array"
+_WIRE_NULL = "null"
+
+_WIRE_TYPE_PHRASES = {
+    _WIRE_BOOLEAN: "a boolean",
+    _WIRE_INTEGER: "an integer",
+    _WIRE_NUMBER: "a number",
+    _WIRE_STRING: "a string",
+    _WIRE_OBJECT: "a JSON object",
+    _WIRE_ARRAY: "a JSON array",
+    _WIRE_NULL: "null",
+}
+_WIRE_TYPE_ORDER = (
+    _WIRE_BOOLEAN,
+    _WIRE_INTEGER,
+    _WIRE_NUMBER,
+    _WIRE_STRING,
+    _WIRE_OBJECT,
+    _WIRE_ARRAY,
+    _WIRE_NULL,
+)
 
 
-def _absent_when_falsy(value: object) -> bool:
-    return not value
+class _Wire(NamedTuple):
+    """The wire contract of one recognised parameter.
+
+    ``accepts`` names the JSON types the value may carry, and ``default`` is
+    the one correctly-typed value that asks for nothing, because it is the one
+    this gateway already behaves like. A value of any other type is malformed
+    input; a correctly-typed value that is not the default asks for the
+    feature. The contract is stated on the parameter before the default-
+    equivalence test runs, so the test never sees a value of the wrong type —
+    a boolean is not an integer because Python's ``True == 1`` says it is, and
+    an empty string is not the empty object a falsiness test would accept.
+    """
+
+    accepts: frozenset[str]
+    default: object
 
 
 class _Feature(NamedTuple):
     """A Responses parameter the gateway recognises and cannot honour.
 
     ``capability`` names what the parameter asks for, so the refusal says which
-    feature is missing rather than only which key was sent. ``absent`` decides
-    whether the value supplied actually asks for that feature: a parameter whose
-    value is the one this gateway already behaves like asks for nothing, and
-    refusing it would reject a request the gateway can serve in full.
+    feature is missing rather than only which key was sent. ``wire`` states the
+    parameter's wire contract: which JSON types its value may carry, and which
+    correctly-typed value is the one this gateway already behaves like, so
+    refusing that value would reject a request the gateway can serve in full.
     """
 
     capability: str
-    absent: Callable[[object], bool]
+    wire: _Wire
 
 
 _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
-    "background": _Feature("background_responses", _absent_when_falsy),
-    "context_management": _Feature("context_management", _absent_when_none),
-    "conversation": _Feature("conversation_state", _absent_when_none),
-    "include": _Feature("included_response_data", _absent_when_falsy),
-    "max_tool_calls": _Feature("tool_call_limit", _absent_when_none),
-    "metadata": _Feature("request_metadata", _absent_when_falsy),
-    "moderation": _Feature("output_moderation", _absent_when_none),
+    "background": _Feature(
+        "background_responses", _Wire(frozenset({_WIRE_BOOLEAN}), False)
+    ),
+    "context_management": _Feature(
+        "context_management", _Wire(frozenset({_WIRE_ARRAY, _WIRE_NULL}), None)
+    ),
+    "conversation": _Feature(
+        "conversation_state",
+        _Wire(frozenset({_WIRE_STRING, _WIRE_OBJECT, _WIRE_NULL}), None),
+    ),
+    "include": _Feature("included_response_data", _Wire(frozenset({_WIRE_ARRAY}), [])),
+    "max_tool_calls": _Feature(
+        "tool_call_limit", _Wire(frozenset({_WIRE_INTEGER, _WIRE_NULL}), None)
+    ),
+    "moderation": _Feature(
+        "output_moderation", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)
+    ),
     # Refused whatever its value, unlike the defaults above. ``true`` asks for
     # parallel tool calls and ``false`` asks for a guarantee of sequential ones,
     # and this slice implements neither and models no distinction between them,
     # so accepting the parameter would advertise a capability the gateway does
     # not have (PRD section 9.5). The chat endpoint refuses it for the same
     # reason, and the two endpoints must agree about it.
-    "parallel_tool_calls": _Feature("parallel_tool_calls", _absent_when_none),
-    "previous_response_id": _Feature("response_chaining", _absent_when_none),
-    "prompt": _Feature("prompt_templates", _absent_when_none),
-    "prompt_cache_key": _Feature("prompt_caching", _absent_when_none),
-    "prompt_cache_options": _Feature("prompt_caching", _absent_when_none),
-    "prompt_cache_retention": _Feature("prompt_caching", _absent_when_none),
-    "reasoning": _Feature("reasoning_effort", _absent_when_none),
-    "safety_identifier": _Feature("safety_identifier", _absent_when_none),
-    "service_tier": _Feature("service_tier", _absent_when_none),
+    "parallel_tool_calls": _Feature(
+        "parallel_tool_calls", _Wire(frozenset({_WIRE_BOOLEAN, _WIRE_NULL}), None)
+    ),
+    "previous_response_id": _Feature(
+        "response_chaining", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)
+    ),
+    "prompt": _Feature(
+        "prompt_templates", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)
+    ),
+    "prompt_cache_key": _Feature(
+        "prompt_caching", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)
+    ),
+    "prompt_cache_options": _Feature(
+        "prompt_caching", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)
+    ),
+    "prompt_cache_retention": _Feature(
+        "prompt_caching", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)
+    ),
+    "reasoning": _Feature(
+        "reasoning_effort", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)
+    ),
+    "safety_identifier": _Feature(
+        "safety_identifier", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)
+    ),
+    "service_tier": _Feature(
+        "service_tier", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)
+    ),
     # ``store: false`` is accepted because it is the one value that agrees with
     # what the gateway does — it stores nothing — while ``true`` asks for the
     # Responses format's own default of a retained response, which the gateway
     # cannot provide (PRD section 9.5).
-    "store": _Feature("response_storage", _absent_when_falsy),
-    "stream_options": _Feature("streaming", _absent_when_falsy),
-    "text": _Feature("text_configuration", _absent_when_none),
-    "tool_choice": _Feature("tool_choice", _absent_when_none),
-    "top_logprobs": _Feature("log_probabilities", _absent_when_none),
-    "top_p": _Feature("top_p", _absent_when_none),
-    "truncation": _Feature("context_truncation", _absent_when_none),
-    "user": _Feature("actor_identity", _absent_when_none),
+    "store": _Feature("response_storage", _Wire(frozenset({_WIRE_BOOLEAN}), False)),
+    "stream_options": _Feature("streaming", _Wire(frozenset({_WIRE_OBJECT}), {})),
+    "text": _Feature(
+        "text_configuration", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)
+    ),
+    "top_logprobs": _Feature(
+        "log_probabilities", _Wire(frozenset({_WIRE_INTEGER, _WIRE_NULL}), None)
+    ),
+    "truncation": _Feature(
+        "context_truncation", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)
+    ),
+    "user": _Feature("actor_identity", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)),
 }
 """Responses request parameters this endpoint does not carry.
 
-Every entry is a parameter the Responses format defines (PRD section 4.5 lists
-the eight this endpoint accepts) whose feature the canonical invocation has no
-way to ask for, or no way to ask for *here*. None of them is dropped, because a
+Every entry is a parameter the Responses format defines, beside the documented
+subset this endpoint accepts, whose feature the canonical invocation has no way
+to ask for, or no way to ask for *here*. None of them is dropped, because a
 caller told its request succeeded while a parameter was discarded has been
-misled about what the model was asked (PRD section 9.5).
+misled about what the model was asked (PRD section 9.5). Each entry's wire
+contract states the JSON types the value may carry and the one correctly-typed
+value that asks for nothing; a value of any other type is malformed input,
+refused as an invalid request naming the parameter and the type supplied.
 """
+
+
+def _wire_kind(value: object) -> str:
+    """The JSON type of ``value``, as the wire contracts name them.
+
+    ``bool`` is a subclass of ``int``, so a boolean is named before an integer
+    is tested for: the two are different JSON types, and a wire contract that
+    accepts one does not accept the other whatever Python's ``True == 1`` says.
+    """
+    if value is None:
+        return _WIRE_NULL
+    if isinstance(value, bool):
+        return _WIRE_BOOLEAN
+    if isinstance(value, int):
+        return _WIRE_INTEGER
+    if isinstance(value, float):
+        return _WIRE_NUMBER
+    if isinstance(value, str):
+        return _WIRE_STRING
+    if isinstance(value, Mapping):
+        return _WIRE_OBJECT
+    return _WIRE_ARRAY
+
+
+def _wire_prose(accepts: frozenset[str]) -> str:
+    """The accepted types of a wire contract as prose: ``a string or null``."""
+    names = [_WIRE_TYPE_PHRASES[kind] for kind in _WIRE_TYPE_ORDER if kind in accepts]
+    return names[0] if len(names) == 1 else " or ".join(names)
+
+
+def _is_default(value: object, default: object) -> bool:
+    """Whether a correctly-typed value is the one that asks for nothing.
+
+    The wire contract has already established the value's type, so equality
+    against the default is the whole test; ``True == 1`` cannot arise, because
+    no wire contract accepts a boolean where the default is an integer.
+    """
+    if default is None:
+        return value is None
+    return value == default
 
 
 @dataclass(frozen=True)
@@ -494,9 +606,14 @@ def _reject_unsupported_parameters(body: Mapping[str, object]) -> None:
     """Refuse a parameter the gateway cannot honour, naming what it asked for.
 
     A key the Responses format does not define is malformed input. A key it does
-    define, whose value asks for something this endpoint has no representation
-    for, is a capability the route cannot provide — the request is well formed
-    and the refusal is about the feature (PRD section 9.5).
+    define is held to its wire contract before anything else: a value of the
+    wrong JSON type is an invalid-request error naming the parameter and the
+    type actually supplied, because the default-equivalence test that decides
+    whether the parameter was actually requested runs on a validated value. A
+    correctly-typed value that is not the one this gateway already behaves like
+    asks for something this endpoint has no representation for, and is a
+    capability the route cannot provide — the request is well formed and the
+    refusal is about the feature (PRD section 9.5).
     """
     for name in sorted(set(body) - _REQUEST_KEYS):
         feature = _UNSUPPORTED_FEATURES.get(name)
@@ -506,7 +623,13 @@ def _reject_unsupported_parameters(body: Mapping[str, object]) -> None:
                 f"the request body has unsupported parameter {name!r}; supported parameters are "
                 f"{supported}"
             )
-        if feature.absent(body[name]):
+        value = body[name]
+        if _wire_kind(value) not in feature.wire.accepts:
+            raise InvalidArgumentError(
+                f"the request body parameter {name!r} must be {_wire_prose(feature.wire.accepts)}, "
+                f"got {describe(value)}"
+            )
+        if _is_default(value, feature.wire.default):
             continue
         raise CapabilityError(
             f"the gateway cannot honour {name!r}; it would request {feature.capability!r}, which "
