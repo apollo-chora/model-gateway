@@ -9,22 +9,35 @@ how the two transports drift apart.
 
 **Streaming is served as Server-Sent Events.** A request carrying ``stream:
 true`` is answered with an ``text/event-stream`` response whose chunks follow
-the OpenAI streaming shape, terminated by ``[DONE]`` (PRD section 16). The
-gateway does not maintain per-provider streaming adapters: it consumes the
-stream the binding produces and re-normalises each chunk at the boundary. A
-provider that cannot stream is refused with a capability error naming
-``streaming`` before the response starts, because answering a streaming request
-with a complete, non-streamed body would tell the caller it received something
-it did not (PRD sections 16 and 9.5).
+the OpenAI streaming shape. The stream is terminated by ``[DONE]`` only when it
+ended with a ``finish`` event: a stream that ended with an ``error`` event, or
+that ended with no terminal event at all, is closed without it, because the
+answer did not complete (PRD section 16). The gateway does not maintain
+per-provider streaming adapters: it consumes the stream the binding produces
+and re-normalises each chunk at the boundary. A provider that cannot stream is
+refused with a capability error naming ``streaming`` before the response starts,
+because answering a streaming request with a complete, non-streamed body would
+tell the caller it received something it did not (PRD sections 16 and 9.5).
+
+**The leading assistant-role delta is a transport detail, not a canonical
+event.** OpenAI-compatible clients conventionally expect the first SSE frame
+of a streaming answer to carry ``delta.role = "assistant"`` before any content,
+and several of them look for it before they start assembling the message. The
+canonical stream has no role event: the role is a fact of the message this
+endpoint serves, not a piece of the answer the upstream streams, so inventing a
+canonical kind to hold it would make the canonical vocabulary carry an OpenAI
+wire convention. The gateway therefore emits one conventional role-delta chunk
+at the front of every SSE response — a documented subset-compatibility measure
+for OpenAI clients — and keeps the role out of the canonical vocabulary.
 
 A failure is handled differently depending on whether the response has started.
 Before the first event, the invocation has produced nothing the caller could
 see, so a refusal — an unknown model, a capability gap, a deadline — is returned
 as an ordinary error response with its own status. After the first event, the
 response has begun and its status can no longer change; the inference service
-ends the stream with a terminal error event and the handler closes the stream
-without ``[DONE]``, so the caller sees the error rather than a stream that
-silently stopped.
+ends the stream with a terminal ``ERROR`` event and the handler closes the
+stream without ``[DONE]``, so the caller sees the error rather than a stream
+that silently stopped.
 
 The invocation id is minted here, per request, and carried into the canonical
 request. It is what the response's ``id`` is built from and what correlates the
@@ -147,19 +160,24 @@ async def _stream_chat_completion(
     """Serve one streaming invocation as Server-Sent Events (PRD section 16).
 
     The response is an ``text/event-stream`` whose chunks follow the OpenAI
-    streaming shape, terminated by ``[DONE]``. The events come from the
-    inference service's own stream, so routing, retry, fallback, the deadline
-    and the no-fallback-after-first-output rule are the gateway core's, not
-    duplicated here.
+    streaming shape. The events come from the inference service's own stream, so
+    routing, retry, fallback, the deadline and the no-fallback-after-first-output
+    rule are the gateway core's, not duplicated here.
 
-    A failure is handled differently depending on whether the response has
-    started. Before the first event, the invocation has produced nothing the
-    caller could see, so a refusal — an unknown model, a capability gap, a
-    deadline — is returned as an ordinary error response with its own status.
-    After the first event, the response has begun and its status can no longer
-    change; the service ends the stream with a terminal error event and the
-    stream is closed without ``[DONE]``, so the caller sees the error rather
-    than a stream that silently stopped.
+    The handler reflects the service's three terminal states. A stream whose last
+    event is a ``finish`` completed, and it is the only one that ends with
+    ``[DONE]``. A stream whose last event is an ``error`` failed after its answer
+    had begun: the error chunk is the last frame and no ``[DONE]`` follows it,
+    because the answer did not complete. A stream that ends with no terminal
+    event at all — the upstream went away, or the caller did — gets no ``[DONE]``
+    either, so a caller never reads a finished answer from a stream that simply
+    stopped.
+
+    A failure before the first event is handled differently: the invocation has
+    produced nothing the caller could see, so a refusal — an unknown model, a
+    capability gap, a deadline — is returned as an ordinary error response with
+    its own status, before the SSE response commits to a 200 the caller cannot be
+    given back.
     """
     event_iter = service.invoke_stream(invocation)
 
@@ -182,19 +200,35 @@ async def _stream_chat_completion(
             ).decode("utf-8")
         )
 
+    def sse_role_delta() -> TextServerSentEvent:
+        return TextServerSentEvent(
+            orjson.dumps(_role_delta_chunk(completion_id, created, model)).decode("utf-8")
+        )
+
     async def events_provider() -> AsyncIterator[ServerSentEvent]:
+        completed = False
         try:
             if first_event is not None:
+                # The conventional assistant role frame OpenAI clients expect
+                # before any content; see the module docstring.
+                yield sse_role_delta()
+                completed = first_event.kind is StreamEventKind.FINISH
                 yield sse_event(first_event)
             try:
                 async for event in event_iter:
+                    completed = event.kind is StreamEventKind.FINISH
                     yield sse_event(event)
             except GatewayError:
-                # A failure after the first event: the service has already emitted
-                # the terminal error event. End the stream without [DONE], because
-                # the answer did not complete.
+                # A failure after the first event: the service has already
+                # emitted the terminal ERROR event, which the caller has seen.
+                # End the stream without [DONE], because the answer did not
+                # complete.
                 return
-            yield TextServerSentEvent(_DONE)
+            if completed:
+                # [DONE] closes a stream that ended with a finish, and only that
+                # stream: a stream that stopped without a terminal event is not
+                # a completed answer, so it is closed without one.
+                yield TextServerSentEvent(_DONE)
         finally:
             # Close the service's stream when this generator ends — normally, or
             # because the consumer went away — so a client disconnect stops the
@@ -247,6 +281,39 @@ def _gateway_sse_response(
     return Response(200, _SSE_HEADERS, _GatewaySSEContent(events_provider))
 
 
+def _chunk_envelope(completion_id: str, created: int, model: str) -> dict[str, object]:
+    """The fields every gateway streaming chunk carries, before its payload.
+
+    The OpenAI streaming chunk shape keeps ``id``, ``object``, ``created`` and
+    ``model`` on every frame, so a consumer that multiplexes streams attributes
+    each one and correlates it with the request that produced it. What a chunk
+    reports beyond that — its ``choices`` and, for a terminal error, its
+    ``error`` — is added by the caller.
+    """
+    return {
+        "id": completion_id,
+        "object": _OBJECT_CHAT_COMPLETION_CHUNK,
+        "created": created,
+        "model": model,
+    }
+
+
+def _role_delta_chunk(completion_id: str, created: int, model: str) -> dict[str, object]:
+    """The conventional leading assistant-role frame OpenAI clients expect.
+
+    OpenAI's own streaming sends the assistant role on the first frame of a
+    streaming answer, and the clients written against that convention look for
+    it before they begin assembling the message. The canonical stream has no
+    role event — the role belongs to the message this endpoint serves, not to a
+    fragment the upstream streams — so the gateway renders it here, in the
+    transport, as a documented subset-compatibility measure rather than widening
+    the canonical vocabulary for an OpenAI wire detail.
+    """
+    chunk = _chunk_envelope(completion_id, created, model)
+    chunk["choices"] = [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]
+    return chunk
+
+
 def _chunk_from_event(
     event: StreamEvent, *, completion_id: str, created: int, model: str
 ) -> dict[str, object]:
@@ -256,15 +323,12 @@ def _chunk_from_event(
     ``created`` and ``model`` carried on every chunk, and a single choice whose
     ``delta`` carries the fragment the event reports. A content event carries
     text, a tool-call event carries a tool-call fragment, a usage event carries
-    the usage report on a chunk with no choice, and a finish event carries the
-    reason generation stopped with an empty delta.
+    the usage report on a chunk with no choice, a finish event carries the
+    reason generation stopped with an empty delta, and a terminal error event
+    carries the gateway's reason and sanitised message under ``error`` on a
+    chunk with no choice.
     """
-    chunk: dict[str, object] = {
-        "id": completion_id,
-        "object": _OBJECT_CHAT_COMPLETION_CHUNK,
-        "created": created,
-        "model": model,
-    }
+    chunk = _chunk_envelope(completion_id, created, model)
     if event.kind is StreamEventKind.CONTENT:
         chunk["choices"] = [
             {"index": 0, "delta": {"content": event.text}, "finish_reason": None}
@@ -284,6 +348,9 @@ def _chunk_from_event(
         chunk["choices"] = [
             {"index": 0, "delta": {}, "finish_reason": _finish_reason_chunk(event)}
         ]
+    elif event.kind is StreamEventKind.ERROR:
+        chunk["choices"] = []
+        chunk["error"] = {"reason": event.error_reason, "message": event.error_message}
     return chunk
 
 
@@ -324,10 +391,12 @@ def _usage_chunk(usage: Usage) -> dict[str, int]:
 def _finish_reason_chunk(event: StreamEvent) -> str | None:
     """The OpenAI finish reason for a finish event.
 
-    A finish event whose reason the gateway could not classify — which includes
-    the terminal event that reports an error — reports the raw reason verbatim
-    rather than an invented OpenAI value, exactly as the non-streaming response
-    does (PRD sections 5.2 and 9.1).
+    A finish event whose reason the gateway could not classify reports the raw
+    reason verbatim rather than an invented OpenAI value, exactly as the
+    non-streaming response does (PRD sections 5.2 and 9.1). A failure after
+    output does not reach here: it ends the stream with an ``error`` event, not
+    a ``finish`` event, so the gateway's own reason is never rendered as a
+    finish reason.
     """
     if event.finish_reason is FinishReason.UNKNOWN:
         return event.raw_finish_reason
