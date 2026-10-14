@@ -1,7 +1,7 @@
 """Inbound HTTP authentication: credential extraction, scope and trusted identity.
 
 This module is the whole of the gateway's inbound authentication on the HTTP
-surface (PRD sections 7 and 14). For every request it answers three questions,
+surface (PRD sections 7 and 14). It extracts the credential and decides scope,
 and nothing else:
 
 **Who is calling?** A credential is extracted from the request — ``Authorization:
@@ -11,22 +11,25 @@ the one trusted-identity type the rest of the gateway switches on. The identity
 is derived from the credential alone, so a tenant is a property of the key and
 never of the request (PRD section 5.1).
 
-**May they call this?** When authentication is enabled, every ``/v1/*``
-endpoint requires a valid credential — the model listing included, because it
-exposes configured model IDs. The health endpoints are exempt only when
-``GATEWAY_ALLOW_ANONYMOUS_HEALTH`` is true; when it is false they require a
+**May they call this?** When authentication is enabled, every endpoint
+requires a valid credential — not only the ``/v1/*`` surface but every path a
+request reaches the gateway on: ``/favicon.ico``, an unknown path and any
+endpoint added in future are authenticated too, so a route added later cannot
+accidentally become anonymous. The health endpoints are exempt only when
+``GATEWAY_ALLOW_ANONYMOUS_HEALTH`` is true, and even on an exempt path a
+presented credential is still validated; when it is false they require a
 credential too. When authentication is disabled, every request proceeds with
 the anonymous identity.
 
-**Whose tenant is it?** The authenticated identity is the sole source of
-tenant identity. A request body's ``tenant_id`` is never authorization
-evidence: when it disagrees with the authenticated tenant the request is
-refused with a :class:`~model_gateway.errors.PermissionDeniedError` rather
-than silently ignored, and when the caller is unauthenticated it is discarded
-rather than propagated.
+The transport-independent rule that a caller's claimed tenant must never become
+or override the authenticated tenant is deliberately not here: it lives in
+:mod:`model_gateway.security.authorization`, so the HTTP and gRPC transports
+call the same code rather than each reimplementing it. This module's only job
+with respect to identity is to extract the credential and assign the identity it
+yields.
 
 The presented key is never logged, published or echoed. Log records carry the
-non-secret ``key_id`` instead (PRD section 17).
+non-secret ``key_label`` instead (PRD section 17).
 """
 
 from collections.abc import Awaitable, Callable
@@ -34,14 +37,13 @@ from collections.abc import Awaitable, Callable
 import structlog
 from blacksheep import Request, Response
 
-from model_gateway.errors import PermissionDeniedError, UnauthenticatedError
+from model_gateway.errors import UnauthenticatedError
 from model_gateway.security.api_keys import ApiKeySet
 from model_gateway.security.identity import Identity
 
 __all__ = [
     "authenticate_request",
     "create_auth_middleware",
-    "enforce_tenant",
     "extract_credential",
     "get_identity",
 ]
@@ -62,15 +64,23 @@ def extract_credential(request: Request) -> str | None:
     """The API key the request presents, or ``None`` when it presents none.
 
     ``Authorization: Bearer <key>`` is the preferred form; ``x-api-key: <key>``
-    is accepted from clients that cannot set Authorization. A malformed
-    Authorization header — a scheme that is not ``Bearer``, or a bearer token
-    that is empty — raises :class:`~model_gateway.errors.UnauthenticatedError`
-    rather than a 400: the caller's credential is wrong, not the shape of its
-    request. When both headers are present and disagree, the request is
-    rejected rather than having one of them picked silently.
+    is accepted from clients that cannot set Authorization.
+
+    Each credential header must be presented exactly once: zero values means
+    the header is absent, and more than one value raises
+    :class:`~model_gateway.errors.UnauthenticatedError` rather than being
+    reduced to whichever value comes first. A repeated credential header is an
+    ambiguous presentation — the request-smuggling shape in which a forward
+    proxy and a reverse proxy each act on a different value — and "first wins"
+    would let the ignored value smuggle past anything that reads only the
+    first. A malformed Authorization header — a scheme that is not ``Bearer``,
+    or a bearer token that is empty — raises the same error rather than a
+    400: the caller's credential is wrong, not the shape of its request. When
+    both headers are present and disagree, the request is rejected rather than
+    having one of them picked silently.
     """
-    authorization = _decode(request.get_first_header(_AUTHORIZATION_HEADER))
-    api_key = _header_text(request.get_first_header(_API_KEY_HEADER))
+    authorization = _credential_header(request, _AUTHORIZATION_HEADER, blank_is_absent=False)
+    api_key = _credential_header(request, _API_KEY_HEADER, blank_is_absent=True)
 
     if authorization is None:
         return api_key
@@ -102,35 +112,8 @@ def authenticate_request(api_keys: ApiKeySet, request: Request, *, exempt: bool)
             "'Authorization: Bearer <key>' or 'x-api-key: <key>'"
         )
     identity = api_keys.authenticate(presented)
-    logger.info("request authenticated", key_id=identity.key_id)
+    logger.info("request authenticated", key_label=identity.key_label)
     return identity
-
-
-def enforce_tenant(identity: Identity | None, body_tenant_id: str | None) -> None:
-    """Refuse a body ``tenant_id`` that disagrees with the authenticated tenant.
-
-    The authenticated identity is the sole source of tenant identity (PRD
-    section 5.1): a body ``tenant_id`` can never supply or override a tenant.
-    When the caller is authenticated and the body names a different tenant —
-    including one the credential is not bound to at all — the request is a
-    :class:`~model_gateway.errors.PermissionDeniedError`. An absent body
-    ``tenant_id`` is fine, and one that matches the authenticated tenant is
-    fine.
-
-    When the caller is unauthenticated there is nothing trusted to enforce
-    against, so the body value is not authoritative: it is discarded by
-    :meth:`~model_gateway.http.dto.ChatRequest.to_invocation` rather than
-    propagated as the invocation's tenant.
-    """
-    if identity is None or not identity.authenticated:
-        return
-    if body_tenant_id is not None and body_tenant_id != identity.tenant:
-        raise PermissionDeniedError(
-            "the request body's tenant_id does not match the tenant bound to the "
-            "presented credential; a request-body tenant_id is not authorization "
-            "evidence and cannot supply or override the credential's tenant",
-            details={"key_id": identity.key_id},
-        )
 
 
 def get_identity(request: Request) -> Identity | None:
@@ -174,6 +157,29 @@ def create_auth_middleware(
         return await handler(request)
 
     return auth_middleware
+
+
+def _credential_header(request: Request, name: bytes, *, blank_is_absent: bool) -> str | None:
+    """The one value of a credential header, refusing a repeated presentation.
+
+    Zero values means the header is absent; exactly one value is parsed; more
+    than one raises :class:`~model_gateway.errors.UnauthenticatedError`, because
+    a request that presents a credential header several times does not present
+    a single unambiguous credential (see :func:`extract_credential`).
+
+    ``blank_is_absent`` decides whether a present-but-empty value counts as
+    absent: it does for ``x-api-key``, while a present-but-empty
+    ``Authorization`` is a malformed credential.
+    """
+    values = request.get_headers(name)
+    if len(values) > 1:
+        raise UnauthenticatedError(
+            f"the request presents the {name.decode('latin-1')} header more than once; "
+            "a credential must be presented exactly once"
+        )
+    if not values:
+        return None
+    return _header_text(values[0]) if blank_is_absent else _decode(values[0])
 
 
 def _decode(value: bytes | None) -> str | None:
