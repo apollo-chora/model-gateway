@@ -1,4 +1,4 @@
-"""Gateway error taxonomy: categories, payloads and sanitisation (PRD 5.4, 9.3, 15)."""
+"""Gateway error taxonomy: categories, payloads and sanitisation (PRD 5.4, 9.5, 15)."""
 
 import ast
 import re
@@ -26,7 +26,7 @@ from model_gateway.errors import (
     sanitise_text,
 )
 
-# Every category in PRD section 5.4, plus the capability category of PRD 9.3.
+# Every category in PRD section 5.4, plus the capability category of PRD 9.5.
 CATEGORY_TABLE = (
     (InvalidArgumentError, 400, GrpcStatus.INVALID_ARGUMENT, ErrorReason.INVALID_REQUEST),
     (UnauthenticatedError, 401, GrpcStatus.UNAUTHENTICATED, ErrorReason.AUTHENTICATION_REQUIRED),
@@ -38,10 +38,31 @@ CATEGORY_TABLE = (
     (DeadlineExceededError, 504, GrpcStatus.DEADLINE_EXCEEDED, ErrorReason.DEADLINE_EXCEEDED),
     (UnavailableError, 503, GrpcStatus.UNAVAILABLE, ErrorReason.PROVIDER_UNAVAILABLE),
     (InternalError, 500, GrpcStatus.INTERNAL, ErrorReason.INTERNAL_ERROR),
-    (CapabilityError, 412, GrpcStatus.FAILED_PRECONDITION, ErrorReason.UNSUPPORTED_CAPABILITY),
+    (CapabilityError, 422, GrpcStatus.FAILED_PRECONDITION, ErrorReason.UNSUPPORTED_CAPABILITY),
 )
 
 CATEGORY_IDS = [error_class.__name__ for error_class, *_ in CATEGORY_TABLE]
+
+# The reasons each category owns. A category accepts exactly these and rejects
+# every other reason, so a public error can never contradict the status code it
+# arrived with. UnauthenticatedError and ResourceExhaustedError each permit two
+# reasons; every other category permits one.
+CATEGORY_REASONS = {
+    InvalidArgumentError: (ErrorReason.INVALID_REQUEST,),
+    UnauthenticatedError: (ErrorReason.AUTHENTICATION_REQUIRED, ErrorReason.INVALID_CREDENTIALS),
+    PermissionDeniedError: (ErrorReason.PERMISSION_DENIED,),
+    NotFoundError: (ErrorReason.RESOURCE_NOT_FOUND,),
+    ModelNotFoundError: (ErrorReason.MODEL_NOT_FOUND,),
+    ResourceExhaustedError: (ErrorReason.RATE_LIMITED, ErrorReason.CONCURRENCY_LIMIT_EXCEEDED),
+    FailedPreconditionError: (ErrorReason.FAILED_PRECONDITION,),
+    DeadlineExceededError: (ErrorReason.DEADLINE_EXCEEDED,),
+    UnavailableError: (ErrorReason.PROVIDER_UNAVAILABLE,),
+    InternalError: (ErrorReason.INTERNAL_ERROR,),
+    CapabilityError: (ErrorReason.UNSUPPORTED_CAPABILITY,),
+}
+
+REASON_IDS = [error_class.__name__ for error_class in CATEGORY_REASONS]
+REASON_CATEGORIES = list(CATEGORY_REASONS)
 
 # The published reason vocabulary. Pinned so that a rename is a test failure
 # rather than a silent break of the machine-readable contract.
@@ -239,6 +260,97 @@ def test_reason_defaults_come_from_the_class():
     assert ModelNotFoundError("x").reason is not NotFoundError("x").reason
 
 
+def test_the_reason_table_covers_every_category():
+    assert set(CATEGORY_REASONS) == {error_class for error_class, *_ in CATEGORY_TABLE}
+
+
+def test_every_published_reason_belongs_to_some_category():
+    permitted = set().union(*CATEGORY_REASONS.values())
+
+    assert permitted == set(ErrorReason)
+
+
+@pytest.mark.parametrize("error_class", REASON_CATEGORIES, ids=REASON_IDS)
+def test_each_category_declares_exactly_the_reasons_the_table_names(error_class):
+    assert error_class.allowed_reasons == frozenset(CATEGORY_REASONS[error_class])
+
+
+@pytest.mark.parametrize("error_class", REASON_CATEGORIES, ids=REASON_IDS)
+def test_a_category_accepts_every_reason_it_permits(error_class):
+    for reason in CATEGORY_REASONS[error_class]:
+        error = error_class("the request was rejected", reason=reason)
+
+        assert error.reason is reason
+        assert error.to_payload()["reason"] == reason.value
+
+
+@pytest.mark.parametrize("error_class", REASON_CATEGORIES, ids=REASON_IDS)
+def test_a_category_rejects_a_reason_belonging_to_another_category(error_class):
+    permitted = frozenset(CATEGORY_REASONS[error_class])
+
+    for reason in ErrorReason:
+        if reason in permitted:
+            continue
+        with pytest.raises(ValueError, match="does not permit reason"):
+            error_class("the request was rejected", reason=reason)
+
+
+@pytest.mark.parametrize("error_class", REASON_CATEGORIES, ids=REASON_IDS)
+def test_each_category_permits_the_reason_it_defaults_to(error_class):
+    assert error_class.default_reason in error_class.allowed_reasons
+
+
+def test_the_base_error_permits_only_the_internal_reason():
+    assert GatewayError.allowed_reasons == frozenset({ErrorReason.INTERNAL_ERROR})
+    assert GatewayError("boom").reason is ErrorReason.INTERNAL_ERROR
+
+    with pytest.raises(ValueError, match="does not permit reason"):
+        GatewayError("boom", reason=ErrorReason.INVALID_REQUEST)
+
+
+def test_a_capability_error_rejects_an_authentication_reason():
+    with pytest.raises(ValueError, match="does not permit reason 'invalid_credentials'"):
+        CapabilityError("the route cannot serve images", reason=ErrorReason.INVALID_CREDENTIALS)
+
+
+def test_a_not_found_error_rejects_a_rate_limit_reason():
+    with pytest.raises(ValueError, match="does not permit reason 'rate_limited'"):
+        NotFoundError("no such route", reason=ErrorReason.RATE_LIMITED)
+
+
+def test_an_unauthenticated_error_distinguishes_its_two_reasons():
+    missing = UnauthenticatedError("no credential was presented")
+    rejected = UnauthenticatedError(
+        "the presented key is not recognised", reason=ErrorReason.INVALID_CREDENTIALS
+    )
+
+    assert missing.reason is ErrorReason.AUTHENTICATION_REQUIRED
+    assert rejected.reason is ErrorReason.INVALID_CREDENTIALS
+    assert missing.http_status == rejected.http_status == 401
+    assert missing.to_payload() != rejected.to_payload()
+
+
+def test_a_resource_exhausted_error_distinguishes_its_two_reasons():
+    rate = ResourceExhaustedError("request rate exceeded")
+    concurrency = ResourceExhaustedError(
+        "too many requests in flight", reason=ErrorReason.CONCURRENCY_LIMIT_EXCEEDED
+    )
+
+    assert rate.reason is ErrorReason.RATE_LIMITED
+    assert concurrency.reason is ErrorReason.CONCURRENCY_LIMIT_EXCEEDED
+    assert rate.http_status == concurrency.http_status == 429
+    assert rate.grpc_code is concurrency.grpc_code is GrpcStatus.RESOURCE_EXHAUSTED
+
+
+def test_a_subclass_declares_its_own_reason_set():
+    assert ModelNotFoundError.allowed_reasons == frozenset({ErrorReason.MODEL_NOT_FOUND})
+    assert ErrorReason.RESOURCE_NOT_FOUND in NotFoundError.allowed_reasons
+    assert ModelNotFoundError.allowed_reasons.isdisjoint(NotFoundError.allowed_reasons)
+
+    with pytest.raises(ValueError, match="does not permit reason"):
+        ModelNotFoundError("text-default", reason=ErrorReason.RESOURCE_NOT_FOUND)
+
+
 # --- payload shape ---------------------------------------------------------
 
 
@@ -413,6 +525,50 @@ def test_sanitise_text_handles_an_empty_message():
     assert sanitise_text("") == ""
 
 
+# --- the limits of sanitisation --------------------------------------------
+#
+# Sanitisation is a backstop, not a guarantee: it removes the shapes its
+# patterns recognise and nothing else. These tests pin the limitation so that
+# it stays a documented property rather than an assumption, and so that nobody
+# treats a call to sanitise_text as licence to forward upstream text.
+
+
+def test_sanitise_text_does_not_scrub_a_bare_unrecognised_secret():
+    for message in (
+        f"the upstream rejected the token {CREDENTIAL} for this tenant",
+        "the session cookie session=8f14e45fceea167a5a36dedd4bea2543 was rejected",
+        "the upstream expects its own authorization scheme: Token abc123def456",
+    ):
+        assert sanitise_text(message) == message
+
+
+def test_an_error_cannot_rely_on_sanitisation_to_remove_an_unrecognised_secret():
+    message = f"the upstream rejected the token {CREDENTIAL} for this tenant"
+
+    error = InternalError(message, details={"hint": message})
+
+    assert error.to_payload()["message"] == message
+    assert error.to_payload(include_details=True)["details"] == {"hint": message}
+
+
+def test_sanitisation_is_documented_as_a_backstop():
+    documented = errors_module.__doc__ or ""
+
+    assert "backstop" in documented
+    assert "not a guarantee" in documented
+    assert "session cookie" in documented
+
+
+def test_the_retained_cause_carries_text_that_must_not_be_logged_by_default():
+    original = ProviderFailure(f"rejected Bearer {CREDENTIAL} for {UPSTREAM_URL}")
+
+    wrapped = normalise_exception(original)
+
+    assert wrapped.__cause__ is original
+    assert CREDENTIAL in str(wrapped.__cause__)
+    assert CREDENTIAL not in wrapped.to_payload()["message"]
+
+
 def test_a_message_is_sanitised_when_the_error_is_constructed():
     error = InternalError(
         f"upstream {UPSTREAM_URL} replied with Authorization: Bearer {CREDENTIAL}\n{STACK_TRACE}"
@@ -564,3 +720,38 @@ def test_a_capability_error_reports_the_unsupported_feature():
         "capability": "structured_output",
         "model": "text-default",
     }
+
+
+def test_a_capability_error_is_unprocessable_content():
+    error = CapabilityError("the selected route does not support tool calling")
+
+    assert error.http_status == 422
+    assert error.grpc_code is GrpcStatus.FAILED_PRECONDITION
+
+
+def test_the_http_and_grpc_mappings_of_a_capability_error_need_not_be_namesakes():
+    """422 and FAILED_PRECONDITION are different concepts, so they may diverge.
+
+    412 Precondition Failed carries a conditional-request meaning in RFC 9110
+    that a capability failure does not have, which is why HTTP moves to 422
+    Unprocessable Content. gRPC has no 422, and FAILED_PRECONDITION is its code
+    for a valid request the system cannot operate on, so it stays. The two
+    mappings are decided by their own specifications, not by each other.
+    """
+    precondition = FailedPreconditionError("the route is not ready")
+
+    assert precondition.http_status == 412
+    assert precondition.grpc_code is GrpcStatus.FAILED_PRECONDITION
+    assert CapabilityError("unsupported").grpc_code is precondition.grpc_code
+    assert CapabilityError("unsupported").http_status == 422
+    assert CapabilityError("unsupported").http_status != precondition.http_status
+
+
+def test_only_a_capability_error_uses_the_unprocessable_content_status():
+    unprocessable = [
+        error_class.__name__
+        for error_class, *_ in CATEGORY_TABLE
+        if error_class("x").http_status == 422
+    ]
+
+    assert unprocessable == ["CapabilityError"]
