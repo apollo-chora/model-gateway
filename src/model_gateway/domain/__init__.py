@@ -84,6 +84,11 @@ from model_gateway.domain.parts import (
     TextPart,
     content_part_from_dict,
 )
+from model_gateway.domain.streaming import (
+    StreamEvent,
+    StreamEventKind,
+    ToolCallDelta,
+)
 from model_gateway.domain.tools import (
     ToolCall,
     ToolChoice,
@@ -111,8 +116,11 @@ __all__ = [
     "ResponseFormatMode",
     "ResponseModality",
     "Role",
+    "StreamEvent",
+    "StreamEventKind",
     "TextPart",
     "ToolCall",
+    "ToolCallDelta",
     "ToolChoice",
     "ToolChoiceMode",
     "ToolDefinition",
