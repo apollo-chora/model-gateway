@@ -9,14 +9,25 @@ and 5.2). Nothing here names a vendor or a wire format — translating these typ
 into a provider's image call is the LiteLLM binding's work (PRD section 9).
 
 **A generated image carries exactly one payload.** ``GeneratedImage.b64_json``
-is the image itself and ``GeneratedImage.url`` is where to fetch it, and the two
-are alternatives rather than companions: the OpenAI-compatible shape this type
-mirrors puts one or the other in a result entry, and a caller reads whichever is
-present. An entry carrying both would leave that caller choosing between two
-answers the gateway never said were the same image, and an entry carrying
-neither would hand it a result with no image in it at all. Both states are
-refused, so the caller's rule — read the one that is set — is always well
+is the image itself and ``GeneratedImage.url`` is where the caller may fetch it,
+and the two are alternatives rather than companions: the OpenAI-compatible shape
+this type mirrors puts one or the other in a result entry, and a caller reads
+whichever is present. An entry carrying both would leave that caller choosing
+between two answers the gateway never said were the same image, and an entry
+carrying neither would hand it a result with no image in it at all. Both states
+are refused, so the caller's rule — read the one that is set — is always well
 defined.
+
+**A generated image's URL is untrusted provider output.** ``GeneratedImage.url``
+is carried through from the upstream's answer unchanged, so it survives this
+type's parsing because it is a non-empty string, not because the gateway screened
+it: nothing here resolves it, applies the URL policy to it, pins a connection to
+it or follows it. A caller fetches it on its own authority and under its own
+policy; the gateway must never treat it as a gateway-fetchable trusted URL. It is
+the mirror image of the remote image *input* the gateway refuses (PRD section
+9.5): an inbound ``image_url`` is rejected because the gateway cannot screen and
+fetch it safely, and an outbound ``url`` is not thereby safe to fetch either —
+neither has passed the URL policy.
 
 **Only the documented parameter values are accepted.** ``size`` is the
 documented ``WxH`` form and ``response_format`` one of the two wire encodings
@@ -76,11 +87,12 @@ IMAGE_RESPONSE_FORMATS: frozenset[str] = frozenset({"url", "b64_json"})
 """The wire representations an image request may ask for (PRD section 4.6).
 
 The gateway's image endpoint is OpenAI-compatible, and that API documents exactly
-two: ``url``, a location the caller fetches the image from, and ``b64_json``, the
-image itself base64-encoded. A request naming anything else is refused rather
-than silently answered in the gateway's own default, because a caller told its
-request was honoured while the gateway ignored the representation it asked for
-cannot tell the two apart (PRD section 9.1).
+two: ``url``, a location the caller fetches the image from — untrusted provider
+output the gateway neither screens nor fetches, as :class:`GeneratedImage`
+documents — and ``b64_json``, the image itself base64-encoded. A request naming
+anything else is refused rather than silently answered in the gateway's own
+default, because a caller told its request was honoured while the gateway ignored
+the representation it asked for cannot tell the two apart (PRD section 9.1).
 """
 
 _SIZE_PATTERN = re.compile(r"(\d+)x(\d+)")
@@ -91,11 +103,24 @@ class GeneratedImage:
     """One generated image, carried as its payload or as its location (PRD section 4.6).
 
     ``b64_json`` is the image itself, base64-encoded, and ``url`` is where the
-    caller fetches it. Exactly one of the two is set: they are alternatives in
+    caller may fetch it. Exactly one of the two is set: they are alternatives in
     the shape this type mirrors, so a caller reads whichever is present, and an
     entry carrying both or neither leaves that rule undefined. The refusal of
     both states is what keeps the caller's reading of a result entry — and of
     the serialised form, which emits both keys always — unambiguous.
+
+    ``url`` is untrusted provider output, not a URL the gateway vouches for. It
+    arrives in the upstream's answer and is carried through unchanged, so it
+    survives this type's parsing because it is a non-empty string rather than
+    because anything checked it: no resolver, no URL-policy decision, no pinned
+    connection and no redirect evaluation stands behind it. A caller may fetch it
+    on its own authority and under its own policy; the gateway must not treat it
+    as a gateway-fetchable trusted URL, and must not hand it to an operation that
+    would fetch it on the gateway's behalf. This is the mirror image of the
+    remote image *input* the gateway refuses for exactly that reason (PRD section
+    9.5): an inbound ``image_url`` is rejected because the gateway cannot screen
+    and fetch it safely, and an outbound ``url`` is not thereby safe to fetch
+    either.
 
     ``revised_prompt`` is the prompt the provider reports having actually used,
     when it rewrites the caller's prompt to describe the image it produced. It
