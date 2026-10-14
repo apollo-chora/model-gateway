@@ -1,0 +1,340 @@
+// The gateway's own versioned inference contract (PRD section 5).
+//
+// Package gateway.v1 is published, not imported: field numbers are stable and a
+// field is never reused or renumbered once it has been served. A caller written
+// against gateway.v1 keeps working against any later version of this service.
+//
+// The shape is deliberately the canonical model, not a provider dialect: the
+// gateway resolves the public model, applies policy, and returns the canonical
+// answer. A provider's own field names never appear here.
+syntax = "proto3";
+
+package gateway.v1;
+
+import "google/protobuf/struct.proto";
+
+// ModelGatewayService serves every inference operation the gateway exposes.
+//
+// Invoke and InvokeStream are the text operation, Embed the embeddings
+// operation and ListModels the model listing. The standard gRPC Health Checking
+// Protocol is served beside this service, on the same port.
+service ModelGatewayService {
+  // One request, one complete answer. Refused, rather than approximated, when
+  // the canonical answer cannot serve the request.
+  rpc Invoke(InvokeRequest) returns (InvokeResponse);
+
+  // One request, a stream of chunks carrying the answer as it is produced.
+  rpc InvokeStream(InvokeRequest) returns (stream InvokeChunk);
+
+  // One request, one list of vectors.
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+
+  // The models this gateway exposes, with the capabilities each declares.
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+}
+
+// InvokeRequest is the canonical invocation, with the caller's identity claims
+// beside it.
+//
+// tenant_id, actor_id and agent_id are caller-supplied identity labels. They are
+// never authorization evidence: the trusted tenant comes from the validated
+// credential alone, and a tenant_id that disagrees with it is refused.
+message InvokeRequest {
+  // Unique invocation identifier, echoed on every chunk and on the response.
+  string invocation_id = 1;
+  // Caller-supplied tenant claim. Never a principal by itself.
+  string tenant_id = 2;
+  // Caller-supplied identity label for attribution.
+  string actor_id = 3;
+  // Caller-supplied agent or service label.
+  string agent_id = 4;
+  // Public model ID, resolved before anything is attempted.
+  string model = 5;
+  // The conversation, in order.
+  repeated Message messages = 6;
+  // The invocation-level instruction. Not interchangeable with a system message.
+  string system_prompt = 7;
+  // Model parameters. An unset field means "not specified".
+  GenerationConfig generation_config = 8;
+  // Tool declarations the model may call.
+  repeated ToolDefinition tools = 9;
+  // The caller's tool-choice policy. Unset leaves the decision to the provider's
+  // own default, which is a different request from a stated 'none'.
+  ToolChoice tool_choice = 10;
+  // The modality the caller asked the answer to carry.
+  ResponseModality response_modality = 11;
+  // Public model IDs the invocation may fall back to, in order.
+  repeated string fallback_models = 12;
+  // Caller-supplied deduplication key.
+  string idempotency_key = 13;
+  // Caller bookkeeping. Never forwarded to the model or a provider.
+  map<string, string> metadata = 14;
+}
+
+// ToolChoice is the caller's tool-choice policy (PRD section 9.3).
+message ToolChoice {
+  ToolChoiceMode mode = 1;
+  // The tool a 'specific' choice requires the model to call. It must name one of
+  // the tools the invocation declares.
+  string name = 2;
+}
+
+enum ToolChoiceMode {
+  TOOL_CHOICE_MODE_UNSPECIFIED = 0;
+  TOOL_CHOICE_MODE_AUTO = 1;
+  TOOL_CHOICE_MODE_NONE = 2;
+  TOOL_CHOICE_MODE_REQUIRED = 3;
+  TOOL_CHOICE_MODE_SPECIFIC = 4;
+}
+
+// Message is one turn of the conversation.
+message Message {
+  // Who spoke this turn.
+  Role role = 1;
+  // The content parts of this turn, in order.
+  repeated ContentPart content = 2;
+  // An optional name for the speaker.
+  string name = 3;
+  // The tool calls this turn proposes. Assistant turns only.
+  repeated ToolCall tool_calls = 4;
+  // The call this turn answers. Tool turns only.
+  string tool_call_id = 5;
+}
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_SYSTEM = 1;
+  ROLE_DEVELOPER = 2;
+  ROLE_USER = 3;
+  ROLE_ASSISTANT = 4;
+  ROLE_TOOL = 5;
+}
+
+// ContentPart is one part of a turn's content.
+message ContentPart {
+  oneof part {
+    TextPart text = 1;
+    ImagePart image = 2;
+    RefusalPart refusal = 3;
+  }
+}
+
+message TextPart {
+  string text = 1;
+}
+
+// ImagePart carries exactly one of data and url.
+message ImagePart {
+  oneof source {
+    // A base64 payload.
+    string data = 1;
+    // A remote URL the gateway is expected to have been given, not to fetch.
+    string url = 2;
+  }
+  string media_type = 3;
+}
+
+message RefusalPart {
+  string text = 1;
+}
+
+// ToolCall is one proposed call.
+//
+// arguments is the upstream's JSON object, a raw JSON string, or absent: three
+// distinct facts, which google.protobuf.Value preserves.
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  google.protobuf.Value arguments = 3;
+}
+
+// ToolDefinition declares a tool the model may call.
+message ToolDefinition {
+  string name = 1;
+  string description = 2;
+  // The JSON schema the tool's arguments must satisfy.
+  google.protobuf.Struct parameters = 3;
+}
+
+// GenerationConfig holds the model parameters a caller may state.
+//
+// Every field is optional and an unset field means "not specified", which the
+// provider's own default answers — a stated zero is a different request from an
+// unstated one.
+message GenerationConfig {
+  optional double temperature = 1;
+  optional double top_p = 2;
+  optional int32 max_output_tokens = 3;
+  repeated string stop_sequences = 4;
+  optional int32 seed = 5;
+  optional double presence_penalty = 6;
+  optional double frequency_penalty = 7;
+  ResponseFormat response_format = 8;
+}
+
+message ResponseFormat {
+  ResponseFormatMode mode = 1;
+  // The schema a json_schema mode requires.
+  google.protobuf.Struct schema = 2;
+  string name = 3;
+  bool strict = 4;
+}
+
+enum ResponseFormatMode {
+  RESPONSE_FORMAT_MODE_UNSPECIFIED = 0;
+  RESPONSE_FORMAT_MODE_TEXT = 1;
+  RESPONSE_FORMAT_MODE_JSON_OBJECT = 2;
+  RESPONSE_FORMAT_MODE_JSON_SCHEMA = 3;
+}
+
+enum ResponseModality {
+  RESPONSE_MODALITY_UNSPECIFIED = 0;
+  RESPONSE_MODALITY_TEXT = 1;
+  RESPONSE_MODALITY_IMAGE = 2;
+  RESPONSE_MODALITY_MULTIMODAL = 3;
+}
+
+// InvokeResponse is the complete answer to one Invoke.
+message InvokeResponse {
+  // The invocation identifier, echoed from the request.
+  string invocation_id = 1;
+  // The public model ID that was asked for.
+  string model = 2;
+  // The upstream model ID that actually answered.
+  string upstream_model = 3;
+  // The answer, in canonical order.
+  repeated OutputItem output = 4;
+  // Why generation stopped.
+  FinishReason finish_reason = 5;
+  // The provider's own reason, when the gateway could not classify it.
+  string raw_finish_reason = 6;
+  Usage usage = 7;
+  optional double estimated_cost = 8;
+  // An ISO 4217 code, present only with estimated_cost.
+  string cost_currency = 9;
+  // Gateway attempts, which can exceed the upstream requests (PRD section 9.6).
+  int32 attempt_count = 10;
+  bool fallback_used = 11;
+  IdempotencyStatus idempotency_status = 12;
+}
+
+// OutputItem is one item of the answer: a content part or a tool call.
+message OutputItem {
+  oneof item {
+    ContentPart content = 1;
+    ToolCall tool_call = 2;
+  }
+}
+
+enum FinishReason {
+  FINISH_REASON_UNSPECIFIED = 0;
+  FINISH_REASON_STOP = 1;
+  FINISH_REASON_LENGTH = 2;
+  FINISH_REASON_TOOL_CALLS = 3;
+  FINISH_REASON_CONTENT_FILTER = 4;
+  FINISH_REASON_UNKNOWN = 5;
+}
+
+// Usage counts the tokens of one invocation.
+//
+// A field is present only when it is known: an absent count is a count the
+// provider never reported, not a count of zero.
+message Usage {
+  optional int32 input_tokens = 1;
+  optional int32 output_tokens = 2;
+  optional int32 total_tokens = 3;
+  optional int32 cached_tokens = 4;
+}
+
+enum IdempotencyStatus {
+  IDEMPOTENCY_STATUS_NOT_APPLICABLE = 0;
+  IDEMPOTENCY_STATUS_NEW = 1;
+  IDEMPOTENCY_STATUS_REPLAYED = 2;
+  IDEMPOTENCY_STATUS_INDETERMINATE = 3;
+}
+
+// InvokeChunk is one event of a streaming invocation.
+message InvokeChunk {
+  string invocation_id = 1;
+  // Zero-based and strictly increasing within one invocation.
+  int32 sequence = 2;
+  oneof payload {
+    // A fragment of generated text.
+    string content_delta = 3;
+    // A fragment of a tool call.
+    ToolCallDelta tool_call_delta = 4;
+    // A token report.
+    Usage usage = 5;
+    // Terminal: the stream completed.
+    FinishEvent finish = 6;
+    // Terminal: the stream failed after output began.
+    ErrorEvent error = 7;
+  }
+}
+
+message ToolCallDelta {
+  // The position of the call among the invocation's calls.
+  int32 index = 1;
+  optional string id = 2;
+  optional string name = 3;
+  optional string arguments_delta = 4;
+}
+
+message FinishEvent {
+  FinishReason finish_reason = 1;
+  string raw_finish_reason = 2;
+}
+
+// ErrorEvent carries the gateway's own stable reason and its sanitized message.
+message ErrorEvent {
+  string reason = 1;
+  string message = 2;
+}
+
+// EmbedRequest asks for one vector per input.
+message EmbedRequest {
+  string model = 1;
+  repeated string input = 2;
+  optional int32 dimensions = 3;
+  // "float" or "base64". The gateway answers floats only.
+  string encoding_format = 4;
+  string user = 5;
+  map<string, string> metadata = 6;
+}
+
+message EmbedResponse {
+  string object = 1;
+  string model = 2;
+  string upstream_model = 3;
+  repeated Embedding data = 4;
+  Usage usage = 5;
+  string invocation_id = 6;
+}
+
+message Embedding {
+  int32 index = 1;
+  repeated double embedding = 2;
+}
+
+message ListModelsRequest {}
+
+// ListModelsResponse is the model listing the gateway exposes.
+message ListModelsResponse {
+  repeated ModelInfo models = 1;
+}
+
+message ModelInfo {
+  string id = 1;
+  Operation operation = 2;
+  repeated string capabilities = 3;
+  optional int32 context_window = 4;
+  optional int32 max_output_tokens = 5;
+  optional int32 dimensions = 6;
+}
+
+enum Operation {
+  OPERATION_UNSPECIFIED = 0;
+  OPERATION_TEXT = 1;
+  OPERATION_IMAGE = 2;
+  OPERATION_EMBEDDINGS = 3;
+}

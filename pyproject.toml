@@ -6,9 +6,12 @@ requires-python = ">=3.13"
 dependencies = [
     "blacksheep==2.6.4",
     "granian==2.8.4",
+    "grpcio-health-checking==1.84.0",
+    "grpcio==1.84.0",
     "httpx==0.28.1",
     "litellm-core==1.106.0rc1",
     "orjson==3.13.0",
+    "protobuf==7.36.2",
     "structlog==26.1.0",
 ]
 
@@ -17,6 +20,7 @@ model-gateway = "model_gateway.__main__:main"
 
 [dependency-groups]
 dev = [
+    "grpcio-tools==1.84.0",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "ruff==0.17.0",
@@ -36,6 +40,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 src = ["src"]
+# The protobuf contract is checked in generated, so the compiler's own output
+# is not linted: regenerate with the command in PRD section 5, not by editing it.
+exclude = ["src/model_gateway/grpc/gateway_pb2.py", "src/model_gateway/grpc/gateway_pb2_grpc.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
