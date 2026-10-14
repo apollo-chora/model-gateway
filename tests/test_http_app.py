@@ -23,6 +23,7 @@ from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import FinishReason, InvocationResponse, TextPart, Usage
 from model_gateway.inference import InferenceService
 from model_gateway.registry import ModelRegistry
+from model_gateway.reliability import ConcurrencyLimiter
 
 SECRET_KEY = "sk-upstream-secret-key"
 UPSTREAM_ENDPOINT = "https://upstream.internal.example/v1"
@@ -201,14 +202,23 @@ async def test_the_factory_builds_the_litellm_service_with_a_registry_but_no_ser
 async def test_the_factory_gives_the_built_service_the_configured_attempt_budget(monkeypatch):
     """Every attempt context carries the configured provider timeout (PRD 9.6).
 
-    A later slice makes that budget the minimum of the configured timeout and
+    The service derives that budget as the minimum of the configured timeout and
     the invocation deadline remaining when the attempt begins (PRD section 15);
     the service constructor is where the configured value enters.
     """
     captured = {}
 
     class RecordingService:
-        def __init__(self, registry, provider, *, attempt_timeout=None):
+        def __init__(
+            self,
+            registry,
+            provider,
+            *,
+            attempt_timeout=None,
+            retry_count=None,
+            retry_backoff_ms=None,
+            limiter=None,
+        ):
             captured["attempt_timeout"] = attempt_timeout
 
     monkeypatch.setattr("model_gateway.app.InferenceService", RecordingService)
@@ -218,6 +228,57 @@ async def test_the_factory_gives_the_built_service_the_configured_attempt_budget
     await app.stop()
 
     assert captured["attempt_timeout"] == 42.0
+
+
+async def test_the_factory_gives_the_built_service_every_configured_reliability_value(
+    monkeypatch,
+):
+    """Each configured reliability value reaches the service the factory builds.
+
+    A deployment that configures retries and a concurrency ceiling and silently
+    gets none of them — the operator believing their configuration took effect —
+    is exactly the defect this guards against, so every ``PROVIDER_*``
+    reliability setting is asserted here, not just the timeout.
+    """
+    captured = {}
+
+    class RecordingService:
+        def __init__(
+            self,
+            registry,
+            provider,
+            *,
+            attempt_timeout=None,
+            retry_count=None,
+            retry_backoff_ms=None,
+            limiter=None,
+        ):
+            captured.update(
+                attempt_timeout=attempt_timeout,
+                retry_count=retry_count,
+                retry_backoff_ms=retry_backoff_ms,
+                limiter=limiter,
+            )
+
+    monkeypatch.setattr("model_gateway.app.InferenceService", RecordingService)
+
+    settings = Settings.from_env(
+        {
+            "PROVIDER_TIMEOUT_SECONDS": "42",
+            "PROVIDER_RETRY_COUNT": "3",
+            "PROVIDER_RETRY_BACKOFF_MS": "250",
+            "PROVIDER_MAX_CONCURRENT_REQUESTS": "7",
+        }
+    )
+    app = create_app(settings)
+    await app.start()
+    await app.stop()
+
+    assert captured["attempt_timeout"] == 42.0
+    assert captured["retry_count"] == 3
+    assert captured["retry_backoff_ms"] == 250
+    assert isinstance(captured["limiter"], ConcurrencyLimiter)
+    assert captured["limiter"].maximum == 7
 
 
 async def test_the_default_path_serves_an_application_with_the_real_binding():
