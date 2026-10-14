@@ -37,6 +37,7 @@ from model_gateway.errors import FailedPreconditionError
 from model_gateway.health import healthz, readyz
 from model_gateway.http import (
     register_chat_routes,
+    register_embeddings_routes,
     register_error_handlers,
     register_model_routes,
 )
@@ -52,20 +53,32 @@ from model_gateway.security.api_keys import ApiKeySet
 
 logger = structlog.get_logger(__name__)
 
+_BINDING_OPERATIONS: frozenset[Operation] = frozenset({Operation.TEXT, Operation.EMBEDDINGS})
+"""The operations the production binding runs, and so the ones its start validates.
+
+The binding has one entry point per operation: the text completion and the
+embedding call. An operation it does not run has no route this process would
+serve, so a dialect it could not keep behind the transport controls is not a
+reason to refuse to start — that route is inert here.
+"""
+
 
 def _ensure_binding_can_run(registry: ModelRegistry) -> None:
-    """Refuse to start when a configured text route names a dialect the binding cannot run.
+    """Refuse to start when a configured route names a dialect the binding cannot run.
 
     The binding refuses such a route at the attempt too, and this is not a
     duplicate of that check: a deployment whose configuration the transport
     controls cannot survive should not reach the point of serving requests at
-    all (PRD sections 6, 14.1 and 21). Only the text operation is checked,
-    because the text binding is the only one that exists; the check runs only
-    when this factory builds the binding, since an injected service brings its
-    own provider.
+    all (PRD sections 6, 14.1 and 21). Every operation the binding runs is
+    checked — the text and embeddings operations today — so no route this
+    process would actually serve is unusable at startup and discoverable only
+    when a caller arrives. An operation with no binding is not checked, because
+    this process would never run its routes. The check runs only when this
+    factory builds the binding, since an injected service brings its own
+    provider.
     """
     for model in registry.list_models():
-        if model.operation is not Operation.TEXT:
+        if model.operation not in _BINDING_OPERATIONS:
             continue
         for route in registry.routes_for(model.id):
             try:
@@ -109,11 +122,11 @@ def create_app(
     of that deadline, so a retry can never outlive the caller's budget (PRD
     section 15).
 
-    Building that binding also validates the routes it would run: a text route
-    whose dialect the binding cannot keep behind the transport controls fails
-    the start (PRD section 14.1). An injected service is not validated, because
-    it brings its own provider and this factory cannot know what that provider
-    can run.
+    Building that binding also validates the routes it would run: a route of any
+    operation the binding serves — text or embeddings — whose dialect it cannot
+    keep behind the transport controls fails the start (PRD section 14.1). An
+    injected service is not validated, because it brings its own provider and
+    this factory cannot know what that provider can run.
     """
     settings = settings or Settings.from_env()
     configure_logging(settings.log_level)
@@ -145,6 +158,7 @@ def create_app(
     app.router.add_get("/readyz", readyz)
     register_model_routes(app.router, registry)
     register_chat_routes(app.router, service)
+    register_embeddings_routes(app.router, service)
     register_error_handlers(app)
 
     @app.on_start

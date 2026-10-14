@@ -71,6 +71,16 @@ def make_route(**overrides: object) -> Route:
     return Route(**fields)
 
 
+def make_embeddings_route(**overrides: object) -> Route:
+    """A resolved embeddings route; override ``format`` to model a different dialect."""
+    fields: dict[str, object] = {
+        "operation": Operation.EMBEDDINGS,
+        "capabilities": frozenset({Capability.EMBEDDINGS}),
+    }
+    fields.update(overrides)
+    return make_route(**fields)
+
+
 def make_request() -> InvocationRequest:
     """A canonical invocation, minimal and well-formed."""
     return InvocationRequest(
@@ -388,7 +398,7 @@ class _StubProvider:
 
 
 class TestTheStartupRefusal:
-    """A deployment that cannot run its text routes does not start (PRD sections 6 and 21)."""
+    """A deployment that cannot run its routes does not start (PRD sections 6 and 21)."""
 
     def test_a_text_route_with_an_unverified_dialect_fails_the_start(self) -> None:
         registry = ModelRegistry((make_route(format=UNVERIFIED_DIALECT),))
@@ -401,6 +411,42 @@ class TestTheStartupRefusal:
     @pytest.mark.parametrize("dialect", sorted(SUPPORTED_DIALECTS))
     def test_a_text_route_with_a_verified_dialect_starts(self, dialect: str) -> None:
         registry = ModelRegistry((make_route(format=dialect),))
+
+        assert create_app(Settings.from_env({}), registry=registry) is not None
+
+    def test_an_embeddings_route_with_an_unverified_dialect_fails_the_start(self) -> None:
+        """The embeddings operation is the binding's too, so its dialect is checked as well.
+
+        The binding refuses the route at the attempt, but a deployment should
+        learn that a route it serves is unusable when it starts rather than when
+        a caller arrives.
+        """
+        registry = ModelRegistry((make_embeddings_route(format=UNVERIFIED_DIALECT),))
+
+        with pytest.raises(ConfigurationError) as excinfo:
+            create_app(Settings.from_env({}), registry=registry)
+
+        assert UNVERIFIED_DIALECT in str(excinfo.value)
+
+    @pytest.mark.parametrize("dialect", sorted(SUPPORTED_DIALECTS))
+    def test_an_embeddings_route_with_a_verified_dialect_starts(self, dialect: str) -> None:
+        registry = ModelRegistry((make_embeddings_route(format=dialect),))
+
+        assert create_app(Settings.from_env({}), registry=registry) is not None
+
+    def test_an_operation_the_binding_does_not_run_is_not_checked(self) -> None:
+        """A route this process would never serve is not a reason to refuse to start.
+
+        The image operation has no binding, so its routes are inert here; the
+        dialect check covers the operations the binding actually runs, which are
+        text and embeddings today.
+        """
+        route = make_route(
+            operation=Operation.IMAGE,
+            capabilities=frozenset({Capability.GENERATION}),
+            format=UNVERIFIED_DIALECT,
+        )
+        registry = ModelRegistry((route,))
 
         assert create_app(Settings.from_env({}), registry=registry) is not None
 
