@@ -1,10 +1,10 @@
-"""The LiteLLM text provider: one upstream call through the pinned binding (PRD section 9).
+"""The LiteLLM text provider: one gateway attempt through the pinned binding (PRD section 9).
 
 This is the production :class:`~model_gateway.providers.base.TextProvider`. It
 adds execution to the transport-agnostic translation of
 :mod:`model_gateway.providers.litellm_translation`: build the call's parameters,
-perform exactly one upstream request through ``litellm.acompletion`` with the
-safe outbound client injected, and normalise the answer into the canonical
+perform one gateway attempt through ``litellm.acompletion`` with the safe
+outbound client injected, and normalise the answer into the canonical
 response. What it owns is PRD section 9's boundary and nothing more — routing,
 retry policy, accounting, identity and the public contract stay in the gateway
 core (:mod:`model_gateway.providers.base`).
@@ -129,9 +129,12 @@ copy of the guard, needed because the binding tests import ``litellm``
 directly, is :file:`tests/conftest.py`.
 """
 
+import ssl
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Final
+
+import httpx
 
 from model_gateway.config.routes import Route
 from model_gateway.domain import InvocationRequest, InvocationResponse
@@ -148,6 +151,7 @@ from model_gateway.security.transport import (
     build_async_client,
     build_pinned_transport,
 )
+from model_gateway.security.url_policy import Resolver, system_resolver
 
 __all__ = ["SUPPORTED_DIALECTS", "LiteLLMProvider", "ensure_supported_dialect"]
 
@@ -211,7 +215,13 @@ class _AttemptClient:
         await self._close()
 
 
-def _openai_sdk_client(route: Route, budget: float | None) -> _AttemptClient:
+def _openai_sdk_client(
+    route: Route,
+    budget: float | None,
+    resolver: Resolver,
+    verify: ssl.SSLContext | bool,
+    inner_factory: Callable[[], httpx.AsyncBaseTransport],
+) -> _AttemptClient:
     """The client the OpenAI SDK path is given: an SDK client over the pinned httpx client.
 
     The SDK object is what ``client=`` must carry on this path, and the httpx
@@ -219,18 +229,36 @@ def _openai_sdk_client(route: Route, budget: float | None) -> _AttemptClient:
     transport controls live there. ``max_retries=0`` is set here as well as
     through ``num_retries=0`` because the SDK retries with the same httpx client
     and the gateway owns the only retry loop (PRD section 11.3).
+
+    ``resolver``, ``verify`` and ``inner_factory`` are this attempt's transport
+    inputs (see :class:`LiteLLMProvider`): they choose which policy-checked
+    address is connected to, which trust store validates the certificate and
+    which transport performs the socket I/O. Whether the connection is pinned
+    and redirects are refused is not theirs to decide — the httpx client is
+    built by :func:`~model_gateway.security.transport.build_async_client`
+    around the pinned transport whatever they are.
     """
     client = openai.AsyncOpenAI(
         api_key=route.api_key,
         base_url=route.base_url,
-        http_client=build_async_client(budget=budget),
+        http_client=build_async_client(
+            budget=budget,
+            resolver=resolver,
+            verify=verify,
+            inner=inner_factory(),
+        ),
         timeout=attempt_timeout(budget),
         max_retries=0,
     )
     return _AttemptClient(client, client.close)
 
 
-def _http_handler_client(budget: float | None) -> _AttemptClient:
+def _http_handler_client(
+    budget: float | None,
+    resolver: Resolver,
+    verify: ssl.SSLContext | bool,
+    inner_factory: Callable[[], httpx.AsyncBaseTransport],
+) -> _AttemptClient:
     """The client the generic httpx path is given, carrying the pinned transport itself.
 
     ``AsyncHTTPHandler`` builds its client from its own ``transport`` attribute,
@@ -238,10 +266,20 @@ def _http_handler_client(budget: float | None) -> _AttemptClient:
     it the pinned transport is what keeps that retry inside the controls.
     ``follow_redirects`` is ``False`` because the handler's default is the
     library's own ``True``.
+
+    The pinned transport is
+    :func:`~model_gateway.security.transport.build_pinned_transport` — never a
+    caller-supplied one — built from this attempt's ``resolver``, ``verify``
+    and ``inner_factory``, so the client the handler creates, first or
+    rebuilt, cannot leave the controls.
     """
     handler = AsyncHTTPHandler(
         timeout=attempt_timeout(budget),
-        transport=build_pinned_transport(),
+        transport=build_pinned_transport(
+            resolver=resolver,
+            verify=verify,
+            inner=inner_factory(),
+        ),
         follow_redirects=False,
     )
     return _AttemptClient(handler, handler.close)
@@ -250,34 +288,77 @@ def _http_handler_client(budget: float | None) -> _AttemptClient:
 class LiteLLMProvider:
     """The production text provider: translation plus one execution (PRD section 9).
 
-    One attempt in, one canonical answer out. The provider performs exactly one
-    upstream request for the route it is handed and applies the attempt's own
-    budget to it; it does not retry, does not choose between routes and knows
-    nothing about fallbacks — those are the gateway core's (PRD sections 9.2
-    and 11.3). Every control the call carries — ``num_retries=0``, the injected
-    client, the attempt timeout, the error mapping — is documented in the module
-    docstring, where the reasons for each live.
+    One gateway attempt in, one canonical answer out. The provider performs one
+    gateway attempt for the route it is handed — a single invocation of the
+    pinned binding — and applies the attempt's own budget to it; it does not
+    retry, does not choose between routes and knows nothing about fallbacks —
+    those are the gateway core's (PRD sections 9.2 and 11.3). Every control the
+    call carries — ``num_retries=0``, the injected client, the attempt timeout,
+    the error mapping — is documented in the module docstring, where the
+    reasons for each live.
 
-    The client factory is injectable so a caller can stand in for the transport's
-    client. Left unset — the production default — the binding builds the client
-    the route's dialect requires, from the pinned transport, and refuses a
-    dialect whose HTTP path it has not verified
-    (:func:`ensure_supported_dialect`).
+    What a caller may inject, and what it may not
+    --------------------------------------------
+    The per-dialect client construction is the security boundary, and it is not
+    injectable: the binding itself builds the OpenAI SDK client for the
+    ``openai`` dialect and the ``AsyncHTTPHandler`` for the generic dialects,
+    always around
+    :func:`~model_gateway.security.transport.build_pinned_transport`. What a
+    caller may supply is that builder's own inputs, because none of them
+    decides whether a connection is pinned or a redirect is followed:
+
+    ``resolver``
+        The URL policy's resolver: it chooses which addresses a hostname is
+        looked up to, and every answer is still validated by the policy's own
+        blocked-address rules before a socket is opened, so a custom resolver
+        can change which policy-checked address is used, never whether
+        checking happens. A deployment may resolve through its own stub; a
+        test never touches DNS.
+
+    ``verify``
+        httpx's TLS verification setting: the default trust store, or an
+        :class:`ssl.SSLContext` for a private CA. It chooses who is trusted,
+        not where the connection goes. It does not apply when ``inner_factory``
+        supplies a transport — a supplied transport owns its own TLS
+        configuration, as the transport documents.
+
+    ``inner_factory``
+        Called once per attempt to build the transport that performs socket
+        I/O, by default :class:`httpx.AsyncHTTPTransport`. Pinning rewrites
+        the request before the inner transport is called, so whichever
+        transport is supplied, it receives only requests already addressed to
+        a validated address, with the original hostname preserved for TLS and
+        ``Host``.
+
+    What is not injectable — the builder, the SDK client and the handler — is
+    what makes the failure mode impossible rather than merely unexercised:
+    through the public API no caller can obtain a client for a verified
+    dialect that re-resolves the hostname at connect time or follows a
+    redirect, because every path from the constructor to the wire runs through
+    :func:`~model_gateway.security.transport.build_pinned_transport` and the
+    per-dialect wrapping. A dialect whose path is unverified is refused before
+    any client is built at all (:func:`ensure_supported_dialect`).
     """
 
-    def __init__(self, *, client_factory: Callable[..., Any] | None = None) -> None:
-        """Build the provider, optionally over an explicit client factory.
+    def __init__(
+        self,
+        *,
+        resolver: Resolver = system_resolver,
+        verify: ssl.SSLContext | bool = True,
+        inner_factory: Callable[[], httpx.AsyncBaseTransport] = httpx.AsyncHTTPTransport,
+    ) -> None:
+        """Build the provider over the pinned transport's own inputs.
 
-        ``client_factory`` is called once per attempt with the attempt's budget
-        as ``budget=`` and returns the client that attempt's request is injected
-        with. Supplying one replaces the per-dialect construction for a verified
-        dialect: the object the factory returns is what LiteLLM receives, which
-        is what lets a test stand in for the transport's client and never touch
-        a network. It does not make an unverified dialect acceptable, because the
-        refusal is about the path the library takes rather than about the client
-        it is given.
+        The inputs are the ones documented in the class docstring: ``resolver``
+        chooses which policy-checked address is connected to, ``verify`` which
+        trust store validates the certificate, and ``inner_factory`` — called
+        once per attempt — which transport performs the socket I/O. The client
+        they are inputs *to* is always the binding's own per-dialect
+        construction, so supplying them cannot substitute for it.
         """
-        self._client_factory = client_factory
+        self._resolver = resolver
+        self._verify = verify
+        self._inner_factory = inner_factory
 
     async def complete(
         self,
@@ -285,7 +366,7 @@ class LiteLLMProvider:
         request: InvocationRequest,
         context: AttemptContext,
     ) -> InvocationResponse:
-        """Perform the one upstream call for this attempt (PRD section 9.6).
+        """Perform the one gateway attempt for this route (PRD section 9.6).
 
         The call's parameters are the translation of ``route`` and ``request``
         (:func:`~model_gateway.providers.litellm_translation.to_litellm_params`)
@@ -315,13 +396,17 @@ class LiteLLMProvider:
 
         The dialect is checked first, and the check is unconditional: the
         refusal is about the HTTP path ``litellm.acompletion`` takes for that
-        dialect, which no injected client changes, so an explicitly supplied
-        factory does not make an unverified dialect safe. It wins only over
-        *which* client a verified dialect is given.
+        dialect, which none of the injectable transport inputs changes, so
+        supplying them does not make an unverified dialect safe. The check
+        wins even over *which* client a verified dialect is given — that
+        choice is the binding's own, built from this attempt's transport
+        inputs.
         """
         ensure_supported_dialect(route.format)
-        if self._client_factory is not None:
-            return self._client_factory(budget=budget)
         if route.format in _HTTP_HANDLER_DIALECTS:
-            return _http_handler_client(budget)
-        return _openai_sdk_client(route, budget)
+            return _http_handler_client(
+                budget, self._resolver, self._verify, self._inner_factory
+            )
+        return _openai_sdk_client(
+            route, budget, self._resolver, self._verify, self._inner_factory
+        )
