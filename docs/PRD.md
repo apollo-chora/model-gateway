@@ -1,7 +1,7 @@
 # Product Requirements Document
 # Vendor-Neutral AI Model Gateway
 
-**Version:** 1.14  
+**Version:** 1.15  
 **Status:** Implementation-ready specification  
 **Implementation language:** Python  
 **Architecture:** Standalone, self-hostable, multi-provider AI gateway  
@@ -12,6 +12,7 @@
 
 **Revision history:**
 
+- **1.15** — Records the retry, fallback, deadline and concurrency policy as the gateway core implements it. (§11.2) One invocation has one retry loop and one attempt count: a failure the gateway's own taxonomy classifies as retryable is retried on the **same route** within the configured `PROVIDER_RETRY_COUNT`, waiting a bounded exponential backoff derived from `PROVIDER_RETRY_BACKOFF_MS` — capped, clamped to the remaining budget, deterministic, and spent outside the concurrency slot — and a route whose attempts are used up hands the invocation to the next capability-eligible route. Retryability is decided from the gateway's categories and reasons, never from the inference library's exception types. The failure surfaced when no route could serve is the **last** attempt's, because that is the most informative, not the first. (§15) One deadline covers the whole invocation, so retries and fallbacks consume the same budget rather than each receiving a fresh one, and an attempt whose budget is exhausted is never started. The budget for one attempt is the smaller of the configured provider timeout and the remaining deadline. Simultaneous upstream attempts are bounded by `PROVIDER_MAX_CONCURRENT_REQUESTS`, and a concurrency slot is held only for the duration of an attempt and never across a backoff wait, so slow callers cannot starve others. Cancellation propagates without being converted into an upstream failure. `attempt_count` counts gateway attempts and must never be read as a wire-request count, because the inference library has an internal retry the gateway cannot suppress.
 - **1.14** — Records what the binding actually enforces and narrows the claims around it. (§14.1) The two transport obligations hold on every outbound connection the verified dialects make, including the client the generic HTTP path's connection-error retry rebuilds — the binding hands that path the pinned transport itself, so the retry can no longer leave the controls; a dialect whose HTTP path has not been verified is refused at startup and again at the attempt rather than run behind controls that would silently not apply. Redirects are **refused, not evaluated**: a 3xx is neither followed nor assessed and surfaces to the caller as an upstream error, so the URL policy's redirect decision — a same-origin hop after revalidation, a cross-origin hop only by explicit opt-in, credentials never carried across an origin change — has no caller in a request path and controlled redirect handling is not yet implemented; §9 and §14 no longer claim the gateway evaluates each redirect. A network-level egress restriction is recorded as not required for the verified dialects, because pinning is enforced on every connection those paths make, and as the required compensating control only for a path outside the verified set, which the binding refuses rather than runs. (§6) The `.env` guard is **forced** rather than defaulted and is gateway-owned implementation state rather than operator configuration, so no ambient value — not even an explicit `LITELLM_MODE=DEV` — can re-enable the library's import-time load: configuration cannot arrive from the working directory, and the mode is not part of the gateway's public configuration surface. (§9.1) The response side is stated as the four-way classification the binding applies — a known canonical semantic maps, a known semantic with no canonical representation is refused, known non-semantic operational metadata is deliberately ignored from an explicit documented set, and an unknown provider-specific field is refused until it is classified — with the backend fingerprint (`system_fingerprint`) named as operational metadata that must not fail an otherwise valid response, and a recurring refusal named as evidence the canonical model needs extending rather than a reason to allowlist a semantic away. (§11.3) The internal connection-error retry is no longer a transport escape; what it leaves is an accounting consequence.
 - **1.13** — Records three implementation realities alongside the obligations they qualify. (§14.1) The transport obligations are executable rather than aspirational: the binding injects a custom HTTP client into every upstream call — the inference library honours a per-call `client=` argument — that pins the connection to a validated address while preserving the original hostname for TLS SNI and the `Host` header, and that is built with redirect following disabled because the inference library hardcodes it on; omitting the injected client silently loses both controls, so it is not optional. (§11.3, §12) The retry reality: a zero retry count is mandatory on every call and suppresses both the library-level and the underlying SDK-level retry layers, so a normal invocation produces exactly one upstream request — but two internal retry paths, a message-reformat loop that fires on specific malformed-request responses and a connection-error retry on one code path that rebuilds a fresh client, cannot be switched off by any supported knob, so a reported `attempt_count` may understate the upstream requests by one and the gateway must not claim exactly-once upstream execution. (§6) Importing the inference library loads a `.env` file into the process environment — its DEV-mode import-time `dotenv.load_dotenv()` — which would let configuration appear outside the authoritative environment; the gateway sets `LITELLM_MODE` to a non-DEV value before the first import so the load never happens.
 - **1.12** — Qualifies the inbound authentication guarantees and states the authentication scope policy (§7, §14.2): the `<key>:<tenant>` grammar forbids commas and colons in both API keys and tenant identifiers, because the list is comma-separated and the binding is colon-separated, and supporting opaque third-party credentials that contain those characters would require a structured representation; leading and trailing whitespace is trimmed and so cannot be part of a credential; the verification guarantee is stated accurately — the match position does not determine the number of comparisons, the number of configured credentials is not hidden and hiding it is deliberately not attempted because it is not a worthwhile secret, and comparisons run over precomputed fixed-length digests so no comparison is length-dependent; the log label is qualified as a correlation aid rather than a secret — operator-chosen credentials can be low entropy, so a logged prefix can be tested offline against candidate keys — and is distinguished from the credential's internal identifier, which downstream policy keys on and which need not appear in logs; and the authentication scope policy is stated precisely — all endpoints require authentication when it is enabled except health when `GATEWAY_ALLOW_ANONYMOUS_HEALTH` is true, a presented credential is validated even on an exempt path so a bad credential is never waved through, and caller-supplied `actor_id` and `agent_id` are attribution labels that must never become principals for quotas or authorization; only the credential's tenant and its internal credential identifier may serve as principals.
@@ -828,21 +829,29 @@ The indexed form (`TEXT_LLM_1_*`, `TEXT_LLM_2_*`) does not exist. It is not a su
 
 Ambiguous configuration must be rejected at startup rather than resolved by guessing. This includes a malformed JSON array, an entry missing a required field, duplicate route identity (two entries presenting themselves as the same route), and two entries naming the same endpoint and model.
 
-## 11.2 Fallback selection
+## 11.2 Retry and fallback policy
 
-Route order is fallback order. The gateway walks the configured routes in order, retrying the current route within its retry budget and moving to the next route only when that route is exhausted or fails with a retryable error.
+One invocation has one retry loop and one attempt count, and the loop is the gateway core's (§11.3). The primary route is attempted first; a failure the gateway's own taxonomy classifies as retryable is retried on the **same route**, and a route whose attempts are used up hands the invocation to the next eligible route. Route order is fallback order, so the walk is the primary route, then the configured fallbacks in order.
 
 ```text
 Primary
-   ↓ retryable failure
+   ↓ retryable failure, retries remain
 Primary retry
-   ↓ exhausted
+   ↓ retries exhausted
 Fallback 1
    ↓ failure
 Fallback 2
 ```
 
-A fallback route may preserve a model's advertised capabilities but never expand them. Fallback candidates are the later routes that could serve the request unchanged: each is filtered by the same capability test the primary route was validated against, so a route that does not declare everything the request needs is skipped rather than attempted, and no invocation is ever served a capability the model listing does not advertise (§4.3, §9.5).
+**Retries apply to the same route and are bounded by the configured count.** `PROVIDER_RETRY_COUNT` is how many times one route may be retried after its first attempt, so a route is attempted at most `PROVIDER_RETRY_COUNT + 1` times. A failure a repeat cannot change — an invalid argument, an authentication or permission failure, a capability gap — is not retried at all: the route is used up and the walk moves on.
+
+**Retryability is decided from the gateway's own error taxonomy, never from the library's exception types.** A failure is worth another attempt when it classifies as an unavailable provider or an exhausted resource (a rate, concurrency or quota limit), or as a deadline that still has budget left (§15). A failure that has not been classified into the taxonomy has no gateway meaning yet, so it is not retried. The inference library's exception types play no part in the decision: the gateway classifies every failure into its own categories and reasons first (§5.4), and the retry decision reads those categories, never the type the library raised.
+
+**A retry waits a bounded exponential backoff.** The delay after a failed attempt grows exponentially from `PROVIDER_RETRY_BACKOFF_MS` — one base after the first attempt, two after the second, four after the third — capped at a fixed ceiling so no single wait can dominate an invocation, and clamped to the invocation's remaining budget so a wait can never outlive the deadline it draws from (§15). The schedule is deterministic. The wait is spent outside the concurrency slot, and it is waited only when a retry will actually follow it: the last attempt a route is allowed never sleeps for a retry that will not be made.
+
+**When a route's retries are exhausted, the next capability-eligible route is tried.** A fallback route may preserve a model's advertised capabilities but never expand them. Fallback candidates are the later routes that could serve the request unchanged: each is filtered by the same capability test the primary route was validated against, so a route that does not declare everything the request needs is skipped rather than attempted, and no invocation is ever served a capability the model listing does not advertise (§4.3, §9.5).
+
+**The failure surfaced when nothing can serve is the last attempt's, not the first.** The most recent failure is the one that says why the invocation could not be served, so that is the error the caller sees; a deadline that ran out before another attempt could begin is surfaced as a deadline error instead (§15).
 
 Retries may be triggered by:
 
@@ -852,13 +861,13 @@ Retries may be triggered by:
 - HTTP 500–599.
 - Equivalent transient provider errors.
 
-Retries must be bounded.
+Each of those conditions is a retry trigger once it has been classified into a retryable category of the gateway's taxonomy; an upstream condition the gateway does not classify as retryable does not trigger one.
 
 Requests that have already produced visible streaming output must not silently switch providers.
 
 ## 11.3 Retry and fallback ownership
 
-The gateway core owns retries and fallbacks. LiteLLM's own retry and fallback support is disabled, so that there is exactly one retry loop, one deadline, and one attempt count for an invocation.
+The gateway core owns retries and fallback. LiteLLM's own retry and fallback support is disabled, so that there is exactly one retry loop, one deadline, and one attempt count for an invocation. The loop's mechanics — same-route retries bounded by the configured count, taxonomy-based retryability, the bounded backoff, the walk to the next eligible route, and the last attempt's failure reported — are specified in §11.2.
 
 - LiteLLM is called with retries disabled (`num_retries=0`). The gateway must not rely on LiteLLM's `fallbacks` or `context_window_fallbacks` parameters.
 - **The zero retry count is mandatory on every call, and it suppresses both retry layers.** `num_retries=0` switches off LiteLLM's own retry loop and the underlying SDK client's retries together, so in the normal case an invocation produces exactly one upstream request. Injecting a client does not remove the obligation: a call that passes a custom SDK client without the zero count has that client's retry default silently restored, so the count travels with the call, whatever else the call carries.
@@ -1015,6 +1024,14 @@ The gateway must:
 A retry must not exceed the caller's remaining deadline.
 
 The gateway enforces a single total deadline per invocation. Provider timeouts, connect timeouts, retries, and fallbacks all draw from that one budget. LiteLLM's retry and fallback support is disabled so that no second loop and no second deadline exists (§11.3).
+
+**One deadline covers the whole invocation.** A single deadline is anchored when the invocation begins, and every attempt — the first attempt of the primary route, every retry, and every fallback — derives its budget from it, so a retry or a fallback consumes what is left rather than starting a fresh budget. Time is subtracted, never reset: the clock is anchored once, and each attempt is handed the smaller of the configured provider timeout and what the deadline then has left. **An attempt whose budget is exhausted is never started** — the provider is not called and a deadline error is raised instead (§11.2).
+
+**Simultaneous upstream attempts are bounded by the configured maximum.** `PROVIDER_MAX_CONCURRENT_REQUESTS` caps the number of attempts in flight; the rest wait their turn and are admitted in arrival order. **A concurrency slot is held only for the duration of an attempt and never across a backoff wait**, so a caller sleeping between retries holds nothing another caller could be using, and a few slow callers cannot starve the rest. Waiting for a slot consumes invocation budget too, so an attempt's budget is computed at the moment the attempt starts, after the slot is held. A slot is released on every exit from an attempt — success, failure, or cancellation — so a cancelled attempt frees its slot for the next caller.
+
+**Cancellation propagates.** A cancelled invocation stops at the attempt in flight, releases the slot that attempt held, and makes no further attempt. Cancellation is a :exc:`BaseException` the reliability loop never catches, so it is never converted into an upstream failure, never classified as retryable, and never retried into.
+
+**`attempt_count` counts gateway attempts, never upstream requests.** The response's attempt count is the number of calls the gateway made — one per attempt, on one route, under one attempt number. The inference library has internal retry paths that no supported knob disables (§11.3), so one gateway attempt can carry more than one wire request and this count may understate what the upstream saw. It must never be read, reported, or recorded as a wire-request count.
 
 ---
 
