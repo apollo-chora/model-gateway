@@ -1,5 +1,5 @@
-"""Tests for the image endpoints: ``POST /v1/images/generations`` and
-``POST /v1/images/edits`` (PRD sections 4.6, 6.2, 9.5, 10 and 14.1).
+"""Tests for the image endpoints: ``POST /v1/images/generations`` (PRD
+sections 4.6, 6.2, 9.5, 10 and 14.1).
 
 The handlers are exercised through a real BlackSheep application, so what is
 tested is the route, the wire translation and the error mapping together.
@@ -8,12 +8,20 @@ and every route is a standalone value.
 
 The endpoints' contract has three parts, and each is pinned here: the accepted
 request is the documented subset and nothing outside it is ignored, the
-response is the documented OpenAI shape, and every refusal — an unknown model,
-a parameter the gateway does not understand, a capability the route does not
-have — answers with the taxonomy's own status and reason rather than a
-framework error. The application factory's own registration of the
-generations route is pinned too, since a handler that answers only on a
-hand-built application is how an endpoint comes to 404 on a real deployment.
+response is the documented OpenAI shape, and every refusal — an unknown model
+or a parameter the gateway does not understand — answers with the taxonomy's
+own status and reason rather than a framework error. The application factory's
+own registration of the generations route is pinned too, since a handler that
+answers only on a hand-built application is how an endpoint comes to 404 on a
+real deployment.
+
+Image editing is deliberately absent from this surface: the gateway's
+canonical image request carries no field for an image input, so an edit can
+never be forwarded and the endpoint is not registered at all. That absence is
+pinned here too — a POST to ``/v1/images/edits`` meets the framework's own
+404, never a refusal that would suggest the operation exists — and the
+capability refusal it replaces is covered where it now lives: a configured
+route that advertises ``editing`` refuses the start.
 """
 
 import pytest
@@ -145,22 +153,8 @@ def payload(**overrides: object) -> dict[str, object]:
     return body
 
 
-def edit_payload(**overrides: object) -> dict[str, object]:
-    body: dict[str, object] = {
-        "model": PUBLIC_MODEL,
-        "prompt": "Make it rainy",
-        "image": PAYLOAD,
-    }
-    body.update(overrides)
-    return body
-
-
 async def post_generations(client, body: object):
     return await client.post("/v1/images/generations", content=JSONContent(body))
-
-
-async def post_edits(client, body: object):
-    return await client.post("/v1/images/edits", content=JSONContent(body))
 
 
 # ---------------------------------------------------------------------------
@@ -354,66 +348,6 @@ class TestTheRequestBoundary:
 
 
 # ---------------------------------------------------------------------------
-# The edits endpoint's image input
-# ---------------------------------------------------------------------------
-
-
-class TestTheEditImageInput:
-    """The documented representation is validated where it arrives (PRD 4.6)."""
-
-    async def test_a_base64_payload_is_accepted(self, client, provider) -> None:
-        response = await post_edits(client, edit_payload())
-
-        assert response.status == 422
-
-    async def test_a_data_url_is_accepted(self, client) -> None:
-        response = await post_edits(
-            client, edit_payload(image=f"data:image/png;base64,{PAYLOAD}")
-        )
-
-        assert response.status == 422
-
-    async def test_an_array_of_images_is_accepted(self, client) -> None:
-        response = await post_edits(client, edit_payload(image=[PAYLOAD, PAYLOAD]))
-
-        assert response.status == 422
-
-    async def test_a_missing_image_is_refused_naming_the_field(self, client) -> None:
-        response = await post_edits(client, {"model": PUBLIC_MODEL, "prompt": "rainy"})
-
-        assert response.status == 400
-        assert (await response.json())["reason"] == "invalid_request"
-        assert "image" in (await response.json())["message"]
-
-    async def test_a_payload_that_is_not_base64_is_refused(self, client) -> None:
-        response = await post_edits(client, edit_payload(image="not base64!"))
-
-        assert response.status == 400
-        assert "image" in (await response.json())["message"]
-
-    async def test_an_empty_payload_is_refused(self, client) -> None:
-        response = await post_edits(client, edit_payload(image=""))
-
-        assert response.status == 400
-
-    async def test_an_image_that_is_not_a_string_is_refused(self, client) -> None:
-        response = await post_edits(client, edit_payload(image=42))
-
-        assert response.status == 400
-
-    async def test_an_unknown_parameter_on_edits_is_refused(self, client) -> None:
-        response = await post_edits(client, edit_payload(mask=PAYLOAD))
-
-        assert response.status == 400
-        assert "mask" in (await response.json())["message"]
-
-    async def test_an_edit_answers_no_provider(self, client, provider) -> None:
-        await post_edits(client, edit_payload())
-
-        assert provider.calls == []
-
-
-# ---------------------------------------------------------------------------
 # Refusals that are about the route or the provider
 # ---------------------------------------------------------------------------
 
@@ -477,67 +411,6 @@ class TestCapabilityRefusals:
 
         assert response.status == 422
         assert Capability.GENERATION.value in (await response.json())["message"]
-
-    async def test_an_edit_on_a_generation_only_route_is_refused(self) -> None:
-        """The configured provider supports generation but not editing (PRD 4.6)."""
-        app = build_app(FakeImageProvider())
-        await app.start()
-        try:
-            response = await post_edits(TestClient(app), edit_payload())
-        finally:
-            await app.stop()
-
-        assert response.status == 422
-        assert (await response.json())["reason"] == "unsupported_capability"
-        assert Capability.EDITING.value in (await response.json())["message"]
-
-    async def test_the_editing_refusal_names_the_capability(self) -> None:
-        app = build_app(FakeImageProvider())
-        await app.start()
-        try:
-            response = await post_edits(TestClient(app), edit_payload())
-        finally:
-            await app.stop()
-
-        assert Capability.EDITING.value in (await response.json())["message"]
-
-    async def test_an_edit_on_a_route_that_declares_editing_is_still_refused(self) -> None:
-        """The route's declared capabilities are enforced; none can be handed an edit.
-
-        A route that declares ``generation`` and ``editing`` passes the
-        capability check and is then refused for the gateway's own reason: the
-        canonical image request carries no field for an image input, so the
-        caller's image cannot be forwarded and an edit answered without it
-        would report an image edited that never left the gateway (PRD
-        section 9.5). The refusal is the same capability error, so a caller
-        cannot confuse an unrepresentable edit with a served one.
-        """
-        registry = make_registry(editing=True)
-        provider = FakeImageProvider()
-        app = Application(router=Router())
-        register_error_handlers(app)
-        register_image_routes(app.router, InferenceService(registry, provider))
-        await app.start()
-        try:
-            response = await post_edits(TestClient(app), edit_payload())
-        finally:
-            await app.stop()
-
-        assert response.status == 422
-        assert (await response.json())["reason"] == "unsupported_capability"
-        assert Capability.EDITING.value in (await response.json())["message"]
-        assert provider.calls == []
-
-    async def test_an_edit_resolves_the_model_before_its_capabilities(self) -> None:
-        app = build_app(FakeImageProvider())
-        await app.start()
-        try:
-            response = await post_edits(TestClient(app), edit_payload(model="no-such-model"))
-        finally:
-            await app.stop()
-
-        assert response.status == 404
-        assert (await response.json())["reason"] == "model_not_found"
 
     async def test_a_provider_failure_is_mapped_onto_the_taxonomy(self) -> None:
         failure = UnavailableError("the upstream is unavailable")
@@ -675,7 +548,16 @@ class TestTheFactory:
         assert set(body) == {"created", "data"}
         assert len(provider.calls) == 1
 
-    async def test_the_factory_registers_the_edits_endpoint(self) -> None:
+    async def test_the_factory_does_not_register_the_edits_endpoint(self) -> None:
+        """``POST /v1/images/edits`` is absent, not present-and-always-failing.
+
+        The gateway's canonical image request carries no field for an image
+        input, so an edit can never be forwarded to any route and the endpoint
+        is not registered at all. The proof of absence is the framework's own
+        404 for an unknown path: a registered route that always refuses answers
+        422 with the taxonomy's JSON, so a 404 with the framework's plain-text
+        body can only mean no route is there.
+        """
         registry = make_registry()
         provider = FakeImageProvider()
         app = create_app(
@@ -694,8 +576,7 @@ class TestTheFactory:
         finally:
             await app.stop()
 
-        assert response.status == 422
-        assert (await response.json())["reason"] == "unsupported_capability"
+        assert response.status == 404
         assert provider.calls == []
 
 
@@ -705,7 +586,8 @@ class TestTheFactory:
 
 
 class TestTheStartupCheck:
-    """An image route whose dialect is unverified refuses the start (PRD 6.2, 14.1)."""
+    """What refuses the start: an unverified dialect, an advertised unimplemented
+    capability (PRD 6.2, 14.1, 4.6)."""
 
     def test_an_image_route_with_an_unverified_dialect_refuses_the_start(self) -> None:
         """The binding cannot run the dialect, so the deployment must not start.
@@ -739,6 +621,25 @@ class TestTheStartupCheck:
             create_app(Settings.from_env({}), registry=registry)
 
         assert "azure" in str(error.value)
+
+    def test_an_image_route_advertising_editing_refuses_the_start(self) -> None:
+        """A route declaring ``editing`` advertises an operation the gateway cannot perform.
+
+        The per-request edit refusal is gone with the endpoint it belonged
+        to: the canonical image request carries no field for an image input,
+        so no route can be handed an edit however its capabilities read. A
+        deployment can still declare the capability publicly, so the gateway
+        refuses to start with it declared, and the message says editing is not
+        implemented rather than that this route cannot serve it (PRD sections
+        4.6, 6.2 and 9.5).
+        """
+        registry = make_registry(editing=True)
+
+        with pytest.raises(ConfigurationError) as error:
+            create_app(Settings.from_env({}), registry=registry)
+
+        assert "editing" in str(error.value)
+        assert "not implemented" in str(error.value)
 
     def test_an_image_route_with_a_verified_dialect_starts(self) -> None:
         registry = make_registry()

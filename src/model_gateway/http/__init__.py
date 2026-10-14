@@ -33,7 +33,7 @@ draws rather than the file sizes:
     The one place a :class:`~model_gateway.errors.GatewayError` becomes an HTTP
     response, and the one place an unclassified failure is sanitised.
 :mod:`~model_gateway.http.images`
-    ``POST /v1/images/generations`` and ``POST /v1/images/edits``.
+    ``POST /v1/images/generations``.
 
 Handlers are built by factory functions rather than reaching for module-level
 state, so a route's dependencies are its arguments: ``list_models(registry)``
@@ -68,9 +68,7 @@ from model_gateway.http.errors import (
 )
 from model_gateway.http.images import (
     ImageGenerationResponse,
-    create_image_edits,
     create_image_generations,
-    image_edit_request_from_payload,
     image_generation_request_from_payload,
     register_image_routes,
 )
@@ -85,13 +83,11 @@ __all__ = [
     "ModelCard",
     "create_chat_completion",
     "create_embeddings",
-    "create_image_edits",
     "create_image_generations",
     "embedding_request_from_payload",
     "get_model",
     "handle_gateway_error",
     "handle_unexpected_error",
-    "image_edit_request_from_payload",
     "image_generation_request_from_payload",
     "list_models",
     "model_list_payload",

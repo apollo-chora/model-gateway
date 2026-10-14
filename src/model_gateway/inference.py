@@ -117,17 +117,14 @@ the same no-exactly-once claim as the others: the gateway counts its own
 attempts, and the inference library's internal retry paths mean one of those
 calls can carry more than one upstream request (PRD sections 11.3 and 12).
 
-**Editing is enforced from the route's declared capabilities.** An edit request
-is an image invocation whose route must declare ``editing`` beside
-``generation``, the second being the operator's own statement
-(``IMAGE_GEN_CAPABILITIES``; PRD section 6.2). A route that declares
-``generation`` alone is refused with a capability error naming ``editing``
-rather than handed the request, and no later route can expand the advertised
-contract. The refusal does not stop there, because the gateway owns a second
-reason: the canonical image request carries no field for an image input, so
-the caller's image cannot be forwarded to any route however its capabilities
-read. An edit answered without it would report an image edited that never
-left the gateway, which PRD section 9.5 forbids.
+**Image editing is absent from the surface.** The gateway's canonical image
+request carries no field for an image input, so an edit cannot be forwarded
+to any route however its capabilities read, and an edit answered without it
+would report an image edited that never left the gateway (PRD section 9.5).
+The service therefore has no edit entry point at all: an operation the
+gateway categorically cannot perform is left out rather than published and
+guaranteed to fail, and a configured route that declares the ``editing``
+capability is refused at startup by the application factory.
 """
 
 import asyncio
@@ -210,15 +207,6 @@ Image generation is the image operation's own capability, the default every
 image route declares; the refusal names it so a caller learns which operation
 is missing rather than receiving a generic failure (PRD sections 6.2 and
 9.5).
-"""
-
-_EDITING_CAPABILITY = Capability.EDITING.value
-"""The capability an edit asks of the route, beside ``generation`` (PRD 6.2).
-
-Editing is the operator's own statement about a route — ``IMAGE_GEN_CAPABILITIES``
-carries it only when the operator declared it — so a route that declares
-``generation`` alone must be refused an edit rather than handed one (PRD
-section 4.6).
 """
 
 _Result = TypeVar("_Result")
@@ -335,8 +323,8 @@ class InferenceService:
 
     The service is built once per process and serves every operation the
     gateway exposes: :meth:`invoke` for a text answer, :meth:`invoke_stream`
-    for a streamed one, :meth:`embed` for vectors, and :meth:`generate` and
-    :meth:`edit` for images. The operations differ in what the provider is
+    for a streamed one, :meth:`embed` for vectors, and :meth:`generate` for
+    images. The operations differ in what the provider is
     asked for and what comes back, not in how the gateway chooses a route,
     budgets the invocation, bounds concurrency or decides whether a failure
     is worth another attempt — that policy is written once, in :meth:`_walk`,
@@ -674,59 +662,6 @@ class InferenceService:
             return _normalise_images(route, request, response, invocation_id=invocation_id)
 
         return await self._walk(request.model, plan, serve)
-
-    async def edit(self, request: ImageRequest) -> ImageResponse:
-        """Refuse an edit unless the route's declared capabilities carry it.
-
-        The editing counterpart of :meth:`generate`, and the one image request
-        measured against two capabilities rather than one: the route that
-        serves it must declare ``generation`` — editing is an image operation,
-        so a route that cannot generate cannot edit — *and* ``editing``,
-        which the operator states separately (``IMAGE_GEN_CAPABILITIES``;
-        PRD section 6.2). A route that declares ``generation`` alone is
-        refused with a :class:`~model_gateway.errors.CapabilityError` naming
-        ``editing`` (PRD section 4.6), and no later route can expand the
-        advertised contract: a fallback that does not declare both is not a
-        candidate, exactly as for every other capability (PRD section 9.5).
-
-        The enforcement does not stop at the capability check, because the
-        gateway owns a second reason to refuse. The canonical image request
-        carries no field for an image input, so the caller's image cannot be
-        forwarded to any route however its capabilities read; answering an
-        edit without it would tell the caller its image was edited when it
-        never left the gateway, which PRD section 9.5 forbids. The invocation
-        is therefore refused with the same capability error, naming
-        ``editing``: the operation the gateway cannot honour is editing
-        itself, and serving it awaits a canonical image request that can carry
-        the image being edited.
-
-        The model is resolved before anything else, so an unknown ID is a
-        :class:`~model_gateway.errors.ModelNotFoundError` whatever the route
-        could do (PRD section 10); a provider that cannot generate images is
-        refused naming ``generation`` before the route's capabilities are
-        read.
-
-        Raises one of those refusals, and nothing else: an edit is never
-        served in this slice.
-        """
-        routes = self._registry.routes_for(request.model)
-        _require_image_provider(self._provider)
-        # Enforced before the gateway's own refusal below, so that a route
-        # without 'editing' is refused for the missing capability, naming it,
-        # rather than for the reason every route shares.
-        _select_routes_for(
-            routes,
-            request.model,
-            (Capability.GENERATION, Capability.EDITING),
-        )
-        raise CapabilityError(
-            f"model {request.model!r} cannot be handed an edit request: the gateway's canonical "
-            f"image request carries no field for an image input, so the 'editing' capability "
-            f"cannot be honoured — the caller's image cannot be forwarded to any route, and "
-            f"answering the edit without it would report an image edited that never left the "
-            f"gateway",
-            details={"capability": _EDITING_CAPABILITY},
-        )
 
     async def _invoke_on(
         self, request: InvocationRequest, routes: tuple[Route, ...]

@@ -4,9 +4,9 @@
 The image entry point is the non-streaming text entry point applied to a
 different operation, so these tests are about the two things that differ and
 the things that must not: the capability the route has to declare and the
-provider has to implement, the editing refusal, the image count that only this
-operation checks, and the one deadline, retry loop, fallback walk, concurrency
-slot and cancellation rule the operations share.
+provider has to implement, the image count that only this operation checks,
+and the one deadline, retry loop, fallback walk, concurrency slot and
+cancellation rule the operations share.
 
 Nothing here reaches the network: every provider is a stand-in over in-memory
 values and every route is a standalone value.
@@ -222,91 +222,6 @@ class TestTheModelAndTheCapability:
         provider = FakeImageProvider(response_for)
 
         assert isinstance(provider, ImageProvider)
-
-
-# ---------------------------------------------------------------------------
-# Editing
-# ---------------------------------------------------------------------------
-
-
-class TestEditing:
-    """An edit is refused from the route's declared capabilities (PRD 4.6)."""
-
-    async def test_an_edit_on_a_generation_only_route_is_refused(self) -> None:
-        """The configured provider supports generation but not editing."""
-        provider = FakeImageProvider(response_for)
-
-        with pytest.raises(CapabilityError) as error:
-            await build((route(),), provider).edit(request())
-
-        assert error.value.reason is ErrorReason.UNSUPPORTED_CAPABILITY
-        assert error.value.details["capability"] == Capability.EDITING.value
-
-    async def test_the_refusal_names_the_capability_that_is_missing(self) -> None:
-        provider = FakeImageProvider(response_for)
-
-        with pytest.raises(CapabilityError) as error:
-            await build((route(),), provider).edit(request())
-
-        assert Capability.EDITING.value in error.value.message
-
-    async def test_the_refusal_happens_before_any_upstream_call(self) -> None:
-        provider = FakeImageProvider(response_for)
-
-        with pytest.raises(CapabilityError):
-            await build((route(),), provider).edit(request())
-
-        assert provider.calls == []
-
-    async def test_a_later_route_cannot_expand_the_editing_contract(self) -> None:
-        routes = (
-            route(),
-            route(
-                model_id="fallback",
-                index=1,
-                capabilities=frozenset({Capability.GENERATION}),
-            ),
-        )
-
-        with pytest.raises(CapabilityError) as error:
-            await build(routes, FakeImageProvider(response_for)).edit(request())
-
-        assert error.value.details["capability"] == Capability.EDITING.value
-
-    async def test_a_route_that_declares_editing_is_still_refused(self) -> None:
-        """No route can be handed an edit: the image input has no canonical home.
-
-        The route's declared capabilities are enforced first, so this route is
-        not refused for the missing capability but for the gateway's own
-        reason — the canonical image request carries no field for an image
-        input, and an edit answered without it would report an image edited
-        that never left the gateway (PRD section 9.5). The refusal is the same
-        capability error, naming the same operation.
-        """
-        editing_route = route(
-            capabilities=frozenset({Capability.GENERATION, Capability.EDITING})
-        )
-        provider = FakeImageProvider(response_for)
-
-        with pytest.raises(CapabilityError) as error:
-            await build((editing_route,), provider).edit(request())
-
-        assert error.value.details["capability"] == Capability.EDITING.value
-        assert provider.calls == []
-
-    async def test_an_edit_resolves_the_model_before_anything_else(self) -> None:
-        provider = FakeImageProvider(response_for)
-
-        with pytest.raises(ModelNotFoundError):
-            await build((route(),), provider).edit(request(model="no-such-model"))
-
-        assert provider.calls == []
-
-    async def test_an_edit_checks_the_provider_capability_before_the_route(self) -> None:
-        with pytest.raises(CapabilityError) as error:
-            await build((route(),), FakeTextProvider()).edit(request())
-
-        assert error.value.details["capability"] == Capability.GENERATION.value
 
 
 # ---------------------------------------------------------------------------
