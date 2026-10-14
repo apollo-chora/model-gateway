@@ -97,6 +97,7 @@ from model_gateway.errors import CapabilityError, InvalidArgumentError
 
 if TYPE_CHECKING:
     from model_gateway.registry import ModelInfo
+    from model_gateway.security.identity import Identity
 
 __all__ = [
     "ChatCompletion",
@@ -130,6 +131,7 @@ _CHAT_REQUEST_KEYS = frozenset(
         "stream",
         "user",
         "metadata",
+        "tenant_id",
     }
 )
 
@@ -292,6 +294,11 @@ class ChatRequest:
     ``metadata`` becomes the invocation's non-sensitive request metadata, which
     the gateway never forwards upstream (PRD section 5.1).
 
+    ``tenant_id`` maps onto the invocation's tenant, but is never trusted as
+    one: the handler validates it against the tenant bound to the presented
+    credential — and discards it when the caller is unauthenticated — before
+    the invocation is built (PRD section 5.1).
+
     The canonical request is built during the parse rather than afterwards, so
     the rules it enforces — a conversation with at least one message, metadata
     that does not name a canonical field, a tool choice the declared tools can
@@ -324,6 +331,7 @@ class ChatRequest:
                 model=_as_required_text(f"{where} 'model'", body.get("model")),
                 messages=_as_messages(f"{where} 'messages'", body.get("messages")),
                 actor_id=_as_optional_text(f"{where} 'user'", body.get("user")),
+                tenant_id=_as_optional_text(f"{where} 'tenant_id'", body.get("tenant_id")),
                 generation_config=_generation_config(body),
                 tools=_as_tools(f"{where} 'tools'", body.get("tools")),
                 tool_choice=_as_tool_choice(f"{where} 'tool_choice'", body.get("tool_choice")),
@@ -333,14 +341,24 @@ class ChatRequest:
             raise InvalidArgumentError(f"invalid chat completion request: {error}") from error
         return cls(invocation=invocation, stream=_as_flag(f"{where} 'stream'", body.get("stream")))
 
-    def to_invocation(self, *, invocation_id: str) -> InvocationRequest:
+    def to_invocation(
+        self, *, invocation_id: str, identity: Identity | None = None
+    ) -> InvocationRequest:
         """The canonical invocation, carrying the id minted for this request.
 
         ``response_modality`` stays text: this endpoint produces chat text, tool
         calls and refusals, and an image request has no representation in its
         response shape.
+
+        ``identity`` is the trusted identity assigned by the authentication
+        middleware. The invocation's ``tenant_id`` is that identity's tenant —
+        never the request body's. A body ``tenant_id`` has already been checked
+        against the trusted tenant by the handler (PRD section 5.1), so the
+        body's value is discarded here rather than trusted: when there is no
+        trusted identity, no tenant is propagated at all.
         """
-        return replace(self.invocation, invocation_id=invocation_id)
+        tenant = identity.tenant if identity is not None and identity.authenticated else None
+        return replace(self.invocation, invocation_id=invocation_id, tenant_id=tenant)
 
 
 @dataclass(frozen=True)

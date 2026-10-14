@@ -1,9 +1,10 @@
 """Application factory.
 
 One call builds everything a serving process needs: validated settings, logging,
-the JSON encoder, the model registry read from the environment, the health
-endpoints, the OpenAI-compatible HTTP surface and the error mapping that turns a
-gateway failure into a status and a sanitised body.
+the JSON encoder, the model registry read from the environment, the inbound
+authentication middleware, the health endpoints, the OpenAI-compatible HTTP
+surface and the error mapping that turns a gateway failure into a status and a
+sanitised body.
 
 The registry is built here, before the application is handed to the server, so
 that configuration the gateway cannot run with fails at startup rather than on
@@ -44,8 +45,10 @@ from model_gateway.http import (
     register_error_handlers,
     register_model_routes,
 )
+from model_gateway.http.auth import create_auth_middleware
 from model_gateway.inference import InferenceService
 from model_gateway.registry import ModelRegistry
+from model_gateway.security.api_keys import ApiKeySet
 
 logger = structlog.get_logger(__name__)
 
@@ -94,7 +97,15 @@ def create_app(
 
     registry = registry or ModelRegistry.from_env()
 
+    api_keys = ApiKeySet.from_settings(settings)
     app = Application()
+    app.middlewares.append(
+        create_auth_middleware(
+            api_keys,
+            auth_enabled=settings.auth_enabled,
+            allow_anonymous_health=settings.allow_anonymous_health,
+        )
+    )
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/readyz", readyz)
     register_model_routes(app.router, registry)

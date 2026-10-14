@@ -18,6 +18,11 @@ missing rather than guessing why the response arrived at once.
 The invocation id is minted here, per request, and carried into the canonical
 request. It is what the response's ``id`` is built from and what correlates the
 caller's completion with the gateway's own logs and usage records.
+
+The trusted identity is the one the authentication middleware assigned to the
+request; the handler enforces the body's ``tenant_id`` against it and hands it
+to :meth:`~model_gateway.http.dto.ChatRequest.to_invocation`, so the invocation
+carries the credential's tenant and never the body's (PRD section 5.1).
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from blacksheep.server.responses import json
 from blacksheep.server.routing import Router
 
 from model_gateway.errors import CapabilityError, InvalidArgumentError
+from model_gateway.http.auth import enforce_tenant, get_identity
 from model_gateway.http.dto import ChatCompletion, ChatRequest
 
 if TYPE_CHECKING:
@@ -86,8 +92,13 @@ def create_chat_completion(service: InferenceService) -> ChatHandler:
         chat_request = ChatRequest.from_payload(await _read_json_body(request))
         _reject_streaming(chat_request)
 
+        identity = get_identity(request)
+        enforce_tenant(identity, chat_request.invocation.tenant_id)
+
         invocation_id = uuid4().hex
-        response = await service.invoke(chat_request.to_invocation(invocation_id=invocation_id))
+        response = await service.invoke(
+            chat_request.to_invocation(invocation_id=invocation_id, identity=identity)
+        )
 
         completion = ChatCompletion.from_invocation(
             response,
