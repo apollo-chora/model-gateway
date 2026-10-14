@@ -31,6 +31,7 @@ from blacksheep import Application
 from blacksheep.settings.json import json_settings
 
 from model_gateway.app_logging import configure_logging
+from model_gateway.capabilities import Capability
 from model_gateway.config import ConfigurationError, Settings
 from model_gateway.config.routes import Operation
 from model_gateway.errors import FailedPreconditionError
@@ -101,6 +102,32 @@ def _ensure_binding_can_run(registry: ModelRegistry) -> None:
                 ) from error
 
 
+def _ensure_editing_is_not_advertised(registry: ModelRegistry) -> None:
+    """Refuse to start when a configured image route advertises ``editing``.
+
+    The gateway's canonical image request carries no field for an image input,
+    so an edit cannot be forwarded to any route however its capabilities read,
+    and an edit answered without it would report an image edited that never
+    left the gateway. The gateway therefore categorically cannot perform
+    editing: the endpoint is absent rather than present-and-always-failing,
+    and a route declaring the ``editing`` capability advertises an operation
+    this process will never serve. The refusal says editing is not
+    implemented, rather than that this route cannot serve it, because no
+    route can (PRD sections 4.6, 6.2 and 9.5).
+    """
+    for model in registry.list_models():
+        if model.operation is not Operation.IMAGE:
+            continue
+        for route in registry.routes_for(model.id):
+            if Capability.EDITING in route.capabilities:
+                raise ConfigurationError(
+                    f"{model.id}: the 'editing' capability is not implemented: the gateway's "
+                    f"canonical image request carries no field for an image input, so an edit "
+                    f"cannot be forwarded to any route; remove 'editing' from the route's "
+                    f"declared capabilities"
+                )
+
+
 def _orjson_dumps(obj) -> str:
     return orjson.dumps(obj).decode("utf-8")
 
@@ -135,9 +162,12 @@ def create_app(
 
     Building that binding also validates the routes it would run: a route of any
     operation the binding serves — text or embeddings — whose dialect it cannot
-    keep behind the transport controls fails the start (PRD section 14.1). An
-    injected service is not validated, because it brings its own provider and
-    this factory cannot know what that provider can run.
+    keep behind the transport controls fails the start (PRD section 14.1), and
+    an image route that declares the ``editing`` capability fails it too,
+    because the gateway's canonical image request carries no field for an image
+    input and editing is therefore not implemented at all (PRD sections 4.6,
+    6.2 and 9.5). An injected service is not validated, because it brings its
+    own provider and this factory cannot know what that provider can run.
     """
     settings = settings or Settings.from_env()
     configure_logging(settings.log_level)
@@ -147,6 +177,7 @@ def create_app(
 
     if service is None:
         _ensure_binding_can_run(registry)
+        _ensure_editing_is_not_advertised(registry)
         service = InferenceService(
             registry,
             LiteLLMProvider(),
