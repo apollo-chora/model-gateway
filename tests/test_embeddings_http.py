@@ -51,6 +51,7 @@ def make_registry() -> ModelRegistry:
                 capabilities=frozenset({Capability.EMBEDDINGS}),
                 extra_headers={},
                 allow_absolute_path_url=False,
+                supports_dimensions_param=True,
             ),
         )
     )

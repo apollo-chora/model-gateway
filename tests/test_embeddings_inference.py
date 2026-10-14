@@ -32,6 +32,7 @@ from model_gateway.errors import (
     ErrorReason,
     InternalError,
     InvalidArgumentError,
+    MalformedResponseError,
     ModelNotFoundError,
     ResourceExhaustedError,
     UnavailableError,
@@ -138,20 +139,6 @@ class FakeTextProvider:
     async def complete(self, route_: Route, request_: object, context: object) -> object:
         self.calls += 1
         raise AssertionError("a text-only provider must never be handed an embeddings request")
-
-
-@pytest.fixture
-def dimensions(monkeypatch: pytest.MonkeyPatch):
-    """Set the deployment's declared embedding dimensions for one test."""
-
-    def set_dimensions(value: int | None) -> None:
-        if value is None:
-            monkeypatch.delenv("EMBEDDINGS_DIMENSIONS", raising=False)
-        else:
-            monkeypatch.setenv("EMBEDDINGS_DIMENSIONS", str(value))
-
-    monkeypatch.delenv("EMBEDDINGS_DIMENSIONS", raising=False)
-    return set_dimensions
 
 
 def build(
@@ -293,10 +280,10 @@ class TestTheAnswer:
             )
         )
 
-        with pytest.raises(InternalError) as error:
+        with pytest.raises(MalformedResponseError) as error:
             await build((route(),), provider).embed(request())
 
-        assert error.value.reason is ErrorReason.INTERNAL_ERROR
+        assert error.value.reason is ErrorReason.MALFORMED_RESPONSE
 
     async def test_a_duplicate_position_is_refused(self) -> None:
         provider = FakeEmbeddingProvider(
@@ -305,7 +292,7 @@ class TestTheAnswer:
             )
         )
 
-        with pytest.raises(InternalError):
+        with pytest.raises(MalformedResponseError):
             await build((route(),), provider).embed(request())
 
     async def test_a_position_outside_the_input_is_refused(self) -> None:
@@ -315,7 +302,7 @@ class TestTheAnswer:
             )
         )
 
-        with pytest.raises(InternalError):
+        with pytest.raises(MalformedResponseError):
             await build((route(),), provider).embed(request())
 
 
@@ -327,48 +314,53 @@ class TestTheAnswer:
 class TestDimensionality:
     """The shape of the vectors is checked against what the route declares."""
 
-    async def test_a_declared_dimensionality_is_enforced(self, dimensions) -> None:
-        dimensions(3)
+    async def test_a_declared_dimensionality_is_enforced(self) -> None:
         provider = FakeEmbeddingProvider(response_for)
 
-        response = await build((route(),), provider).embed(request())
+        response = await build((route(dimensions=3),), provider).embed(request())
 
         assert len(response.data[0].values) == 3
 
-    async def test_a_vector_of_the_wrong_length_is_refused(self, dimensions) -> None:
-        dimensions(3)
+    async def test_a_vector_of_the_wrong_length_is_refused(self) -> None:
         provider = FakeEmbeddingProvider(
             lambda route_, request_, context: response_for(
                 route_, request_, context, data=vectors((0.1, 0.2, 0.3, 0.4))
             )
         )
 
-        with pytest.raises(InternalError) as error:
-            await build((route(),), provider).embed(request())
+        with pytest.raises(MalformedResponseError) as error:
+            await build((route(dimensions=3),), provider).embed(request())
 
-        assert error.value.reason is ErrorReason.INTERNAL_ERROR
+        assert error.value.reason is ErrorReason.MALFORMED_RESPONSE
 
-    async def test_a_wrong_shaped_answer_is_not_retried_or_walked(self, dimensions) -> None:
-        """It is a property of what the upstream returned, so no route can change it."""
-        dimensions(3)
+    async def test_a_wrong_shaped_answer_walks_to_the_fallback(self) -> None:
+        """The fault lies in the primary's answer, so another route can fix it.
+
+        The malformed answer is not a property of the request: repeating it on
+        the same route cannot help, but the fallback serves the same request
+        correctly, so the invocation walks rather than terminating.
+        """
         provider = FakeEmbeddingProvider(
             lambda route_, request_, context: response_for(
                 route_, request_, context, data=vectors((0.1, 0.2, 0.3, 0.4))
-            )
+            ),
+            response_for,
         )
 
-        with pytest.raises(InternalError):
-            await build(
-                (route(), route(model_id="fallback", index=1)),
-                provider,
-                retry_count=2,
-            ).embed(request())
+        response = await build(
+            (route(dimensions=3), route(model_id="fallback", index=1, dimensions=3)),
+            provider,
+            retry_count=2,
+        ).embed(request())
 
-        assert len(provider.calls) == 1
+        assert response.upstream_model == "fallback"
+        assert [route_.model_id for route_, _, _ in provider.calls] == [
+            "embedding-model",
+            "fallback",
+        ]
 
-    async def test_an_unconfigured_dimensionality_is_not_checked(self, dimensions) -> None:
-        """An unconfigured limit is not a limit of zero (PRD sections 4.3 and 6.3)."""
-        dimensions(None)
+    async def test_an_unconfigured_dimensionality_is_not_checked(self) -> None:
+        """An unconfigured dimensionality is not a dimensionality of zero."""
         provider = FakeEmbeddingProvider(
             lambda route_, request_, context: response_for(
                 route_, request_, context, data=vectors((0.1, 0.2, 0.3, 0.4, 0.5))
@@ -379,26 +371,175 @@ class TestDimensionality:
 
         assert len(response.data[0].values) == 5
 
-    async def test_the_callers_stated_dimension_is_what_is_checked(self, dimensions) -> None:
-        dimensions(3)
+    async def test_the_callers_stated_dimension_is_what_is_checked(self) -> None:
         provider = FakeEmbeddingProvider(
             lambda route_, request_, context: response_for(
                 route_, request_, context, data=vectors((0.1, 0.2, 0.3, 0.4))
             )
         )
 
-        response = await build((route(),), provider).embed(
-            request(input=("only one",), dimensions=4)
-        )
+        response = await build(
+            (route(dimensions=3, supports_dimensions_param=True),), provider
+        ).embed(request(input=("only one",), dimensions=4))
 
         assert len(response.data[0].values) == 4
 
-    async def test_the_callers_stated_dimension_is_enforced_too(self, dimensions) -> None:
-        dimensions(3)
+    async def test_the_callers_stated_dimension_is_enforced_too(self) -> None:
         provider = FakeEmbeddingProvider(response_for)
 
-        with pytest.raises(InternalError):
+        with pytest.raises(MalformedResponseError):
+            await build(
+                (route(dimensions=3, supports_dimensions_param=True),), provider
+            ).embed(request(dimensions=4))
+
+
+# ---------------------------------------------------------------------------
+# The dimension parameter
+# ---------------------------------------------------------------------------
+
+
+class TestTheDimensionParameter:
+    """A caller's stated dimension is honoured only where the route accepts it."""
+
+    async def test_a_stated_dimension_on_a_route_that_does_not_accept_it_is_refused(
+        self,
+    ) -> None:
+        """The route's dimensionality is fixed; a stated dimension is refused, not dropped."""
+        provider = FakeEmbeddingProvider(response_for)
+
+        with pytest.raises(CapabilityError) as error:
+            await build((route(dimensions=3),), provider).embed(request(dimensions=4))
+
+        assert error.value.details["parameter"] == "dimensions"
+        assert "dimensions" in error.value.message
+        assert error.value.reason is ErrorReason.UNSUPPORTED_CAPABILITY
+
+    async def test_the_refusal_happens_before_any_upstream_call(self) -> None:
+        """No provider is called, and the model and the parameter are both named."""
+        provider = FakeEmbeddingProvider(response_for)
+
+        with pytest.raises(CapabilityError) as error:
             await build((route(),), provider).embed(request(dimensions=4))
+
+        assert provider.calls == []
+        assert PUBLIC_MODEL in error.value.message
+        assert "dimensions" in error.value.message
+
+    async def test_a_route_that_accepts_the_parameter_is_served(self) -> None:
+        """The stated dimension is forwarded there and becomes the expected length."""
+        provider = FakeEmbeddingProvider(
+            lambda route_, request_, context: response_for(
+                route_, request_, context, data=vectors((0.1, 0.2, 0.3, 0.4))
+            )
+        )
+
+        response = await build(
+            (route(supports_dimensions_param=True, dimensions=4),), provider
+        ).embed(request(input=("only one",), dimensions=4))
+
+        assert response.model == PUBLIC_MODEL
+        assert len(response.data[0].values) == 4
+
+    async def test_no_stated_dimension_is_never_refused(self) -> None:
+        """The refusal is about the parameter, not the route's fixed dimensionality."""
+        provider = FakeEmbeddingProvider(response_for)
+
+        response = await build((route(dimensions=3),), provider).embed(request())
+
+        assert len(response.data[0].values) == 3
+
+    async def test_a_later_route_cannot_expand_the_dimension_contract(self) -> None:
+        """The primary establishes the contract; a fallback cannot add the parameter."""
+        provider = FakeEmbeddingProvider(response_for)
+
+        with pytest.raises(CapabilityError) as error:
+            await build(
+                (route(), route(model_id="fallback", index=1, supports_dimensions_param=True)),
+                provider,
+            ).embed(request(dimensions=4))
+
+        assert error.value.details["parameter"] == "dimensions"
+        assert provider.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Fallbacks and the dimension contract
+# ---------------------------------------------------------------------------
+
+
+class TestFallbacksAndTheDimensionContract:
+    """A fallback may preserve the advertised contract, never expand it."""
+
+    async def test_a_fallback_that_cannot_honour_the_dimension_is_not_a_candidate(
+        self,
+    ) -> None:
+        """The caller stated a dimension; only an accepting route may serve it."""
+        provider = FakeEmbeddingProvider(
+            UnavailableError("the primary is unavailable"), response_for
+        )
+        routes = (
+            route(supports_dimensions_param=True, dimensions=4),
+            route(model_id="fallback", index=1, dimensions=4),
+        )
+
+        with pytest.raises(UnavailableError):
+            await build(routes, provider).embed(request(input=("only one",), dimensions=4))
+
+        assert [route_.model_id for route_, _, _ in provider.calls] == ["embedding-model"]
+
+    async def test_a_fallback_that_can_honour_the_dimension_serves_it(self) -> None:
+        provider = FakeEmbeddingProvider(
+            UnavailableError("the primary is unavailable"),
+            lambda route_, request_, context: response_for(
+                route_, request_, context, data=vectors((0.1, 0.2, 0.3, 0.4))
+            ),
+        )
+        routes = (
+            route(supports_dimensions_param=True, dimensions=4),
+            route(model_id="fallback", index=1, supports_dimensions_param=True, dimensions=4),
+        )
+
+        response = await build(routes, provider).embed(
+            request(input=("only one",), dimensions=4)
+        )
+
+        assert response.upstream_model == "fallback"
+        assert len(response.data[0].values) == 4
+
+    async def test_a_fallback_is_checked_against_its_own_declared_dimensionality(
+        self,
+    ) -> None:
+        """The per-route rule: each route is held to the dimensionality it declares."""
+        provider = FakeEmbeddingProvider(
+            UnavailableError("the primary is unavailable"), response_for
+        )
+        routes = (
+            route(dimensions=3),
+            route(model_id="fallback", index=1, dimensions=4),
+        )
+
+        with pytest.raises(MalformedResponseError):
+            await build(routes, provider).embed(request(input=("only one",)))
+
+        assert [route_.model_id for route_, _, _ in provider.calls] == [
+            "embedding-model",
+            "fallback",
+        ]
+
+    async def test_a_fallback_with_no_declared_dimensionality_checks_none(self) -> None:
+        """The fallback declares none, so none is checked — not the primary's value."""
+        provider = FakeEmbeddingProvider(
+            UnavailableError("the primary is unavailable"),
+            lambda route_, request_, context: response_for(
+                route_, request_, context, data=vectors((0.1, 0.2, 0.3, 0.4, 0.5))
+            ),
+        )
+        routes = (route(dimensions=3), route(model_id="fallback", index=1))
+
+        response = await build(routes, provider).embed(request(input=("only one",)))
+
+        assert response.upstream_model == "fallback"
+        assert len(response.data[0].values) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -409,25 +550,22 @@ class TestDimensionality:
 class TestTheEncoding:
     """The gateway's answer is the float form, and nothing else is quietly substituted."""
 
-    async def test_the_float_encoding_is_accepted(self, dimensions) -> None:
-        dimensions(None)
+    async def test_the_float_encoding_is_accepted(self) -> None:
         provider = FakeEmbeddingProvider(response_for)
 
         response = await build((route(),), provider).embed(request(encoding_format="float"))
 
         assert len(response.data) == 2
 
-    async def test_no_stated_encoding_is_accepted(self, dimensions) -> None:
-        dimensions(None)
+    async def test_no_stated_encoding_is_accepted(self) -> None:
         provider = FakeEmbeddingProvider(response_for)
 
         await build((route(),), provider).embed(request())
 
         assert len(provider.calls) == 1
 
-    async def test_an_encoding_the_gateway_cannot_answer_in_is_refused(self, dimensions) -> None:
+    async def test_an_encoding_the_gateway_cannot_answer_in_is_refused(self) -> None:
         """Answering a base64 request with floats would be a silent downgrade."""
-        dimensions(None)
         provider = FakeEmbeddingProvider(response_for)
 
         with pytest.raises(CapabilityError) as error:
@@ -509,6 +647,24 @@ class TestTheReliabilityLoop:
         routes = (route(), route(model_id="fallback", index=1))
 
         with pytest.raises(InvalidArgumentError):
+            await build(routes, provider, retry_count=2).embed(request())
+
+        assert len(provider.calls) == 1
+
+    async def test_a_gateway_defect_terminates_where_it_happened(self) -> None:
+        """An internal error is the gateway's own defect: no route can fix it.
+
+        The contrast with a malformed upstream answer: that fault lies in one
+        route's answer, so the invocation walks to an eligible fallback, while
+        a defect in the gateway's own code is neither retried on the route nor
+        walked to the next (PRD section 11.2).
+        """
+        provider = FakeEmbeddingProvider(
+            InternalError("the gateway could not read its own answer")
+        )
+        routes = (route(), route(model_id="fallback", index=1))
+
+        with pytest.raises(InternalError):
             await build(routes, provider, retry_count=2).embed(request())
 
         assert len(provider.calls) == 1

@@ -104,8 +104,9 @@ The embedding entry point
 ``litellm.acompletion``, and the gateway calls it for the embeddings operation
 exactly as PRD section 9.6's table lays the call out: the provider-prefixed
 model string, the route's base URL and credential, the texts to embed, the
-``dimensions`` the caller asked for, and ``num_retries=0``. The per-dialect
-client is :meth:`LiteLLMProvider._attempt_client`'s, never a second
+``dimensions`` the caller asked for when the route enables it, and
+``num_retries=0``. The per-dialect client is
+:meth:`LiteLLMProvider._attempt_client`'s, never a second
 construction: the embedding path reaches the wire through exactly the one
 client the text path reaches it through, and the injected object is the one
 each dialect's embedding handler reads — an ``openai.AsyncOpenAI`` on the SDK
@@ -122,11 +123,16 @@ capability error instead (PRD section 9.5).
 
 The translation of the upstream answer is this module's, and it reports what
 the upstream said rather than what the caller asked for: each vector carries
-the position the upstream reported, and the usage is the upstream's. Whether
-those positions can be matched to the caller's input, and whether the vectors
-match the dimensionality the route declares, is the inference service's check
-(PRD sections 4.7 and 9.6), because that check reads deployment configuration a
-provider does not own.
+the position the upstream reported, and the usage is the upstream's as far as
+the pinned library lets it be — a zero count is recorded as unknown, because
+the library's placeholder for an unreported usage is indistinguishable from a
+reported zero (an irrecoverable binding limitation, proved by test and
+documented in
+:func:`~model_gateway.providers.litellm_translation.from_litellm_embedding_usage`).
+Whether those positions can be matched to the caller's input, and whether the
+vectors match the dimensionality the route declares, is the inference
+service's check (PRD sections 4.7 and 9.6), because that check reads
+deployment configuration a provider does not own.
 
 What is still not closed
 ------------------------
@@ -171,14 +177,16 @@ from model_gateway.config.routes import Route
 from model_gateway.domain import InvocationRequest, InvocationResponse
 from model_gateway.domain.embeddings import Embedding, EmbeddingRequest, EmbeddingResponse
 from model_gateway.domain.streaming import StreamEvent, StreamEventKind
-from model_gateway.errors import FailedPreconditionError, GatewayError, InternalError
+from model_gateway.errors import (
+    FailedPreconditionError,
+    GatewayError,
+    MalformedResponseError,
+)
 from model_gateway.providers._litellm import AsyncHTTPHandler, litellm, openai
 from model_gateway.providers.base import AttemptContext
 from model_gateway.providers.litellm_translation import (
-    _usage as _canonical_usage,
-)
-from model_gateway.providers.litellm_translation import (
     from_litellm_chunk,
+    from_litellm_embedding_usage,
     from_litellm_response,
     map_litellm_error,
     to_litellm_params,
@@ -581,12 +589,13 @@ class LiteLLMProvider:
         embeddings translation of ``route`` and ``request``
         (:func:`_embedding_params`) — the provider-prefixed model string, the
         resolved base URL, the route's credential and extra headers, the texts,
-        the ``dimensions`` the caller asked for, and ``num_retries=0`` — plus
-        this attempt's own timeout and the per-dialect client built for this
-        attempt's budget, closed when the attempt ends. The client construction
-        is :meth:`_attempt_client`'s, not duplicated here: the dialect check and
-        the per-dialect wrapping are the security boundary, and this path reaches
-        the wire through exactly the same one as the text path.
+        the ``dimensions`` the caller asked for when the route enables it, and
+        ``num_retries=0`` — plus this attempt's own timeout and the per-dialect
+        client built for this attempt's budget, closed when the attempt ends.
+        The client construction is :meth:`_attempt_client`'s, not duplicated
+        here: the dialect check and the per-dialect wrapping are the security
+        boundary, and this path reaches the wire through exactly the same one as
+        the text path.
 
         The answer is normalised through :func:`_from_litellm_embedding` and
         returned as the canonical response. Errors are mapped exactly as
@@ -647,13 +656,14 @@ def _embedding_params(route: Route, request: EmbeddingRequest) -> dict[str, obje
     (PRD section 11.3).
 
     The request supplies the texts to embed, in the caller's order, and the
-    ``dimensions`` it asks for. ``dimensions`` is sent when the caller states one
-    and omitted otherwise, so the provider's own default applies; the gateway
-    deliberately substitutes no vendor default (PRD section 5.1). The route
-    model carries no flag for whether the route accepts the parameter, so the
-    gateway forwards what the caller asked for rather than dropping it, and
-    checks the answer's shape against the dimensionality the route declares
-    (PRD sections 6.3 and 9.6).
+    ``dimensions`` it asks for. ``dimensions`` is sent only when the route
+    enables it — ``route.supports_dimensions_param``, the operator's own
+    statement that this route accepts a caller-selectable dimensionality — and
+    omitted otherwise, so the provider's own default applies; the gateway
+    deliberately substitutes no vendor default (PRD section 5.1), and a route
+    the operator configured as not accepting the parameter is never handed one
+    (PRD section 9.6). The gateway checks the answer's shape against the
+    dimensionality the route declares (PRD sections 6.3 and 9.6).
 
     ``encoding_format`` is deliberately not sent: the gateway's embeddings answer
     is the float form, which is the upstream's own default, so the parameter is
@@ -673,7 +683,7 @@ def _embedding_params(route: Route, request: EmbeddingRequest) -> dict[str, obje
         "num_retries": 0,
         "input": list(request.input),
     }
-    if request.dimensions is not None:
+    if request.dimensions is not None and route.supports_dimensions_param:
         params["dimensions"] = request.dimensions
     return params
 
@@ -688,21 +698,29 @@ def _from_litellm_embedding(
     """Normalise a LiteLLM embeddings answer into the canonical response.
 
     ``response`` is upstream data, never forwarded unchanged (PRD section 9).
-    Each vector is read with the position the upstream reported, and the usage
-    is the upstream's, mapped by the same translation a completion's usage goes
-    through so the two cannot drift apart. The vectors are *not* reordered here:
-    the upstream's own order and indices are reported verbatim, and matching them
-    to the caller's input is the inference service's work, because that check
-    reads the caller's request and the deployment's declared dimensions —
-    neither of which a provider owns (PRD sections 4.7 and 9.6).
+    Each vector is read with the position the upstream reported. The usage is
+    mapped by :func:`~model_gateway.providers.litellm_translation.from_litellm_embedding_usage`,
+    which records a zero count as unknown: the pinned library fabricates an
+    all-zero usage when the upstream reported none, and that placeholder is
+    indistinguishable from a reported zero in every representation the
+    binding can read, so a zero cannot be presented as a provider-reported
+    fact (an irrecoverable binding limitation, PRD section 13). The vectors
+    are *not* reordered here: the upstream's own order and indices are
+    reported verbatim, and matching them to the caller's input is the
+    inference service's work, because that check reads the caller's request
+    and the deployment's declared dimensions — neither of which a provider
+    owns (PRD sections 4.7 and 9.6).
 
-    Raises :class:`~model_gateway.errors.InternalError` naming the field when the
-    upstream answer carries a semantic the canonical representation cannot
-    carry: a vector that is not a list of numbers — a base64-encoded string, say
-    — or a position that is not an integer. A refusal that recurs is evidence
-    about the canonical model, not a licence to widen the ignored set, so the
-    refusal stands rather than the value being coerced into a shape it never had
-    (PRD section 9.1).
+    Raises :class:`~model_gateway.errors.MalformedResponseError` naming the field
+    when the upstream answer carries a semantic the canonical representation
+    cannot carry: a vector that is not a list of numbers — a base64-encoded
+    string, say — or a position that is not an integer. A refusal that recurs is
+    evidence about the canonical model, not a licence to widen the ignored set,
+    so the refusal stands rather than the value being coerced into a shape it
+    never had (PRD section 9.1). The refusal is the malformed-response error
+    rather than an internal one: the upstream answered, and its answer is what
+    cannot serve the request, so another eligible route may answer correctly
+    (PRD section 11.2).
     """
     if not invocation_id:
         raise FailedPreconditionError(
@@ -714,7 +732,7 @@ def _from_litellm_embedding(
         model=request.model,
         upstream_model=route.model_id,
         data=tuple(_embedding_from(item) for item in _embedding_records(response)),
-        usage=_canonical_usage(getattr(response, "usage", None)),
+        usage=from_litellm_embedding_usage(getattr(response, "usage", None)),
         invocation_id=invocation_id,
     )
 
@@ -751,14 +769,14 @@ def _embedding_from(item: object) -> Embedding:
     index = _embedding_field(item, "index")
     values = _embedding_field(item, "embedding")
     if isinstance(values, str):
-        raise InternalError(
+        raise MalformedResponseError(
             "the upstream returned a base64-encoded embedding vector, which the canonical "
             "embedding representation cannot carry"
         )
     try:
         return Embedding(index=index, values=tuple(values))
     except (TypeError, ValueError) as error:
-        raise InternalError(
+        raise MalformedResponseError(
             "the upstream returned an embedding record the canonical representation cannot "
             "carry"
         ) from error

@@ -118,9 +118,12 @@ class EmbeddingRequest:
 
     ``input`` is the texts to embed, in order, and must carry at least one of
     them: an embedding request with nothing to embed has no canonical
-    representation. No entry may be blank, because a blank string is not text
-    the gateway can ask a model to embed and an empty entry would silently
-    shift every later index.
+    representation. No entry may be blank: a blank string is not text the
+    gateway will ask a model to embed, so the request is refused. The refusal
+    is a deliberate validation constraint of the canonical request, not a
+    representational necessity — a blank entry could be embedded at its own
+    index without shifting any other — and the gateway states that constraint
+    rather than silently embedding something the caller did not ask for.
 
     ``dimensions`` asks the route for vectors of that length and is honoured
     only when the route enables it (PRD section 6.3); it is positive when set,
@@ -288,8 +291,11 @@ def _as_input(where: str, value: object) -> tuple[str, ...]:
     for index, item in enumerate(items):
         if not item.strip():
             raise ValueError(
-                f"{where}[{index}] is blank; a blank string is not text the gateway can ask "
-                f"a model to embed, and dropping it would shift every later index"
+                f"{where}[{index}] is blank; a blank string is not text the gateway will "
+                f"ask a model to embed, so the request is refused — a deliberate "
+                f"validation constraint of the canonical request rather than a "
+                f"representational necessity, since the entry could have been embedded "
+                f"at its own index without shifting any other"
             )
     return items
 

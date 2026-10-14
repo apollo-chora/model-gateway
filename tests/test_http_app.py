@@ -86,6 +86,7 @@ def registry_with_embeddings() -> ModelRegistry:
         capabilities=frozenset({Capability.EMBEDDINGS}),
         extra_headers={},
         allow_absolute_path_url=False,
+        supports_dimensions_param=True,
     )
     return ModelRegistry((*registry().routes_for("text-default"), embeddings))
 

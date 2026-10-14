@@ -21,11 +21,15 @@ What a provider must not own (PRD section 9.2):
   the provider's native header from what it is given and decides nothing.
 * **Retry and fallback policy.** The gateway core owns the retry loop and the
   single invocation deadline (PRD sections 11.3 and 15), so a provider performs
-  one call and returns one result. A provider that retried on its own would be a
-  second retry loop stacked on the gateway's, which PRD section 11.3 prohibits.
-  The deadline reaches the provider as the budget on the attempt it is handed
-  (:class:`AttemptContext`); a provider neither computes a deadline nor reads one
-  out of configuration it does not own.
+  one gateway attempt and returns one result. One attempt is not one wire
+  request: an implementation may reach a library that retries internally without
+  the gateway's knowledge, so more than one upstream request can happen inside
+  a single attempt and the attempt count never counts wire requests. A
+  provider that retried on its own would be a second retry loop stacked on the
+  gateway's, which PRD section 11.3 prohibits. The deadline reaches the
+  provider as the budget on the attempt it is handed (:class:`AttemptContext`);
+  a provider neither computes a deadline nor reads one out of configuration it
+  does not own.
 * **Idempotency and accounting.** Deduplication, token counts and cost are
   gateway records (PRD sections 12 and 13); a provider reports what the upstream
   said and the gateway decides what that means.
@@ -69,7 +73,8 @@ class AttemptContext:
     """The execution facts of one provider attempt (PRD sections 9.6 and 15).
 
     One attempt, not one invocation. This is what the provider needs to perform
-    the single call it is given, and nothing about how the invocation was routed.
+    the one gateway attempt it is given, and nothing about how the invocation
+    was routed.
 
     ``invocation_id`` is the gateway's identifier for the invocation the attempt
     belongs to, so a provider can correlate its own upstream call with the
