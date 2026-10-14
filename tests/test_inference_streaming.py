@@ -542,6 +542,61 @@ class TestAMidStreamFailure:
         assert "sk-secret" not in (events[-1].error_message or "")
         assert "internal.example" not in (events[-1].error_message or "")
 
+    async def test_the_error_event_message_is_a_gateway_authored_taxonomy_message(self) -> None:
+        """The event's message is gateway-authored, never provider text.
+
+        The message is constrained to the taxonomy's own messages and is
+        never populated from arbitrary provider exception text with
+        sanitisation as the only defence: a failure outside the taxonomy is
+        normalised before the event is built, so the event carries the
+        normalised message — here the taxonomy's fixed internal-failure text —
+        and the provider's own wording appears nowhere in it (PRD 5.4).
+        """
+        provider = ScriptedStreamProvider(
+            [
+                [
+                    content_event("Hello", 0),
+                    RuntimeError("upstream https://internal.example/v1 rejected api_key=sk-secret"),
+                ]
+            ]
+        )
+        inference = service((route(),), provider, retry_count=0)
+
+        events: list[StreamEvent] = []
+        with pytest.raises(RuntimeError):
+            async for event in inference.invoke_stream(request()):
+                events.append(event)
+
+        assert events[-1].kind is StreamEventKind.ERROR
+        assert events[-1].error_reason == "internal_error"
+        assert events[-1].error_message == "the gateway could not complete the request"
+        assert "sk-secret" not in (events[-1].error_message or "")
+        assert "internal.example" not in (events[-1].error_message or "")
+
+    async def test_the_raised_error_is_the_same_failure_the_event_reported(self) -> None:
+        """One failure, reported twice: the event is authoritative, the exception is control flow.
+
+        After the terminal ``ERROR`` event the invocation also raises, and
+        the exception is control-flow metadata rather than a second failure:
+        the raised error's reason and message are the event's own, because
+        both describe the same single failure. A consumer reads the event as
+        the failure's report and the exception as the iteration ending —
+        never as a second failure (PRD 5.4 and 16).
+        """
+        provider = ScriptedStreamProvider(
+            [[content_event("Hello", 0), UnavailableError("the connection dropped")]]
+        )
+        inference = service((route(),), provider, retry_count=0)
+
+        events: list[StreamEvent] = []
+        with pytest.raises(UnavailableError) as error:
+            async for event in inference.invoke_stream(request()):
+                events.append(event)
+
+        assert events[-1].kind is StreamEventKind.ERROR
+        assert error.value.reason.value == events[-1].error_reason
+        assert error.value.message == events[-1].error_message
+
     async def test_the_events_produced_before_the_failure_are_kept(self):
         """The caller keeps what the upstream produced before it failed."""
         provider = ScriptedStreamProvider(
