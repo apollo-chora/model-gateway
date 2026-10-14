@@ -13,9 +13,26 @@ answered with a capability error naming it, and a key the OpenAI format does not
 define is answered with an invalid-request error naming that key. That is a
 deliberately strict reading of "OpenAI-compatible": the response shapes are the
 compatible part, and the request shape is validated rather than waved through.
-A parameter whose OpenAI default is already what the gateway does — ``store:
-false``, ``n: 1``, ``parallel_tool_calls: true`` — is accepted, because it asks
-for nothing that would be lost.
+Only a parameter whose OpenAI default is *also* a promise this gateway can keep is
+accepted, and the promise is about what the gateway does rather than about what
+the value spells. ``store: false`` and ``n: 1`` qualify, because the gateway
+stores nothing and answers one choice. ``parallel_tool_calls: true`` does not:
+nothing in this slice implements parallel tool calls or preserves the distinction
+between parallel and sequential ones, so accepting the flag — in either
+direction — would advertise a capability the gateway does not have, and the
+parameter is refused whatever its value.
+
+**Inbound images must be inline.** An ``image_url`` part is accepted only as a
+base64 data URI. A remote ``http`` or ``https`` URL is refused with a capability
+error naming ``remote_image_fetch``. The canonical image type documents a URL as
+one the URL policy has already admitted; PRD section 9.4 requires the gateway to
+screen it before the fetch, and section 14.1 requires the fetch itself to run
+under address pinning and redirect evaluation. None of that exists on this
+endpoint, and the screening cannot simply be added here: it resolves DNS, and a
+blocking resolution inside an async request handler stalls the event loop for
+every other request. Refusing the URL is the honest answer until the safe
+asynchronous validation and transport path exists (PRD section 9.5). Any other
+scheme, ``file`` included, is malformed input rather than a missing feature.
 
 **Outbound, every canonical item has a home or the response is refused.** Text,
 tool calls and refusals each have a field in the OpenAI completion message. An
@@ -23,6 +40,18 @@ image does not: the chat completions shape has nowhere to put one, so a response
 carrying one is refused with a capability error rather than reported with the
 image missing. A caller must be able to tell that the answer it received is not
 the answer the model gave (PRD section 9.1).
+
+**Outbound, the order the model emitted must survive the translation.** Canonical
+output is an ordered sequence in which text, refusals and tool calls interleave —
+a model may explain itself, call a tool and then explain the result — while the
+OpenAI message separates ``content`` from ``tool_calls`` and so records no order
+between them. Joining the text and hoisting the calls would quietly turn "said,
+did, said" into "said said, did", which is not the answer the model gave, so a
+response whose items do not group — every content item before every tool call —
+is refused with a capability error naming ``interleaved_output`` rather than
+flattened. The rule is about the ordering the shape cannot carry, not about how
+many items there are: an ordinary answer, a tool-call-only answer and the common
+"text then tool calls" answer all remain representable and are returned normally.
 
 Two canonical distinctions survive the translation because the OpenAI shape has
 room for them. A finish reason the gateway could not classify is reported as the
@@ -134,10 +163,6 @@ def _absent_when_one(value: object) -> bool:
     return value is None or value == 1
 
 
-def _absent_when_enabled(value: object) -> bool:
-    return value is not False
-
-
 def _absent_when_text_only(value: object) -> bool:
     return value is None or value == ["text"]
 
@@ -163,7 +188,14 @@ _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
     "logit_bias": _Feature("logit_bias", _absent_when_falsy),
     "store": _Feature("response_storage", _absent_when_falsy),
     "stream_options": _Feature("streaming", _absent_when_falsy),
-    "parallel_tool_calls": _Feature("sequential_tool_calls", _absent_when_enabled),
+    # Refused whatever its value, unlike the defaults above. ``true`` asks for
+    # parallel tool calls and ``false`` asks for a guarantee of sequential ones,
+    # and this slice implements neither and models no distinction between them,
+    # so accepting the parameter would advertise a capability the gateway does
+    # not have (PRD section 9.5). It is refused rather than mapped onto a
+    # canonical field, because inventing that field is a contract change and not
+    # a translation.
+    "parallel_tool_calls": _Feature("parallel_tool_calls", _absent_when_none),
     "modalities": _Feature("non_text_output", _absent_when_text_only),
     "audio": _Feature("audio_output", _absent_when_none),
     "prediction": _Feature("predicted_output", _absent_when_none),
@@ -184,6 +216,8 @@ _FINISH_REASONS: Mapping[FinishReason, str] = {
 }
 
 _IMAGE_OUTPUT_CAPABILITY = "image_output"
+_REMOTE_IMAGE_CAPABILITY = "remote_image_fetch"
+_INTERLEAVED_OUTPUT_CAPABILITY = "interleaved_output"
 
 
 @dataclass(frozen=True)
@@ -315,9 +349,12 @@ class ChatMessage:
 
     ``content`` is the concatenated text of the model's output and is ``None``
     when the answer was only tool calls, which is how OpenAI spells that case.
-    ``refusal`` carries the provider's own refusal text, kept apart from ordinary
-    text because a provider declining on safety grounds is a different event from
-    a model answering (PRD section 5.2).
+    Joining the text parts is faithful only because a response that interleaves
+    text and tool calls never reaches this type: :class:`ChatCompletion` refuses
+    it (see :func:`_reject_unrepresentable_order`). ``refusal`` carries the
+    provider's own refusal text, kept apart from ordinary text because a provider
+    declining on safety grounds is a different event from a model answering
+    (PRD section 5.2).
     """
 
     content: str | None
@@ -362,9 +399,12 @@ class ChatCompletion:
     ) -> Self:
         """Translate a canonical response into the OpenAI completion shape.
 
-        An image in the output has no field in this shape, so the response is
-        refused with a capability error instead of being returned with the image
-        silently missing (PRD section 9.1).
+        Two canonical responses have no representation here and are refused
+        rather than approximated: one carrying an image, because the shape has
+        nowhere to put it, and one whose text and tool calls interleave, because
+        the shape cannot record their order. Both refusals are capability errors,
+        so a caller learns which feature is missing instead of receiving an
+        answer that is not the one the model gave (PRD sections 9.1 and 9.5).
         """
         if response.images:
             raise CapabilityError(
@@ -372,6 +412,7 @@ class ChatCompletion:
                 "does not return a partial answer; the model produced an image",
                 details={"capability": _IMAGE_OUTPUT_CAPABILITY},
             )
+        _reject_unrepresentable_order(response)
         return cls(
             id=completion_id,
             model=response.model,
@@ -402,8 +443,40 @@ class ChatCompletion:
         }
 
 
+def _reject_unrepresentable_order(response: InvocationResponse) -> None:
+    """Refuse output whose order the OpenAI message shape cannot carry.
+
+    The shape holds one ``content`` field, one ``refusal`` field and one
+    ``tool_calls`` array, so it records the order of the text parts among
+    themselves and of the tool calls among themselves, and nothing about the
+    order between the two groups. Canonical output is one sequence in which they
+    interleave, and a response that interleaves them — text, a call, more text —
+    therefore has no representation here: joining the text and hoisting the calls
+    would report "said did said" as "said said, did", which is a different answer
+    from the one the model gave (PRD section 9.1). Every content item before
+    every tool call is the one grouping that survives, and anything else is a
+    capability the response shape does not have (PRD section 9.5).
+    """
+    seen_tool_call = False
+    for item in response.content:
+        if isinstance(item, ToolCall):
+            seen_tool_call = True
+        elif seen_tool_call:
+            raise CapabilityError(
+                "the chat completions response shape cannot carry a response whose text and tool "
+                "calls interleave, and the gateway does not flatten model output into a different "
+                "answer; the model emitted content after a tool call",
+                details={"capability": _INTERLEAVED_OUTPUT_CAPABILITY},
+            )
+
+
 def _message_content(response: InvocationResponse) -> str | None:
-    """The assistant content, or ``None`` for a tool-call-only answer."""
+    """The assistant content, or ``None`` for a tool-call-only answer.
+
+    The text parts are joined because the OpenAI shape types ``content`` as one
+    string; :func:`_reject_unrepresentable_order` has already established that no
+    tool call falls between them, so nothing about their order is lost by it.
+    """
     text = response.text
     if not text and response.tool_calls:
         return None
@@ -578,11 +651,16 @@ def _image_part_from(where: str, value: object) -> ImagePart:
     """An image part from an OpenAI ``image_url`` value.
 
     A data URI carries the payload inline, so it becomes base64 content with its
-    media type. An absolute ``http`` or ``https`` URL becomes a remote URL part,
-    which the canonical type defines as one the URL policy has admitted; the
-    fetch-time controls — address pinning, redirect evaluation and a size limit —
-    belong to the transport that performs the fetch (PRD sections 9.4 and 14.1).
-    Any other scheme, including ``file``, is refused rather than passed on.
+    media type and needs no fetch, no policy decision and no network. A remote
+    ``http`` or ``https`` URL is refused with a capability error: the canonical
+    type documents its URL as one the URL policy has admitted, and admitting it
+    means resolving the hostname and rejecting loopback, private, link-local and
+    metadata addresses — a blocking DNS lookup this async handler must not
+    perform, and one that would only screen the URL, not pin the connection or
+    evaluate redirects as PRD section 14.1 requires. Remote image fetching
+    arrives with that safe asynchronous validation and transport path; until then
+    only inline content is accepted. Any other scheme, ``file`` included, is
+    malformed input rather than a missing feature.
     """
     if not isinstance(value, str) or not value:
         raise InvalidArgumentError(
@@ -597,11 +675,18 @@ def _image_part_from(where: str, value: object) -> ImagePart:
             )
         return ImagePart(data=payload, media_type=media_type or None)
     scheme = urlsplit(value).scheme.lower()
-    if scheme not in _SECURE_SCHEMES:
-        raise InvalidArgumentError(
-            f"{where} must be an http or https URL or a base64 data URI; got scheme {scheme!r}"
+    if scheme in _SECURE_SCHEMES:
+        raise CapabilityError(
+            "the gateway cannot fetch a remote image URL on this endpoint: it screens an image "
+            "URL against its URL policy and fetches it under address pinning and redirect "
+            "evaluation, and neither is implemented yet, so only an inline base64 data URI is "
+            "accepted; remote image fetching arrives with that safe asynchronous path",
+            details={"capability": _REMOTE_IMAGE_CAPABILITY},
         )
-    return ImagePart(url=value)
+    raise InvalidArgumentError(
+        f"{where} must be a base64 data URI, got scheme {scheme!r}; supply "
+        f"'data:<media type>;base64,<payload>'"
+    )
 
 
 def _as_tool_calls(where: str, value: object) -> tuple[ToolCall, ...]:

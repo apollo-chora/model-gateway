@@ -4,8 +4,6 @@ import pytest
 from blacksheep import Application, Content, JSONContent
 from blacksheep.server.routing import Router
 from blacksheep.testing import TestClient
-from model_gateway.inference import InferenceService
-from model_gateway.registry import ModelRegistry
 
 from model_gateway.capabilities import Capability
 from model_gateway.config.routes import Operation, Route
@@ -19,6 +17,8 @@ from model_gateway.domain import (
 from model_gateway.errors import CapabilityError, UnavailableError
 from model_gateway.http.chat import register_chat_routes
 from model_gateway.http.errors import register_error_handlers
+from model_gateway.inference import InferenceService
+from model_gateway.registry import ModelRegistry
 
 SECRET_KEY = "sk-upstream-secret-key"
 UPSTREAM_ENDPOINT = "https://upstream.internal.example/v1"
@@ -68,7 +68,7 @@ class FakeTextProvider:
         self.result = result if result is not None else completion()
         self.error = error
 
-    async def complete(self, route: Route, request) -> InvocationResponse:
+    async def complete(self, route: Route, request, context) -> InvocationResponse:
         self.calls.append((route, request))
         if self.error is not None:
             raise self.error
@@ -234,6 +234,62 @@ async def test_a_streaming_request_never_returns_a_whole_body(client):
 
     assert "chat.completion" not in body
     assert "choices" not in body
+
+
+async def test_a_remote_image_url_is_refused_before_the_provider_is_called(client, provider):
+    body = payload(
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is this?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "http://169.254.169.254/latest/meta-data/"},
+                    },
+                ],
+            }
+        ]
+    )
+
+    response = await post(client, body)
+
+    assert response.status == 422
+    assert (await response.json())["reason"] == "unsupported_capability"
+    assert provider.calls == []
+
+
+async def test_an_interleaved_provider_answer_is_refused_rather_than_flattened(client):
+    provider = FakeTextProvider(
+        completion(
+            content=(
+                TextPart("Checking the weather."),
+                ToolCall(id="call_1", name="get_weather", arguments={"city": "Rome"}),
+                TextPart("It is sunny."),
+            ),
+            finish_reason=FinishReason.TOOL_CALLS,
+            raw_finish_reason="tool_calls",
+        )
+    )
+    app = build_app(provider)
+    await app.start()
+    try:
+        response = await post(TestClient(app), payload())
+    finally:
+        await app.stop()
+
+    assert response.status == 422
+    body = await response.text()
+    assert (await response.json())["reason"] == "unsupported_capability"
+    assert "It is sunny." not in body
+
+
+async def test_an_explicit_parallel_tool_calls_flag_is_refused(client, provider):
+    response = await post(client, payload(parallel_tool_calls=True))
+
+    assert response.status == 422
+    assert (await response.json())["reason"] == "unsupported_capability"
+    assert provider.calls == []
 
 
 async def test_a_body_that_is_not_json_is_refused(client):

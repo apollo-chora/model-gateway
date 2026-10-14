@@ -1,5 +1,21 @@
 """The OpenAI-compatible HTTP surface (PRD sections 4.3, 4.4, 5.4 and 9.5).
 
+**This surface is a supported OpenAI-compatible subset, not a drop-in
+replacement for the OpenAI API.** The routes, the request fields and the response
+shapes are the OpenAI ones, and a caller written against the documented subset
+works unchanged. Everything outside that subset is refused rather than ignored:
+a request parameter the OpenAI format does not define is answered with a 400
+naming the key, and a parameter the format does define that this gateway cannot
+honour — ``n`` above one, ``logprobs``, ``parallel_tool_calls``, the legacy
+``functions`` family, remote image URLs, streaming — is answered with a
+capability error naming the feature. That strictness is deliberate (PRD section
+9.5 forbids silently discarding a parameter) and it has a consequence worth
+stating before anyone markets this endpoint: a newer client SDK that serialises a
+new parameter, or a new default value for an existing one, receives a 400 from a
+gateway that has not been taught it yet. Compatibility here means the subset is
+stable and its refusals are explicit, not that any OpenAI client will work
+unmodified.
+
 Four modules make up this package, and the split follows the boundaries the PRD
 draws rather than the file sizes:
 
