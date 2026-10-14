@@ -1,7 +1,7 @@
 # Product Requirements Document
 # Vendor-Neutral AI Model Gateway
 
-**Version:** 1.10  
+**Version:** 1.11  
 **Status:** Implementation-ready specification  
 **Implementation language:** Python  
 **Architecture:** Standalone, self-hostable, multi-provider AI gateway  
@@ -12,6 +12,7 @@
 
 **Revision history:**
 
+- **1.11** — Settles inbound authentication (§7): `GATEWAY_API_KEYS` is a comma-separated list whose entries are `<key>` or `<key>:<tenant>`, binding a key to a trusted tenant; verification is constant-time across every configured key, so timing reveals neither which key matched nor how many keys exist; keys are plaintext in the operator's environment — this PRD's configuration model — and the gateway never logs or echoes a key, logging a derived non-secret key label instead; ambiguous key configuration is rejected at startup; the credential is accepted from `Authorization: Bearer` or `x-api-key`, with conflicting values rejected; and when authentication is enabled every `/v1/*` endpoint requires a valid credential, including the model listing because it exposes configured model IDs, with health endpoints exempt only when `GATEWAY_ALLOW_ANONYMOUS_HEALTH` is true. Also states at the canonical request's definition that `tenant_id`, `actor_id` and `agent_id` are caller-supplied and never authorization evidence, that trusted tenant identity derives solely from the validated credential, that a body `tenant_id` disagreeing with the authenticated tenant is refused with a permission error rather than silently ignored, and that an unauthenticated caller has no tenant, which a body value cannot create (§5.1).
 - **1.10** — Tightens the capability-refusal rule to the primary route's advertised contract: a request is validated against the primary route's advertised capabilities first and refused when the primary does not declare the capability, even if a later route could honour it, because a fallback route may preserve a model's advertised capabilities but never silently expand them and the model listing advertises the primary route's capabilities (§4.3, §4.5, §6.1, §9.5); states the same rule in §11.2's fallback selection, where fallback candidates are filtered by the same capability test (§11.2).
 - **1.9** — Adds `response_format` to the Responses API's supported fields (§4.5) together with the route requirement it carries: a non-text response format is honoured only by a route that declares the `structured-output` capability, and the invocation is refused with a capability error when the primary route's advertised capabilities do not declare it (§6.1, §9.5).
 - **1.8** — Adds the `structured-output` route capability to the capability vocabulary (§4.3, §6, §18) and requires a route that cannot honour a structured-output requirement to be refused with a capability error rather than handed the request and allowed to answer with free text (§9.5); records that a system instruction is baseline chat semantics with no capability of its own, and that the gateway forwards an invocation-level instruction and a `system` message without merging either (§5.1, §9.5); and states the OpenAI compatibility boundary in §4 — the HTTP inference endpoints follow the compatible shapes for a supported subset rather than being drop-in compatible, and an unknown parameter is rejected as an invalid request rather than ignored, so a client SDK that serialises a new default parameter receives an error the caller can act on instead of a false assurance that its request was honoured.
@@ -398,6 +399,8 @@ The canonical gRPC request must represent:
 | `idempotency_key` | string | Request deduplication |
 | `metadata` | map | Non-sensitive request metadata |
 
+`tenant_id`, `actor_id` and `agent_id` are caller-supplied identity fields, and they are never authorization evidence. Trusted tenant identity derives solely from the validated credential (§7): a key configured as `<key>:<tenant>` carries its tenant from the operator's configuration, and no request field can grant, widen or change that tenant. A request-body `tenant_id` that disagrees with the authenticated tenant is refused with a permission error rather than silently ignored. When the caller is unauthenticated there is no tenant at all, and a body `tenant_id` cannot create one.
+
 Request `metadata` is bookkeeping for the caller — routing hints, correlation and provenance attributes, telemetry annotations. It is never forwarded to the model or to the upstream provider. Metadata reaches an upstream call only when a separately specified feature of this gateway explicitly names a key and defines its meaning; absent such a specification, no metadata key is copied into the request the binding constructs. Metadata must not become an untyped bag of provider parameters: forwarding caller-supplied keys into `litellm.completion`, `litellm.embedding` or `litellm.image_generation` would give an inbound caller control over parameters the canonical contract does not type, and would let a provider-specific key override gateway-owned policy.
 
 `system_prompt` is the invocation-level instruction, and it is not interchangeable with a `system`-role message in `messages`: the first instructs the invocation, the second is part of the conversation the caller supplied, and the gateway forwards both without merging either (§9.5). An instruction needs no route capability of its own, because it is baseline chat semantics rather than an optional behaviour: the route's `chat` capability carries it, and a binding that cannot map an instruction must reject the invocation as unsupported rather than drop it (§9.1).
@@ -588,11 +591,23 @@ Authorization: Bearer example-secret
 
 The gateway must separately configure inbound client authentication. Upstream credentials must never be accepted from ordinary inference request bodies.
 
+**Key format.** `GATEWAY_API_KEYS` is a comma-separated list. Each entry is either `<key>`, which authenticates the caller without binding it to a tenant, or `<key>:<tenant>`, which binds that key to one trusted tenant. A tenant established this way is trusted because the operator's configuration established it — not because the caller asserted it (§5.1).
+
+**Verification.** Verification is constant-time and compares the presented credential against every configured key, so the timing of a rejection reveals neither which key matched nor how many keys are configured. A presented credential that matches nothing behaves identically to a key that was never configured.
+
+**Plaintext keys.** Keys are plaintext in the operator's environment, which is this PRD's configuration model (§6). The gateway never logs or echoes a key, and logs a derived non-secret key label instead, so an operator can tell which credential was presented without the key itself appearing in logs or error responses.
+
+**Startup validation.** Ambiguous key configuration is rejected at startup: a key that carries conflicting tenant bindings — appearing both unbound and bound, or bound to two different tenants — is a configuration error, because the gateway must not choose between bindings by an arbitrary rule.
+
+**Presentation.** The credential is accepted from the `Authorization: Bearer` header or the `x-api-key` header. Conflicting values are rejected: when both headers are present and disagree, the request is refused rather than resolved by a precedence rule.
+
+**Endpoint coverage.** When authentication is enabled, every `/v1/*` endpoint requires a valid credential, including the model listing (§4.3), because the listing exposes configured model IDs. The health endpoints (§4.1, §4.2) are exempt only when `GATEWAY_ALLOW_ANONYMOUS_HEALTH` is true.
+
 Recommended inbound configuration:
 
 ```dotenv
 GATEWAY_AUTH_ENABLED=true
-GATEWAY_API_KEYS=
+GATEWAY_API_KEYS=primary-key,internal-tooling:tenant-acme
 GATEWAY_ALLOW_ANONYMOUS_HEALTH=true
 ```
 
@@ -1070,7 +1085,7 @@ EMBEDDINGS_ROUTES_JSON=[]
 # AUTHENTICATION
 # ======================================
 GATEWAY_AUTH_ENABLED=true
-GATEWAY_API_KEYS=
+GATEWAY_API_KEYS=primary-key,internal-tooling:tenant-acme
 
 # ======================================
 # RELIABILITY
