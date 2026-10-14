@@ -86,8 +86,9 @@ class FakeStreamingProvider:
     ``complete`` behaves like :class:`FakeTextProvider`. ``stream`` yields one
     content event per scripted delta and then a finish event, or raises the
     scripted error — before any event if ``stream_error`` is set, or after the
-    deltas if an exception appears among them. The invocation id on every event
-    is the one the handler minted for the request.
+    deltas if an exception appears among them. Setting ``finish`` to false omits
+    the trailing finish event, so the stream ends without a terminal event. The
+    invocation id on every event is the one the handler minted for the request.
     """
 
     def __init__(
@@ -97,12 +98,14 @@ class FakeStreamingProvider:
         stream_error: Exception | None = None,
         error: Exception | None = None,
         result: InvocationResponse | None = None,
+        finish: bool = True,
     ):
         self.calls: list[tuple[Route, object]] = []
         self.result = result if result is not None else completion()
         self.error = error
         self.deltas = deltas
         self.stream_error = stream_error
+        self.finish = finish
 
     async def complete(self, route: Route, request, context) -> InvocationResponse:
         self.calls.append((route, request))
@@ -130,6 +133,8 @@ class FakeStreamingProvider:
                 text=item,
             )
             sequence += 1
+        if not self.finish:
+            return
         yield StreamEvent(
             kind=StreamEventKind.FINISH,
             sequence=sequence,
@@ -296,7 +301,7 @@ async def test_a_streaming_request_is_served_as_server_sent_events():
     assert response.status == 200
     assert response.content_type() == b"text/event-stream"
     frames = _sse_data_frames(await response.text())
-    # The stream is terminated by [DONE].
+    # The stream is terminated by [DONE], because it ended with a finish event.
     assert frames[-1] == "[DONE]"
     chunks = [json.loads(frame) for frame in frames[:-1]]
     assert chunks, "a streaming answer carries at least one chunk"
@@ -304,8 +309,33 @@ async def test_a_streaming_request_is_served_as_server_sent_events():
         assert chunk["object"] == "chat.completion.chunk"
         assert chunk["model"] == "text-default"
         assert chunk["id"].startswith("chatcmpl-")
-    assert chunks[0]["choices"][0]["delta"]["content"] == "Recursion is a technique..."
+    # The conventional assistant-role frame leads the stream.
+    assert chunks[0]["choices"][0]["delta"] == {"role": "assistant"}
+    assert chunks[0]["choices"][0]["finish_reason"] is None
+    content_chunks = [chunk for chunk in chunks if "content" in chunk["choices"][0]["delta"]]
+    assert content_chunks[0]["choices"][0]["delta"]["content"] == "Recursion is a technique..."
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+async def test_the_first_frame_of_a_stream_is_the_conventional_assistant_role_delta():
+    """OpenAI-compatible clients expect the assistant role on the first frame."""
+    provider = FakeStreamingProvider()
+    app = build_app(provider)
+    await app.start()
+    try:
+        response = await post(TestClient(app), payload(stream=True))
+    finally:
+        await app.stop()
+
+    assert response.status == 200
+    frames = _sse_data_frames(await response.text())
+    first = json.loads(frames[0])
+    assert first["choices"] == [
+        {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+    ]
+    # The role frame carries neither an error nor usage.
+    assert "error" not in first
+    assert "usage" not in first
 
 
 async def test_a_streaming_request_never_returns_a_whole_body():
@@ -337,6 +367,26 @@ async def test_a_streaming_request_with_a_provider_that_cannot_stream_is_refused
 async def test_a_streaming_request_with_an_unknown_model_is_refused_before_the_stream_starts():
     """A pre-stream refusal is an ordinary error response, not an SSE stream."""
     provider = FakeStreamingProvider()
+    app = build_app(provider)
+    await app.start()
+    try:
+        response = await post(TestClient(app), payload(model="no-such-model", stream=True))
+    finally:
+        await app.stop()
+
+    assert response.status == 404
+    assert (await response.json())["reason"] == "model_not_found"
+    assert provider.calls == []
+
+
+async def test_an_unknown_model_is_a_model_not_found_error_even_without_a_streaming_provider():
+    """The model is resolved before streaming eligibility, so the refusal is about the model.
+
+    A provider that cannot stream is refused only for a model that exists; a
+    request naming a model the gateway does not expose is a model-not-found
+    error, because that is the more accurate answer to the request.
+    """
+    provider = FakeTextProvider()  # not a streaming provider
     app = build_app(provider)
     await app.start()
     try:
@@ -383,9 +433,35 @@ async def test_a_mid_stream_failure_ends_the_stream_without_done():
     frames = _sse_data_frames(await response.text())
     # The stream ended without [DONE], because the answer did not complete.
     assert "[DONE]" not in frames
-    # The last chunk is the terminal error event.
+    # The last chunk is the terminal ERROR event: the gateway's own reason and
+    # sanitised message, on a chunk with no choice and no finish reason.
     last_chunk = json.loads(frames[-1])
-    assert last_chunk["choices"][0]["finish_reason"] == "provider_unavailable"
+    assert last_chunk["choices"] == []
+    assert last_chunk["error"] == {
+        "reason": "provider_unavailable",
+        "message": "the connection dropped",
+    }
+    # Nothing follows the terminal event: it is the last frame of the stream.
+    assert frames[-1] != "[DONE]"
+
+
+async def test_a_stream_that_ends_without_a_finish_event_emits_no_done():
+    """A stream with no terminal event is not a completed answer, so it is closed plainly."""
+    provider = FakeStreamingProvider(deltas=["Recursion is a technique..."], finish=False)
+    app = build_app(provider)
+    await app.start()
+    try:
+        response = await post(TestClient(app), payload(stream=True))
+    finally:
+        await app.stop()
+
+    assert response.status == 200
+    frames = _sse_data_frames(await response.text())
+    # The upstream never reported a finish, so the client must not be told the
+    # answer completed.
+    assert "[DONE]" not in frames
+    assert frames[-1] != "[DONE]"
+    assert json.loads(frames[-1])["choices"][0]["delta"]["content"] == "Recursion is a technique..."
 
 
 async def test_a_client_disconnect_stops_upstream_work():
