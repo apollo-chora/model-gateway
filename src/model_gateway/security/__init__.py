@@ -1,4 +1,4 @@
-"""Security policy for upstream traffic (PRD sections 7, 8, 9.2 and 14).
+"""Security policy for upstream traffic (PRD sections 7, 8, 9.4 and 14).
 
 Endpoint joining, scheme and SSRF validation, redirect and credential rules,
 and the reserved-authentication-header rule live here so that configuration

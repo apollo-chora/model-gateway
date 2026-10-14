@@ -65,7 +65,7 @@ class Route:
 
     ``endpoint`` is the base URL exactly as configured and ``base_url`` is that
     endpoint resolved under the URL policy, which is the value handed to the
-    inference binding as its base URL (PRD sections 8 and 9.4). ``api_key`` is the
+    inference binding as its base URL (PRD sections 8 and 9.6). ``api_key`` is the
     route's credential and ``auth_type`` its authentication override: ``None``
     means the provider's native authentication, which is the default and the only
     honest reading of a route such as ``vertex_ai`` that authenticates through
@@ -90,7 +90,7 @@ class Route:
 
     @property
     def litellm_model(self) -> str:
-        """The provider-prefixed model string handed to LiteLLM (PRD section 9.4)."""
+        """The provider-prefixed model string handed to LiteLLM (PRD section 9.6)."""
         return f"{self.format}/{self.model_id}"
 
 
