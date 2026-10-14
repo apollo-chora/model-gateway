@@ -1,7 +1,7 @@
 # Product Requirements Document
 # Vendor-Neutral AI Model Gateway
 
-**Version:** 1.6  
+**Version:** 1.7  
 **Status:** Implementation-ready specification  
 **Implementation language:** Python  
 **Architecture:** Standalone, self-hostable, multi-provider AI gateway  
@@ -12,6 +12,7 @@
 
 **Revision history:**
 
+- **1.7** — Closes a gap in the binding contract: adds §9.1, which requires every binding translator to account for every semantically relevant field of the upstream response and request — mapping it into the canonical model or rejecting the response as unsupported — states that rejecting unknown canonical keys is one layer of that defence rather than the enforcement point for upstream translation, and requires binding tests to use upstream fixtures carrying additional semantic fields so a drop cannot pass undetected; renumbers §9's remaining subsections and their cross-references. Also states at the canonical model's definition (§5.1) that request `metadata` is never forwarded to the model or provider unless a separately specified feature explicitly consumes a named key, so metadata cannot become an untyped provider-parameter bag.
 - **1.6** — Replaces §8's stale path-joining prohibition with a rule against stripping, deduplicating, reordering or reinterpreting configured path components, so configured repetition is preserved; rewrites §14.1's network-level fallback as a compensating control that must block the prohibited address classes rather than claim equivalence to exact address pinning; and requires cross-origin redirects to be rejected by default unless a route opts in explicitly (§7, §14.1).
 - **1.5** — Adds §14.1, which states that configuration-time URL screening alone is not SSRF prevention and requires the outbound transport to pin the connection to a validated address and to disable automatic redirect following, with a network-level egress restriction as the fallback where the binding cannot provide those controls; cross-references the obligation from §9 and narrows the SSRF wording in §9.2 and §14.
 - **1.4** — Documents additive path joining in §8 (`*_PATH` is appended to the base path and never replaces it, so a provider prefix is never dropped) and sets `OTEL_ENABLED=false` in the §18 example to match the shipped environment templates.
@@ -385,6 +386,8 @@ The canonical gRPC request must represent:
 | `idempotency_key` | string | Request deduplication |
 | `metadata` | map | Non-sensitive request metadata |
 
+Request `metadata` is bookkeeping for the caller — routing hints, correlation and provenance attributes, telemetry annotations. It is never forwarded to the model or to the upstream provider. Metadata reaches an upstream call only when a separately specified feature of this gateway explicitly names a key and defines its meaning; absent such a specification, no metadata key is copied into the request the binding constructs. Metadata must not become an untyped bag of provider parameters: forwarding caller-supplied keys into `litellm.completion`, `litellm.embedding` or `litellm.image_generation` would give an inbound caller control over parameters the canonical contract does not type, and would let a provider-specific key override gateway-owned policy.
+
 The protobuf schema must assign stable field numbers and preserve backward compatibility after publication.
 
 ## 5.2 InvokeResponse
@@ -631,6 +634,20 @@ Because the binding is what opens the outbound connection, it also carries the t
 
 This satisfies the extensibility principle: additional upstream providers can be added through LiteLLM without changing the gateway's core business logic.
 
+## 9.1 Upstream translation and semantic preservation
+
+Strict canonical parsing — rejecting unknown keys — protects the HTTP/gRPC boundary and every persisted representation. It does not protect the provider translation boundary. When a binding constructs a canonical response from a LiteLLM object, a provider field dropped on the floor is invisible to that parser, because the parser never sees the upstream object.
+
+Every binding translator must account for every semantically relevant field of the upstream response and request: each such field is either mapped into the canonical model, or the response is rejected as unsupported. A translator must not silently discard an upstream field because no canonical target exists for it today. Dropping a field silently changes what the caller was told — a model that returned a refusal, a cached-content flag, a log-probability block, a provider-specific stop reason or a content-safety annotation stops reporting that fact, and the gateway cannot surface a difference it never observed.
+
+The same rule holds on the request side. Every semantically relevant element of a canonical request must be represented in the upstream call, or the invocation is rejected as unsupported. An upstream capability the canonical request asks for and the provider cannot honour must produce a structured capability error (§9.5), not a quietly degraded call.
+
+Rejecting unknown canonical keys is one layer of this defence, not the point at which upstream translation is enforced. Unknown-key rejection runs at the canonical boundary on data the gateway itself defines; the preservation rule runs on the upstream boundary on data the provider defines. Neither substitutes for the other: a binding that rejects unknown canonical keys and drops provider fields has satisfied the first rule and violated the second.
+
+Binding tests must prove the preservation rule holds. They must use upstream fixtures carrying additional semantic fields — fields beyond the minimum a happy-path response needs — so a translator that drops them fails the test. A fixture containing only the fields the canonical model already captures cannot detect a drop.
+
+## 9.2 Binding responsibilities
+
 The binding must not own:
 
 - Tenant authorization.
@@ -645,7 +662,7 @@ The binding must not own:
 
 These responsibilities belong to the gateway core.
 
-## 9.1 Tool calling
+## 9.3 Tool calling
 
 The canonical representation must support:
 
@@ -660,7 +677,7 @@ LiteLLM translates tool definitions and calls to and from the upstream provider'
 
 **The gateway must not execute arbitrary model-requested tools.** The caller or an explicitly registered trusted tool executor remains responsible for execution.
 
-## 9.2 Vision
+## 9.4 Vision
 
 The canonical content representation must support text and images in the same message.
 
@@ -674,13 +691,13 @@ Vision content is passed through to LiteLLM, which handles provider-specific enc
 
 Remote image fetching must satisfy the same controls as upstream calls: the gateway screens the URL against its policy, and the fetch is performed under the transport-level controls in §14.1 (address pinning and no automatic redirect following), together with a size limit.
 
-## 9.3 Unsupported features
+## 9.5 Unsupported features
 
 When a provider does not support a requested capability, the gateway must return a structured capability error.
 
 It must not silently discard tools, images, system instructions, structured-output requirements, or other semantically important parameters.
 
-## 9.4 Route-to-invocation mapping
+## 9.6 Route-to-invocation mapping
 
 Each capability resolves to exactly one LiteLLM entry point. The gateway passes the resolved base URL as the endpoint, the route's API key, and a provider-prefixed model string (`<format>/<model_id>`). The endpoint is always passed as a base URL; operation paths are appended by LiteLLM (§8).
 
@@ -688,13 +705,13 @@ Each capability resolves to exactly one LiteLLM entry point. The gateway passes 
 |---|---|---|
 | Chat / text | `litellm.completion` (streaming: `stream=True`; async: `litellm.acompletion`) | `model` = `<format>/<model_id>`, `api_base` = resolved endpoint, `api_key`, `messages`, generation parameters, `timeout` drawn from the invocation deadline, `num_retries=0` |
 | Embeddings | `litellm.embedding` (async: `litellm.aembedding`) | `model` = `<format>/<model_id>`, `api_base` = resolved endpoint, `api_key`, `input`, `dimensions` only when the route enables it, `num_retries=0` |
-| Image generation | `litellm.image_generation` (async: `litellm.aimage_generation`) | `model` = `<format>/<model_id>`, `api_base` = resolved endpoint, `api_key`, `prompt`, only the image parameters the route advertises (§9.5), `num_retries=0` |
+| Image generation | `litellm.image_generation` (async: `litellm.aimage_generation`) | `model` = `<format>/<model_id>`, `api_base` = resolved endpoint, `api_key`, `prompt`, only the image parameters the route advertises (§9.7), `num_retries=0` |
 
 Retries are disabled on every call because the gateway core owns the retry loop (§11.3).
 
 **"Supported in this gateway" is a narrower claim than "supported somewhere in LiteLLM".** A provider appearing in LiteLLM's catalogue is not acceptance evidence for this gateway. A provider is supported here only when a configured route names it *and* the gateway's own tests cover its operation, custom endpoint, authentication, and response semantics. LiteLLM may know how to call a provider this gateway has never validated, and the gateway must not advertise or route to one.
 
-## 9.5 Image generation constraints
+## 9.7 Image generation constraints
 
 The supported upstream operation is `POST {endpoint}/images/generations`. A route advertises image generation only when that operation is what its endpoint provides.
 
