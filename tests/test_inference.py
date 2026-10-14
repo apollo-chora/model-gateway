@@ -8,14 +8,22 @@ route — the one whose capabilities the public model advertises — so a fallba
 may preserve the advertised capabilities but never expand them, and the
 provider's answer comes back stamped with the gateway's own facts.
 
-They also pin the boundary of this slice deliberately: there are no retries and
-no failure fallbacks yet, so a provider that fails on the primary route stays
-failed and ``fallback_used`` is false. The reliability slice owns that loop;
-these tests are what it must not change.
+They are also the reliability loop's tests (PRD 11.3 and 15): one deadline per
+invocation that every attempt draws its budget from, retries on the same route
+bounded by the configured count and gated on the gateway's own retryability
+classification, a fallback walked only when a route's attempts are used up, the
+last attempt's failure reported when no route could serve, a concurrency slot
+held for an attempt and released before a backoff wait, and cancellation that
+propagates instead of turning into an upstream failure.
 """
+
+import asyncio
+from contextlib import asynccontextmanager
 
 import pytest
 
+import model_gateway.inference as inference_module
+import model_gateway.reliability as reliability
 from model_gateway.capabilities import Capability
 from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import (
@@ -33,10 +41,19 @@ from model_gateway.domain import (
     ToolDefinition,
     Usage,
 )
-from model_gateway.errors import CapabilityError, ErrorReason, ModelNotFoundError, UnavailableError
+from model_gateway.errors import (
+    CapabilityError,
+    DeadlineExceededError,
+    ErrorReason,
+    InvalidArgumentError,
+    ModelNotFoundError,
+    UnavailableError,
+)
 from model_gateway.inference import InferenceService, InvocationState, _select_routes
+from model_gateway.providers.base import AttemptContext
 from model_gateway.providers.mock import MockProvider, MockSpec
 from model_gateway.registry import ModelRegistry
+from model_gateway.reliability import ConcurrencyLimiter
 
 
 def route(model_id: str = "upstream-model", **overrides) -> Route:
@@ -598,8 +615,8 @@ async def test_a_model_with_one_route_has_no_fallback_candidates():
     assert plan.fallbacks == ()
 
 
-async def test_the_primary_route_is_attempted_whatever_fallbacks_are_configured():
-    """The fallback walk is the later slice's: today the primary route is the route."""
+async def test_the_primary_route_is_attempted_before_any_fallback():
+    """The primary route is tried first; only the eligible fallback follows it."""
     provider = MockProvider(MockSpec(error=UnavailableError("the primary route is down")))
     inference = InferenceService(
         ModelRegistry(
@@ -615,7 +632,7 @@ async def test_the_primary_route_is_attempted_whatever_fallbacks_are_configured(
     with pytest.raises(UnavailableError):
         await inference.invoke(request(tools=(ToolDefinition(name="get_weather"),)))
 
-    assert [call[0].model_id for call in provider.calls] == ["primary"]
+    assert [call[0].model_id for call in provider.calls] == ["primary", "capable"]
 
 
 # ---------------------------------------------------------------------------
@@ -689,12 +706,13 @@ async def test_the_attempt_context_carries_the_invocation_and_the_attempt_number
 
 
 async def test_the_attempt_context_carries_the_budget_the_gateway_set():
+    """The budget comes from the invocation deadline, so it is what is left of the timeout."""
     provider = MockProvider()
     inference = InferenceService(ModelRegistry((route(),)), provider, attempt_timeout=12.5)
 
     await inference.invoke(request())
 
-    assert provider.calls[0][2].timeout == 12.5
+    assert provider.calls[0][2].timeout == pytest.approx(12.5, abs=0.5)
 
 
 async def test_an_unset_budget_is_no_budget_rather_than_zero():
@@ -723,36 +741,199 @@ def test_a_budget_no_attempt_could_use_is_refused_at_construction(budget):
 
 
 # ---------------------------------------------------------------------------
-# The reliability boundary of this slice
+# One deadline for the invocation
 # ---------------------------------------------------------------------------
 
 
-async def test_invoke_does_not_retry_a_failing_provider():
-    """The retry loop is the later slice's; a failure here stays a failure."""
-    inference = service(
-        (route(),),
-        MockSpec(error=UnavailableError("the first attempt failed")),
-    )
+class _ControllableClock:
+    """A monotonic clock a test moves forward by hand."""
 
-    with pytest.raises(UnavailableError):
+    def __init__(self, start: float = 1000.0) -> None:
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+class _TickingClock:
+    """A clock that runs forward on every reading, so a deadline expires between two of them.
+
+    :class:`~model_gateway.reliability.Deadline` anchors itself with one reading
+    and measures with the next, so a step larger than the configured timeout
+    reaches the state a real deployment reaches only when time has run out.
+    """
+
+    def __init__(self, step: float) -> None:
+        self._step = step
+        self._now = 0.0
+
+    def __call__(self) -> float:
+        reading = self._now
+        self._now += self._step
+        return reading
+
+
+class _BudgetSpendingProvider:
+    """A provider that spends part of the invocation's budget and then fails."""
+
+    def __init__(self, clock: _ControllableClock, *, spend: float, error: BaseException) -> None:
+        self._clock = clock
+        self._spend = spend
+        self._error = error
+        self.calls: list[tuple[Route, InvocationRequest, AttemptContext]] = []
+
+    async def complete(self, route, request, context):
+        self.calls.append((route, request, context))
+        self._clock.advance(self._spend)
+        raise self._error
+
+
+async def test_an_expired_deadline_refuses_the_invocation_without_calling_a_provider(monkeypatch):
+    monkeypatch.setattr(reliability, "monotonic", _TickingClock(step=10.0))
+    provider = MockProvider()
+    inference = InferenceService(ModelRegistry((route(),)), provider, attempt_timeout=1.0)
+
+    with pytest.raises(DeadlineExceededError) as error:
         await inference.invoke(request())
 
+    assert provider.calls == []
+    assert error.value.reason is ErrorReason.DEADLINE_EXCEEDED
+    assert error.value.http_status == 504
+    assert "upstream.example" not in str(error.value)
 
-async def test_invoke_does_not_fall_back_to_a_second_route():
-    """The fallback walk is the later slice's; the primary route is the route."""
-    provider = MockProvider(MockSpec(error=UnavailableError("the primary route is down")))
+
+async def test_no_retry_is_started_once_the_deadline_is_spent(monkeypatch):
+    """The remaining budget cannot cover another attempt, so none is made."""
+    clock = _ControllableClock()
+    monkeypatch.setattr(reliability, "monotonic", clock)
+    provider = _BudgetSpendingProvider(clock, spend=5.0, error=UnavailableError("too slow"))
     inference = InferenceService(
-        ModelRegistry((route("primary"), route("fallback"))), provider
+        ModelRegistry((route(),)), provider, attempt_timeout=1.0, retry_count=2
+    )
+
+    with pytest.raises(DeadlineExceededError) as error:
+        await inference.invoke(request())
+
+    assert len(provider.calls) == 1
+    assert error.value.details["attempts"] == "1"
+
+
+async def test_every_attempt_draws_its_budget_from_the_one_deadline():
+    """A retry is handed what is left of the invocation's budget, not a fresh timeout."""
+    provider = MockProvider(
+        (MockSpec(error=UnavailableError("the provider is down")), MockSpec(text="recovered"))
+    )
+    inference = InferenceService(
+        ModelRegistry((route(),)), provider, attempt_timeout=30.0, retry_count=1
+    )
+
+    result = await inference.invoke(request())
+
+    first, second = provider.calls[0][2].timeout, provider.calls[1][2].timeout
+    assert 0 < second <= first <= 30.0
+    assert result.attempt_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Retries on the same route
+# ---------------------------------------------------------------------------
+
+
+async def test_a_retryable_failure_is_retried_on_the_same_route():
+    provider = MockProvider(
+        (MockSpec(error=UnavailableError("the provider is down")), MockSpec(text="recovered"))
+    )
+    inference = InferenceService(
+        ModelRegistry((route(),)), provider, retry_count=1, retry_backoff_ms=0
+    )
+
+    result = await inference.invoke(request())
+
+    assert [call[0].model_id for call in provider.calls] == ["upstream-model", "upstream-model"]
+    assert result.text == "recovered"
+    assert result.attempt_count == 2
+    assert result.fallback_used is False
+
+
+async def test_retries_are_bounded_by_the_configured_count():
+    provider = MockProvider(MockSpec(error=UnavailableError("still down")))
+    inference = InferenceService(
+        ModelRegistry((route(),)), provider, retry_count=2, retry_backoff_ms=0
     )
 
     with pytest.raises(UnavailableError):
         await inference.invoke(request())
 
-    assert [call[0].model_id for call in provider.calls] == ["primary"]
+    assert len(provider.calls) == 3
 
 
-async def test_a_provider_that_fails_once_then_succeeds_is_not_retried():
-    """Even a retry that would succeed is not made: the retry loop is not this slice's."""
+async def test_no_wait_happens_after_the_last_attempt_a_route_may_make(monkeypatch):
+    """A backoff is only waited when a retry will actually follow it."""
+    waits: list[int] = []
+
+    async def recording_back_off(attempt: int, base_ms: float, deadline) -> None:
+        waits.append(attempt)
+
+    monkeypatch.setattr(inference_module, "_back_off", recording_back_off)
+    provider = MockProvider(MockSpec(error=UnavailableError("still down")))
+    inference = InferenceService(
+        ModelRegistry((route(),)), provider, retry_count=2, retry_backoff_ms=5000
+    )
+
+    with pytest.raises(UnavailableError):
+        await inference.invoke(request())
+
+    assert waits == [1, 2]
+    assert len(provider.calls) == 3
+
+
+async def test_a_failure_a_repeat_cannot_change_is_not_retried():
+    failure = InvalidArgumentError("the upstream rejected the request")
+    provider = MockProvider(MockSpec(error=failure))
+    inference = InferenceService(
+        ModelRegistry((route(),)), provider, retry_count=3, retry_backoff_ms=0
+    )
+
+    with pytest.raises(InvalidArgumentError) as error:
+        await inference.invoke(request())
+
+    assert error.value is failure
+    assert len(provider.calls) == 1
+
+
+async def test_the_attempt_number_advances_with_each_retry():
+    provider = MockProvider(
+        (MockSpec(error=UnavailableError("down")), MockSpec(text="recovered"))
+    )
+    inference = InferenceService(
+        ModelRegistry((route(),)), provider, retry_count=1, retry_backoff_ms=0
+    )
+
+    await inference.invoke(request())
+
+    assert [call[2].attempt_number for call in provider.calls] == [1, 2]
+
+
+async def test_a_retry_waits_the_configured_backoff_before_the_next_attempt():
+    provider = MockProvider(
+        (MockSpec(error=UnavailableError("down")), MockSpec(text="recovered"))
+    )
+    inference = InferenceService(
+        ModelRegistry((route(),)), provider, retry_count=1, retry_backoff_ms=200
+    )
+
+    started = asyncio.get_running_loop().time()
+    await inference.invoke(request())
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed >= 0.15
+
+
+async def test_no_retry_is_made_when_none_is_configured():
+    """A service built without a retry policy makes one attempt per route."""
     provider = MockProvider(
         (MockSpec(error=UnavailableError("fail once")), MockSpec(text="recovered"))
     )
@@ -762,6 +943,230 @@ async def test_a_provider_that_fails_once_then_succeeds_is_not_retried():
         await inference.invoke(request())
 
     assert len(provider.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Fallbacks
+# ---------------------------------------------------------------------------
+
+
+async def test_a_fallback_serves_the_invocation_when_the_primary_path_fails():
+    provider = MockProvider(
+        (
+            MockSpec(error=UnavailableError("the primary route is down")),
+            MockSpec(text="the fallback answered"),
+        )
+    )
+    inference = InferenceService(ModelRegistry((route("primary"), route("fallback"))), provider)
+
+    result = await inference.invoke(request())
+
+    assert [call[0].model_id for call in provider.calls] == ["primary", "fallback"]
+    assert result.upstream_model == "fallback"
+    assert result.fallback_used is True
+    assert result.attempt_count == 2
+
+
+async def test_a_route_is_retried_before_a_fallback_is_tried():
+    provider = MockProvider(
+        (MockSpec(error=UnavailableError("primary down")), MockSpec(text="primary recovered"))
+    )
+    inference = InferenceService(
+        ModelRegistry((route("primary"), route("fallback"))),
+        provider,
+        retry_count=1,
+        retry_backoff_ms=0,
+    )
+
+    result = await inference.invoke(request())
+
+    assert [call[0].model_id for call in provider.calls] == ["primary", "primary"]
+    assert result.upstream_model == "primary"
+    assert result.fallback_used is False
+
+
+async def test_a_non_retryable_failure_moves_on_to_the_next_route():
+    provider = MockProvider(
+        (
+            MockSpec(error=InvalidArgumentError("the primary rejected the request")),
+            MockSpec(text="the fallback answered"),
+        )
+    )
+    inference = InferenceService(
+        ModelRegistry((route("primary"), route("fallback"))),
+        provider,
+        retry_count=2,
+        retry_backoff_ms=0,
+    )
+
+    result = await inference.invoke(request())
+
+    assert [call[0].model_id for call in provider.calls] == ["primary", "fallback"]
+    assert result.fallback_used is True
+
+
+async def test_the_last_attempts_failure_is_the_one_reported():
+    """The most recent failure is the one that says why no route could serve."""
+    fallback_failure = InvalidArgumentError("the fallback rejected the request")
+    provider = MockProvider(
+        (
+            MockSpec(error=UnavailableError("the primary route is down")),
+            MockSpec(error=fallback_failure),
+        )
+    )
+    inference = InferenceService(ModelRegistry((route("primary"), route("fallback"))), provider)
+
+    with pytest.raises(InvalidArgumentError) as error:
+        await inference.invoke(request())
+
+    assert error.value is fallback_failure
+    assert [call[0].model_id for call in provider.calls] == ["primary", "fallback"]
+
+
+# ---------------------------------------------------------------------------
+# Concurrency
+# ---------------------------------------------------------------------------
+
+
+class _ConcurrencyProbe:
+    """A provider that records how many of its calls were in flight at once."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.peak = 0
+        self._in_flight = 0
+
+    async def complete(self, route, request, context):
+        self.calls += 1
+        self._in_flight += 1
+        self.peak = max(self.peak, self._in_flight)
+        try:
+            await asyncio.sleep(0)
+            return InvocationResponse(model=request.model, upstream_model=route.model_id)
+        finally:
+            self._in_flight -= 1
+
+
+class _RecordingLimiter:
+    """A stub limiter that records when a slot is taken and given back."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    @asynccontextmanager
+    async def slot(self):
+        self.events.append("enter")
+        try:
+            yield
+        finally:
+            self.events.append("exit")
+
+
+async def test_simultaneous_attempts_are_bounded_by_the_injected_limiter():
+    provider = _ConcurrencyProbe()
+    inference = InferenceService(
+        ModelRegistry((route(),)), provider, limiter=ConcurrencyLimiter(2)
+    )
+
+    await asyncio.gather(*(inference.invoke(request()) for _ in range(6)))
+
+    assert provider.calls == 6
+    assert provider.peak == 2
+
+
+async def test_the_configured_maximum_builds_the_limiter():
+    provider = _ConcurrencyProbe()
+    inference = InferenceService(ModelRegistry((route(),)), provider, max_concurrent_requests=1)
+
+    await asyncio.gather(*(inference.invoke(request()) for _ in range(4)))
+
+    assert provider.calls == 4
+    assert provider.peak == 1
+
+
+async def test_the_concurrency_slot_is_released_before_the_backoff_wait(monkeypatch):
+    """A caller waiting to retry holds no slot another caller could be using."""
+    limiter = _RecordingLimiter()
+
+    async def recording_back_off(attempt: int, base_ms: float, deadline) -> None:
+        limiter.events.append("wait")
+
+    monkeypatch.setattr(inference_module, "_back_off", recording_back_off)
+    provider = MockProvider(
+        (MockSpec(error=UnavailableError("down")), MockSpec(text="recovered"))
+    )
+    inference = InferenceService(
+        ModelRegistry((route(),)),
+        provider,
+        retry_count=1,
+        retry_backoff_ms=1000,
+        limiter=limiter,
+    )
+
+    await inference.invoke(request())
+
+    assert limiter.events == ["enter", "exit", "wait", "enter", "exit"]
+
+
+# ---------------------------------------------------------------------------
+# Cancellation
+# ---------------------------------------------------------------------------
+
+
+class _BlockingProvider:
+    """A provider whose call blocks until the invocation is cancelled."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Route, InvocationRequest, AttemptContext]] = []
+        self.started = asyncio.Event()
+
+    async def complete(self, route, request, context):
+        self.calls.append((route, request, context))
+        self.started.set()
+        await asyncio.Event().wait()
+
+
+class _CancellingProvider:
+    """A provider whose call raises :exc:`asyncio.CancelledError`."""
+
+    async def complete(self, route, request, context):
+        raise asyncio.CancelledError
+
+
+async def test_cancelling_an_invocation_stops_further_attempts_and_frees_the_slot():
+    provider = _BlockingProvider()
+    limiter = ConcurrencyLimiter(1)
+    inference = InferenceService(
+        ModelRegistry((route(),)),
+        provider,
+        retry_count=3,
+        retry_backoff_ms=0,
+        limiter=limiter,
+    )
+
+    task = asyncio.create_task(inference.invoke(request()))
+    await provider.started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(provider.calls) == 1
+
+    async def take_the_only_slot() -> None:
+        async with limiter.slot():
+            pass
+
+    await asyncio.wait_for(take_the_only_slot(), timeout=1.0)
+
+
+async def test_cancellation_is_never_turned_into_an_upstream_failure():
+    inference = InferenceService(
+        ModelRegistry((route(),)), _CancellingProvider(), retry_count=2, retry_backoff_ms=0
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await inference.invoke(request())
 
 
 # ---------------------------------------------------------------------------
