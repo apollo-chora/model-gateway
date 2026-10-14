@@ -99,7 +99,9 @@ def create_app(
     should call upstream with. When no service is injected the factory builds
     the production one: :class:`~model_gateway.providers.litellm_provider.LiteLLMProvider`
     over the registry's routes, with the deployment's configured reliability
-    policy — ``PROVIDER_TIMEOUT_SECONDS`` as the attempt budget,
+    policy — ``PROVIDER_TIMEOUT_SECONDS`` as both the invocation deadline and
+    the per-attempt ceiling (one configured value plays both roles today; they
+    are logically distinct bounds and separating them is a future refinement),
     ``PROVIDER_RETRY_COUNT`` and ``PROVIDER_RETRY_BACKOFF_MS`` as the retry
     schedule, and a limiter built from ``PROVIDER_MAX_CONCURRENT_REQUESTS``
     (PRD section 9.6). The service anchors one deadline per invocation and
