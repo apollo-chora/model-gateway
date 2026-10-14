@@ -28,11 +28,10 @@ from model_gateway.capabilities import Capability
 from model_gateway.config import Settings
 from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import FinishReason, InvocationResponse, TextPart, Usage
-from model_gateway.errors import PermissionDeniedError, UnauthenticatedError
+from model_gateway.errors import UnauthenticatedError
 from model_gateway.health import healthz, readyz
 from model_gateway.http.auth import (
     create_auth_middleware,
-    enforce_tenant,
     extract_credential,
     get_identity,
 )
@@ -127,10 +126,15 @@ class StubKeySet:
             raise UnauthenticatedError(
                 "the credential was rejected", reason="invalid_credentials"
             )
-        return Identity(authenticated=True, tenant=self._bindings[presented], key_id="stub-key")
+        return Identity(
+            authenticated=True,
+            tenant=self._bindings[presented],
+            credential_id="stub-credential-id",
+            key_label="stub-key",
+        )
 
     def anonymous(self) -> Identity:
-        return Identity(authenticated=False, tenant=None, key_id=None)
+        return Identity(authenticated=False, tenant=None, credential_id=None, key_label=None)
 
 
 def build_app(
@@ -279,6 +283,54 @@ def test_conflicting_headers_are_rejected():
         extract_credential(request)
 
 
+def test_a_repeated_authorization_header_is_refused():
+    """Several Authorization headers are an ambiguous presentation, not the
+    first one of them: the request-smuggling boundary refuses them outright."""
+    request = Request(
+        "GET",
+        b"/",
+        [
+            (b"authorization", f"Bearer {API_KEY}".encode()),
+            (b"authorization", f"Bearer {WRONG_KEY}".encode()),
+        ],
+    )
+
+    with pytest.raises(UnauthenticatedError):
+        extract_credential(request)
+
+
+def test_a_repeated_x_api_key_header_is_refused():
+    request = Request(
+        "GET",
+        b"/",
+        [
+            (b"x-api-key", API_KEY.encode()),
+            (b"x-api-key", WRONG_KEY.encode()),
+        ],
+    )
+
+    with pytest.raises(UnauthenticatedError):
+        extract_credential(request)
+
+
+def test_both_headers_repeated_are_refused():
+    """A repeated header is refused even when every copy carries the same value:
+    the ambiguity is in the presentation, not in which value wins."""
+    request = Request(
+        "GET",
+        b"/",
+        [
+            (b"authorization", f"Bearer {API_KEY}".encode()),
+            (b"authorization", f"Bearer {API_KEY}".encode()),
+            (b"x-api-key", API_KEY.encode()),
+            (b"x-api-key", API_KEY.encode()),
+        ],
+    )
+
+    with pytest.raises(UnauthenticatedError):
+        extract_credential(request)
+
+
 @pytest.mark.parametrize(
     "value",
     ["Basic xyz", "Bearer", "Bearer ", "Bearer a b", "Bearer \t", ""],
@@ -367,11 +419,90 @@ async def test_conflicting_headers_are_refused(client):
     assert response.status == 401
 
 
+async def test_a_repeated_authorization_header_is_refused_on_the_wire(client):
+    """The refusal holds on the wire, not just on the extraction function: the
+    middleware must never resolve several Authorization headers by position."""
+    response = await client.get(
+        "/v1/models",
+        headers=[
+            (b"Authorization", f"Bearer {API_KEY}".encode()),
+            (b"Authorization", f"Bearer {WRONG_KEY}".encode()),
+        ],
+    )
+
+    assert response.status == 401
+    assert (await response.json())["reason"] == "authentication_required"
+
+
+async def test_a_repeated_x_api_key_header_is_refused_on_the_wire(client):
+    response = await client.get(
+        "/v1/models",
+        headers=[(b"x-api-key", API_KEY.encode()), (b"x-api-key", WRONG_KEY.encode())],
+    )
+
+    assert response.status == 401
+    assert (await response.json())["reason"] == "authentication_required"
+
+
+async def test_both_headers_repeated_are_refused_on_the_wire(client):
+    response = await client.get(
+        "/v1/models",
+        headers=[
+            (b"Authorization", f"Bearer {API_KEY}".encode()),
+            (b"Authorization", f"Bearer {WRONG_KEY}".encode()),
+            (b"x-api-key", API_KEY.encode()),
+            (b"x-api-key", WRONG_KEY.encode()),
+        ],
+    )
+
+    assert response.status == 401
+    assert (await response.json())["reason"] == "authentication_required"
+
+
+async def test_a_repeated_header_is_refused_even_on_an_exempt_path(client):
+    """An exempt path still validates a presented credential — and a presented
+    credential that is ambiguous is refused like any other."""
+    response = await client.get(
+        "/healthz",
+        headers=[
+            (b"Authorization", f"Bearer {API_KEY}".encode()),
+            (b"Authorization", f"Bearer {WRONG_KEY}".encode()),
+        ],
+    )
+
+    assert response.status == 401
+    assert (await response.json())["reason"] == "authentication_required"
+
+
 async def test_a_rejected_key_is_refused_even_on_an_exempt_path(client):
     response = await client.get("/healthz", headers=auth_headers(WRONG_KEY))
 
     assert response.status == 401
     assert (await response.json())["reason"] == "invalid_credentials"
+
+
+async def test_a_missing_credential_is_refused_on_the_favicon_path(client):
+    """Authentication is a property of the middleware, not of the ``/v1``
+    routes: a path no route claims is still authenticated."""
+    response = await client.get("/favicon.ico")
+
+    assert response.status == 401
+    assert (await response.json())["reason"] == "authentication_required"
+
+
+async def test_a_missing_credential_is_refused_on_an_unknown_path(client):
+    response = await client.get("/no/such/path")
+
+    assert response.status == 401
+    assert (await response.json())["reason"] == "authentication_required"
+
+
+async def test_a_valid_credential_carries_an_unknown_path_past_authentication(client):
+    """Routing decides only after authentication has let the request through,
+    so an unknown path answers 404 rather than 401 once the credential is valid."""
+    response = await client.get("/no/such/path", headers=auth_headers())
+
+    assert response.status == 404
 
 
 # --------------------------------------------------------------------------------------
@@ -491,23 +622,6 @@ async def test_the_handler_sees_the_identity_the_middleware_assigned(client, pro
     assert response.status == 200
     _, invocation = provider.calls[0]
     assert invocation.tenant_id == TENANT
-
-
-def test_enforce_tenant_accepts_a_matching_or_absent_body_tenant():
-    identity = Identity(authenticated=True, tenant=TENANT, key_id="stub-key")
-
-    enforce_tenant(identity, TENANT)
-    enforce_tenant(identity, None)
-    enforce_tenant(None, TENANT)
-
-
-def test_enforce_tenant_refuses_a_disagreeing_body_tenant():
-    identity = Identity(authenticated=True, tenant=TENANT, key_id="stub-key")
-
-    with pytest.raises(PermissionDeniedError) as error:
-        enforce_tenant(identity, "tenant-other")
-
-    assert error.value.reason.value == "permission_denied"
 
 
 def test_get_identity_returns_none_when_the_middleware_did_not_run():

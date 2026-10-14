@@ -20,8 +20,10 @@ request. It is what the response's ``id`` is built from and what correlates the
 caller's completion with the gateway's own logs and usage records.
 
 The trusted identity is the one the authentication middleware assigned to the
-request; the handler enforces the body's ``tenant_id`` against it and hands it
-to :meth:`~model_gateway.http.dto.ChatRequest.to_invocation`, so the invocation
+request. The handler reconciles the body's ``tenant_id`` against it with
+:func:`~model_gateway.security.authorization.reconcile_identity` — the
+transport-independent policy — and hands the identity to
+:meth:`~model_gateway.http.dto.ChatRequest.to_invocation`, so the invocation
 carries the credential's tenant and never the body's (PRD section 5.1).
 """
 
@@ -37,8 +39,9 @@ from blacksheep.server.responses import json
 from blacksheep.server.routing import Router
 
 from model_gateway.errors import CapabilityError, InvalidArgumentError
-from model_gateway.http.auth import enforce_tenant, get_identity
+from model_gateway.http.auth import get_identity
 from model_gateway.http.dto import ChatCompletion, ChatRequest
+from model_gateway.security.authorization import reconcile_identity
 
 if TYPE_CHECKING:
     from model_gateway.inference import InferenceService
@@ -93,7 +96,7 @@ def create_chat_completion(service: InferenceService) -> ChatHandler:
         _reject_streaming(chat_request)
 
         identity = get_identity(request)
-        enforce_tenant(identity, chat_request.invocation.tenant_id)
+        reconcile_identity(identity, chat_request.invocation.tenant_id)
 
         invocation_id = uuid4().hex
         response = await service.invoke(
