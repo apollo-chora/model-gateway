@@ -82,7 +82,6 @@ from dataclasses import dataclass, replace
 from model_gateway.capabilities import Capability
 from model_gateway.config.routes import Route
 from model_gateway.domain import (
-    FinishReason,
     ImagePart,
     InvocationRequest,
     InvocationResponse,
@@ -113,6 +112,19 @@ from model_gateway.reliability import (
 __all__ = ["InferenceService", "InvocationState"]
 
 _STREAMING_CAPABILITY = "streaming"
+
+_TERMINAL_EVENT_KINDS = frozenset({StreamEventKind.FINISH, StreamEventKind.ERROR})
+"""The event kinds that end a stream, after which nothing may follow.
+
+A stream reaches at most one of them: ``FINISH`` for an answer that completed,
+``ERROR`` for one that failed after it had already produced output. They are the
+gateway's own vocabulary for "this stream is over", so the walk in
+:meth:`InferenceService._invoke_stream_on` reads them rather than trusting the
+provider to stop at the right point: a provider that keeps yielding after a
+terminal event, or that raises after one, must not be able to put anything —
+least of all a second terminal event — after the answer the caller was already
+told was over.
+"""
 
 _DEFAULT_MAX_CONCURRENT_REQUESTS = 100
 """The concurrency bound a service is built with when no limiter is injected.
@@ -286,6 +298,15 @@ class InferenceService:
         one deadline and one retry loop (PRD sections 11.2, 11.3 and 15). The
         difference is what a failure may do once the answer has begun.
 
+        **The public model is resolved before streaming eligibility is asked.**
+        A request naming a model the gateway does not expose is a
+        :class:`~model_gateway.errors.ModelNotFoundError`, and it is refused as
+        that whatever the bound provider can do: the request addresses a resource
+        that does not exist, so whether some other model could have been streamed
+        has no bearing on the answer. Asking the provider's capability first would
+        report a streaming refusal for a model that is not even configured, which
+        is a less accurate answer to a question the request already answered.
+
         **No fallback after the first output.** Before the first event reaches
         the caller, a retryable or fallback-eligible failure may still move to
         another route, exactly as :meth:`invoke` does — the caller has seen
@@ -295,22 +316,24 @@ class InferenceService:
         first, and a caller that has seen output cannot be given a contradictory
         one (PRD sections 11.2, 11.3 and 16). The stream then ends with exactly
         one terminal :class:`~model_gateway.domain.streaming.StreamEvent` of kind
-        ``FINISH`` that reports the error, rather than stopping silently.
+        ``ERROR`` that reports the failure's own gateway reason and sanitised
+        message, rather than stopping silently or mislabelling the failure as a
+        finish.
 
         Raises :class:`~model_gateway.errors.ModelNotFoundError` for an unknown
         ID, :class:`~model_gateway.errors.CapabilityError` when the primary route
         cannot honour the request or the provider cannot stream, and otherwise
         the failure of the last attempt — surfaced the same way :meth:`invoke`
         surfaces it, except that a failure after the first output is reported
-        through the terminal event and then raised.
+        through the terminal ``ERROR`` event and then raised.
         """
+        routes = self._registry.routes_for(request.model)
         if not isinstance(self._provider, StreamingTextProvider):
             raise CapabilityError(
                 "this provider cannot stream a chat completion; the gateway does not answer a "
                 "streaming request with a non-streamed body, so the request is refused",
                 details={"capability": _STREAMING_CAPABILITY},
             )
-        routes = self._registry.routes_for(request.model)
         stream = self._invoke_stream_on(request, routes)
         try:
             async for event in stream:
@@ -462,22 +485,42 @@ class InferenceService:
 
         After the first event, a failure ends the stream. The events already
         yielded stay — they are what the upstream produced — and the stream is
-        closed with exactly one terminal ``FINISH`` event that reports the
-        error, rather than stopping silently or restarting on another provider
-        (PRD section 16). The error is then raised, so the caller knows the
-        invocation failed; the terminal event is what the stream itself shows.
+        closed with exactly one terminal ``ERROR`` event that carries the
+        failure's own gateway reason and sanitised message, rather than stopping
+        silently, restarting on another provider, or mislabelling the failure as
+        a finish (PRD section 16). The error is then raised, so the caller knows
+        the invocation failed; the terminal event is what the stream itself
+        shows.
+
+        **A terminal event is the last thing a stream ever contains.** The walk
+        stops the moment one is yielded: the generator returns immediately after
+        handing a ``FINISH`` or an ``ERROR`` to the caller, so no event — not
+        even a second terminal one — can follow it. That holds even when the
+        provider misbehaves: a provider that yields more events after its finish,
+        or raises after it, cannot put anything after the terminal event the
+        caller was already shown. A failure that raises after a terminal event
+        has been produced is re-raised unchanged rather than turned into a
+        second terminal event.
 
         Sequence numbers are strictly increasing across the whole stream. A
         provider numbers its own events from 0, and a route is only retried or
         walked away from before it has produced any event, so the numbers a
         caller sees never repeat or go backwards. The terminal event after a
         failure takes the next number after the last one yielded.
+
+        A provider stream that ends without producing a terminal event — the
+        upstream went away, or simply never reported a finish reason — ends the
+        generator without one too. The gateway synthesises no terminal event
+        for an answer it never saw finish, so a caller whose stream stops reads
+        a stream that is over without a terminal event, not a failed one (PRD
+        section 16).
         """
         plan = _select_routes(routes, request)
         deadline = Deadline.after(self._attempt_timeout)
         state = InvocationState()
         failure: BaseException | None = None
         output_started = False
+        terminal_emitted = False
         last_sequence = -1
 
         for position, route in enumerate((plan.primary, *plan.fallbacks)):
@@ -491,12 +534,22 @@ class InferenceService:
                         last_sequence = event.sequence
                         output_started = True
                         yield event
+                        if event.kind in _TERMINAL_EVENT_KINDS:
+                            terminal_emitted = True
+                            return
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
                     failure = error
+                    if terminal_emitted:
+                        # A terminal event already ended the stream, so this
+                        # failure adds nothing to it — re-raising it as the
+                        # second terminal event would contradict the one the
+                        # caller was already shown.
+                        raise
                     if output_started:
-                        yield _error_finish_event(request, error, sequence=last_sequence + 1)
+                        yield _error_event(request, error, sequence=last_sequence + 1)
+                        terminal_emitted = True
                         raise
                     remaining = deadline.remaining()
                     if (
@@ -628,35 +681,42 @@ def _deadline_exceeded(request: InvocationRequest, state: InvocationState) -> De
     )
 
 
-def _error_finish_event(
+def _error_event(
     request: InvocationRequest, error: BaseException, *, sequence: int
 ) -> StreamEvent:
     """The terminal event that ends a stream which failed after output began.
 
     A failure after the first event cannot be retried or walked to another
     route — the caller has already seen output, and a second answer would
-    contradict it (PRD sections 11.2 and 11.3). The stream therefore ends
-    with exactly one terminal ``FINISH`` event that reports the error, so the
-    caller is not left with a stream that simply stopped.
+    contradict it (PRD sections 11.2 and 11.3). The stream therefore ends with
+    exactly one terminal ``ERROR`` event, so the caller is not left with a
+    stream that simply stopped, and is not told the answer finished when it did
+    not.
 
-    The event carries no finish reason the provider gave, because the provider
-    did not finish — it failed. ``FinishReason.UNKNOWN`` states that plainly:
-    the gateway could not classify a reason because there was not one to
-    classify. The error's own reason is recorded verbatim in
-    ``raw_finish_reason``, the field that already keeps the provider's own
-    untranslated reason beside its classification, so the error that ended the
-    stream is named rather than swallowed (PRD section 5.2).
+    The event carries the gateway's own stable reason and its sanitised message,
+    never a finish reason. A finish reason classifies *why generation stopped*,
+    and there is none: the provider failed rather than finishing, so borrowing
+    ``FinishReason.UNKNOWN`` and parking the gateway's reason in
+    ``raw_finish_reason`` would describe a finish that never happened and put
+    gateway vocabulary in a field reserved for the provider's own (PRD sections
+    5.2, 5.4 and 9.1). ``error_reason`` is the value of the failure's
+    :class:`~model_gateway.errors.ErrorReason`, which is what a caller switches
+    on; ``error_message`` is the same sanitised message the error carries, so
+    the reason and the text agree with the error that is raised alongside the
+    event.
+
+    A failure that is not already a :class:`~model_gateway.errors.GatewayError`
+    is normalised first, exactly as the HTTP boundary normalises it, so the
+    reason is one of the taxonomy's own and the message is gateway-authored
+    rather than the provider's (PRD section 5.4).
     """
-    if isinstance(error, GatewayError):
-        raw = error.reason.value
-    else:
-        raw = normalise_exception(error).reason.value
+    gateway_error = error if isinstance(error, GatewayError) else normalise_exception(error)
     return StreamEvent(
-        kind=StreamEventKind.FINISH,
+        kind=StreamEventKind.ERROR,
         sequence=sequence,
         invocation_id=request.invocation_id or "",
-        finish_reason=FinishReason.UNKNOWN,
-        raw_finish_reason=raw,
+        error_reason=gateway_error.reason.value,
+        error_message=gateway_error.message,
     )
 
 
