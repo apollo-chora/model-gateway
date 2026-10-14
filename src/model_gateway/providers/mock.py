@@ -34,6 +34,7 @@ from model_gateway.domain import (
     Usage,
 )
 from model_gateway.errors import GatewayError
+from model_gateway.providers.base import AttemptContext
 
 __all__ = ["MockProvider", "MockSpec"]
 
@@ -79,9 +80,9 @@ class MockProvider:
     recovery — or the reverse — and still know exactly what the third call will
     get.
 
-    Every call is recorded as a ``(route, request)`` pair in :attr:`calls`, which
-    is how a test asserts the gateway handed the provider the route it resolved
-    and the request it was given.
+    Every call is recorded as a ``(route, request, context)`` triple in
+    :attr:`calls`, which is how a test asserts the gateway handed the provider
+    the route it resolved, the request it was given and the attempt's own facts.
     """
 
     def __init__(self, spec: MockSpec | Sequence[MockSpec] | None = None) -> None:
@@ -90,15 +91,20 @@ class MockProvider:
         if not specs:
             raise ValueError("a mock provider needs at least one response to return")
         self._specs = specs
-        self.calls: list[tuple[Route, InvocationRequest]] = []
+        self.calls: list[tuple[Route, InvocationRequest, AttemptContext]] = []
 
-    async def complete(self, route: Route, request: InvocationRequest) -> InvocationResponse:
+    async def complete(
+        self, route: Route, request: InvocationRequest, context: AttemptContext
+    ) -> InvocationResponse:
         """Return the scripted response for ``route`` and ``request``.
 
         The result is a pure function of the scripted spec, the route and the
-        request: no network, no clock, no randomness, no environment.
+        request: no network, no clock, no randomness, no environment. The
+        attempt's own facts are recorded beside the call and change nothing about
+        the answer, so a scripted response is the same response whatever budget
+        the gateway set for the attempt.
         """
-        self.calls.append((route, request))
+        self.calls.append((route, request, context))
         spec = self._specs[min(len(self.calls), len(self._specs)) - 1]
         if spec.error is not None:
             raise spec.error

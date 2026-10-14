@@ -14,7 +14,9 @@ from model_gateway.config.routes import Operation, Route, parse_routes
 PUBLIC_ADDRESS = "93.184.216.34"
 METADATA_ADDRESS = "169.254.169.254"
 
-SUPPORTED_CAPABILITIES = "'chat', 'tools', 'vision', 'embeddings', 'generation', 'editing'"
+SUPPORTED_CAPABILITIES = (
+    "'chat', 'tools', 'vision', 'structured-output', 'embeddings', 'generation', 'editing'"
+)
 
 SUPPORTED_AUTH_TYPES = "'bearer', 'x-api-key', 'api-key', 'none', 'custom-header'"
 

@@ -9,7 +9,7 @@ and executes one call against one route, and the gateway core owns everything
 around it (PRD sections 9.2 and 23).
 """
 
-from model_gateway.providers.base import TextProvider
+from model_gateway.providers.base import AttemptContext, TextProvider
 from model_gateway.providers.mock import MockProvider, MockSpec
 
-__all__ = ["MockProvider", "MockSpec", "TextProvider"]
+__all__ = ["AttemptContext", "MockProvider", "MockSpec", "TextProvider"]
