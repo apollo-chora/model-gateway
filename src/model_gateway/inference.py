@@ -8,14 +8,17 @@ section 9's boundary, and this module is the policy side of it:
   :class:`~model_gateway.errors.ModelNotFoundError` raised here, before any
   provider is called, so a caller-supplied model name cannot reach an
   unconfigured upstream endpoint (PRD section 10).
-* **Capability enforcement.** A route may serve the request only when it
-  declares every capability the request needs, or the invocation is refused with
-  a :class:`~model_gateway.errors.CapabilityError` (PRD section 9.5). Silently
-  dropping a tool, an image or a structured-output requirement is forbidden, so
-  an unsupported request is a refusal and never a smaller call. The check belongs
-  to selection rather than to execution: an ineligible route is passed over for
-  the next eligible one, so a capability gap in a fallback route cannot make an
-  invocation fatal that another configured route could have served.
+* **Capability enforcement.** The request is validated against the primary
+  route's capability contract before anything is selected. The registry
+  advertises the primary route's capabilities as the public model's own (PRD
+  section 4.3), so a request the primary cannot honour is refused with a
+  :class:`~model_gateway.errors.CapabilityError` even when a later route declares
+  what the request needs (PRD section 9.5): serving it would answer a request the
+  public contract never advertised for that model. Silently dropping a tool, an
+  image or a structured-output requirement is forbidden, and so is obtaining one
+  through a fallback. Only then are the remaining routes filtered, each by the
+  same test, into the fallbacks that could serve the request unchanged, so a
+  fallback may preserve the advertised capabilities but can never expand them.
 * **Attempt execution.** The provider is handed one resolved route, the request
   and an :class:`~model_gateway.providers.base.AttemptContext` carrying the
   attempt's own facts: the invocation it belongs to, which attempt it is and the
@@ -34,13 +37,16 @@ execution and nothing else (:mod:`model_gateway.providers.base`).
 **No retries, no fallbacks and no deadline policy yet.** Those are a later
 slice's, and PRD section 11.3 gives the gateway core the only retry loop. The
 call is structured so that slice can be added without reshaping it:
-:func:`_select_route` picks the route, :meth:`InferenceService._attempt` is a
-single provider call against a single route, :meth:`InferenceService._invoke_on`
-owns the route order, :class:`InvocationState` carries the reliability facts the
-response reports and :class:`~model_gateway.providers.base.AttemptContext` is
-where a computed deadline will travel. A retry wraps ``_attempt`` and advances
-``InvocationState``; a fallback walks the routes selection returns. Adding either
-must not change what ``invoke`` guarantees today.
+:func:`_select_routes` decides the primary route and the fallbacks that could
+serve the request, :meth:`InferenceService._attempt` is a single provider call
+against a single route, :meth:`InferenceService._invoke_on` owns the route order,
+:class:`InvocationState` carries the reliability facts the response reports and
+:class:`~model_gateway.providers.base.AttemptContext` is where a computed
+deadline will travel. A retry wraps ``_attempt`` and advances
+``InvocationState``; a fallback walks the fallbacks selection returns.
+``fallback_used`` is already truthful without either, because it reports an
+actual fallback path rather than any route other than the first configured one.
+Adding a retry or a fallback must not change what ``invoke`` guarantees today.
 """
 
 from dataclasses import dataclass, replace
@@ -65,18 +71,26 @@ class InvocationState:
     """What the gateway has done for one invocation so far (PRD sections 5.2 and 13).
 
     The response reports facts about the gateway's own execution — how many
-    provider attempts were made and whether a route other than the first
-    configured one was used — and those are facts about the invocation rather
-    than about any one answer a provider gave. They live here so that
-    ``_normalise`` states them instead of inventing them: a hardcoded
-    ``attempt_count`` of one is a claim about the reliability loop, which is
-    exactly what this object can answer truthfully.
+    provider attempts were made and whether a fallback path was taken — and those
+    are facts about the invocation rather than about any one answer a provider
+    gave. They live here so that ``_normalise`` states them instead of inventing
+    them: a hardcoded ``attempt_count`` of one is a claim about the reliability
+    loop, which is exactly what this object can answer truthfully.
 
     ``attempt_count`` starts at zero, because a state exists before the first
     call, and counts the attempts that were made — including ones that raised,
     because a failed attempt is work the gateway did (PRD section 13).
-    ``fallback_used`` records whether any route other than the first configured
-    one was used (PRD section 5.2).
+
+    ``fallback_used`` records that the invocation took a *fallback path*: a route
+    other than the primary one served it because the normal primary path could
+    not (PRD section 5.2). It is deliberately narrower than "a route other than
+    the first configured one was used", which was also true whenever capability
+    routing passed the primary over. The primary route is the one the public
+    model advertises, and a request it cannot honour is refused rather than
+    routed elsewhere, so capability routing can never set this flag. With that
+    definition, ``attempt_count=1`` and ``fallback_used=False`` says the primary
+    route served the invocation on its first attempt, rather than merely that no
+    later route was configured.
 
     Nothing here implements the reliability loop. :meth:`with_attempt` is the one
     place the state advances, so the retry and fallback slice has a single seam
@@ -86,19 +100,25 @@ class InvocationState:
     attempt_count: int = 0
     fallback_used: bool = False
 
-    def with_attempt(self, *, fallback_used: bool = False) -> "InvocationState":
+    def with_attempt(self, *, on_fallback: bool = False) -> "InvocationState":
         """The state after recording that one more provider attempt is made.
 
         The attempt is recorded before the call, so an attempt that raises counts
         too: the count describes what the gateway did, and a failure is not less
-        of an attempt than a success (PRD section 13). ``fallback_used`` is
-        sticky, because one route other than the first configured one is enough
-        for the invocation to have fallen back.
+        of an attempt than a success (PRD section 13).
+
+        ``on_fallback`` states that this attempt is made on a route other than
+        the primary one, after the primary path could not serve the invocation.
+        That is the one thing that makes ``fallback_used`` true (PRD section
+        5.2), and it is sticky, because one such route is enough for the
+        invocation to have fallen back. It defaults to false because an attempt
+        on the primary route is never a fallback, however many routes are
+        configured behind it.
         """
         return replace(
             self,
             attempt_count=self.attempt_count + 1,
-            fallback_used=self.fallback_used or fallback_used,
+            fallback_used=self.fallback_used or on_fallback,
         )
 
 
@@ -134,12 +154,13 @@ class InferenceService:
     async def invoke(self, request: InvocationRequest) -> InvocationResponse:
         """Invoke the public model named by ``request.model``.
 
-        Resolves the ID to its configured routes, selects the first route that
-        can honour the request, makes one provider call and returns the
+        Resolves the ID to its configured routes, validates the request against
+        the primary route's capability contract — the contract the registry
+        advertises for the model — makes one provider call and returns the
         normalised response. Raises
         :class:`~model_gateway.errors.ModelNotFoundError` for an unknown ID and
-        :class:`~model_gateway.errors.CapabilityError` when no configured route
-        can honour the request.
+        :class:`~model_gateway.errors.CapabilityError` when the primary route
+        cannot honour the request.
         """
         routes = self._registry.routes_for(request.model)
         return await self._invoke_on(request, routes)
@@ -149,16 +170,20 @@ class InferenceService:
     ) -> InvocationResponse:
         """Serve one invocation from the configured route order, primary first.
 
-        Selection decides which route may serve the request; execution then makes
-        one attempt against it. Today that is one attempt deep: there are no
-        retries and no fallbacks yet, so the first eligible route is the route.
-        The later reliability slice walks ``routes`` from here and wraps
+        Selection decides which routes may serve the request: the primary route
+        — the one the public model advertises, which the request has already been
+        validated against — and, behind it, the later routes that could serve it
+        unchanged. Execution then makes one attempt against the primary route.
+        Today that is one attempt deep: there are no retries and no failure
+        fallbacks yet, so the primary route is the route and ``fallback_used``
+        stays false, because no non-primary route served anything. The later
+        reliability slice walks ``plan.fallbacks`` from here and wraps
         :meth:`_attempt`; it does not reshape what ``invoke`` returns.
         """
-        route, is_fallback = _select_route(routes, request)
-        state = InvocationState().with_attempt(fallback_used=is_fallback)
-        response = await self._attempt(route, request, state)
-        return _normalise(route, request, response, state)
+        plan = _select_routes(routes, request)
+        state = InvocationState().with_attempt()
+        response = await self._attempt(plan.primary, request, state)
+        return _normalise(plan.primary, request, response, state)
 
     async def _attempt(
         self, route: Route, request: InvocationRequest, state: InvocationState
@@ -178,31 +203,61 @@ class InferenceService:
         return await self._provider.complete(route, request, context)
 
 
-def _select_route(routes: tuple[Route, ...], request: InvocationRequest) -> tuple[Route, bool]:
-    """The first configured route that can serve ``request``, and whether it is a fallback.
+@dataclass(frozen=True)
+class _RoutePlan:
+    """Which routes may serve one invocation, decided before any call is made.
 
-    Route order is fallback order (PRD section 11.2), so eligibility is decided
-    here rather than after a route has been chosen: a route that cannot honour
-    the request is passed over for the next one, and the primary route is still
-    tried first because it is first in the order. This is not a fallback walk —
-    nothing is retried and no route is abandoned for having failed — it only
-    keeps an ineligible route from being attempted at all, where it could produce
-    the refusal the whole invocation would otherwise die of.
+    ``primary`` is the route the public model advertises — the first configured
+    route — and the one every invocation is attempted on. ``fallbacks`` are the
+    later routes that could serve the same request unchanged, in configured
+    order: the candidates a genuine failure fallback may walk (PRD section 11.2).
 
-    The second element is ``True`` when the chosen route is not the first
-    configured one, which is what ``fallback_used`` reports (PRD section 5.2).
-
-    Raises :class:`~model_gateway.errors.CapabilityError` when no configured
-    route can serve the request.
+    Empty ``fallbacks`` is not a refusal. It says only that the invocation has
+    nowhere to go if the primary path fails, which is the ordinary case for a
+    model with one configured route.
     """
-    missing: Capability | None = None
-    for index, route in enumerate(routes):
-        absent = _first_missing_capability(route, request)
-        if absent is None:
-            return route, index > 0
-        if missing is None:
-            missing = absent
-    raise _no_eligible_route(request, missing)
+
+    primary: Route
+    fallbacks: tuple[Route, ...]
+
+
+def _select_routes(routes: tuple[Route, ...], request: InvocationRequest) -> _RoutePlan:
+    """The primary route that must serve ``request``, and the fallbacks that may.
+
+    Capability enforcement happens here, in this order, because the registry
+    advertises the *primary* route's capabilities as the public model's own
+    (:class:`~model_gateway.registry.ModelInfo`). The primary route is therefore
+    validated first: a request it cannot honour is refused with a
+    :class:`~model_gateway.errors.CapabilityError` even when a later route
+    declares what the request needs, because serving it would answer a request
+    the public model never advertised (PRD sections 4.3 and 9.5).
+
+    Only then are the remaining routes filtered, each by the same test, into the
+    fallbacks. A route that does not declare everything the request needs is
+    skipped rather than attempted, so a capability gap in a fallback cannot make
+    an invocation fatal that the primary route could have served (PRD section
+    11.2); and because the request was already validated against the primary,
+    filtering afterwards is what keeps a fallback from expanding the advertised
+    capabilities. A fallback may preserve them, never add to them.
+
+    This is not a fallback walk: nothing is retried and no route is abandoned for
+    having failed, so the plan is a decision about eligibility alone.
+
+    Raises :class:`~model_gateway.errors.CapabilityError` when the primary route
+    cannot serve the request.
+    """
+    if not routes:
+        raise _no_eligible_route(request, None)
+    primary = routes[0]
+    missing = _first_missing_capability(primary, request)
+    if missing is not None:
+        raise _no_eligible_route(request, missing)
+    return _RoutePlan(
+        primary=primary,
+        fallbacks=tuple(
+            route for route in routes[1:] if _first_missing_capability(route, request) is None
+        ),
+    )
 
 
 def _first_missing_capability(route: Route, request: InvocationRequest) -> Capability | None:
@@ -220,21 +275,24 @@ def _first_missing_capability(route: Route, request: InvocationRequest) -> Capab
 def _no_eligible_route(
     request: InvocationRequest, missing: Capability | None
 ) -> CapabilityError:
-    """The refusal for a request no configured route can serve (PRD section 9.5).
+    """The refusal for a request the advertised model cannot serve (PRD section 9.5).
 
-    ``missing`` is the first capability the first configured route lacks — the
-    reason selection started walking — so the refusal is deterministic rather
-    than whichever route happened to be checked last. It is ``None`` only when
-    the operation has no routes at all, which the registry refuses before
-    selection runs.
+    ``missing`` is the first capability the primary route lacks for this request,
+    which is the capability the public model does not advertise. It is ``None``
+    only when the operation has no routes at all, which the registry refuses
+    before selection runs.
+
+    A later route declaring the capability does not change the answer: the
+    public contract is the primary route's, and a fallback may preserve it but
+    never expand it.
     """
     if missing is None:
         return CapabilityError(
             f"no route is configured for {request.model!r}, so this invocation cannot be served"
         )
     return CapabilityError(
-        f"no route serving {request.model!r} supports {missing.value!r}, so this invocation "
-        f"cannot be sent to any configured route unchanged",
+        f"model {request.model!r} does not advertise {missing.value!r}: its primary route does "
+        f"not declare that capability, so this invocation cannot be served unchanged",
         details={"capability": missing.value},
     )
 
