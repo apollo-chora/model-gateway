@@ -26,8 +26,18 @@ this endpoint's own documented subset):
 * ``best_of`` above one asks for several samples with the best returned, which
   the gateway does not do; ``best_of: 1`` is the upstream default and is accepted.
 * ``suffix`` asks the model to continue a suffix after the prompt, which the
-  canonical request has no field for; there is no default value that asks for
-  nothing, so any stated suffix is refused.
+  canonical request has no field for; ``suffix: null`` states nothing and is
+  accepted, and a stated suffix is refused.
+
+**A recognised parameter's wire type is checked before its value is judged.**
+Each parameter in that subset has one JSON type on the wire, and a value of
+another type is malformed input rather than a feature request: ``{"n": true}``
+is not ``n: 1`` — JSON's ``true`` is a boolean and not an integer, however
+Python's ``bool`` subclasses ``int`` — and ``{"echo": 0}`` is not ``echo:
+false``. Neither value is read as asking for nothing, and neither is refused as
+a missing capability: a capability refusal would tell the caller the request was
+understood when it was not. An ill-typed value is an invalid-request error
+naming the parameter and the type that arrived (PRD sections 4 and 9.5).
 
 **An array prompt is refused, not narrowed.** The OpenAI format accepts a
 ``prompt`` that is a string or an array of strings, and an array asks for one
@@ -193,48 +203,83 @@ answer.
 """
 
 
-def _absent_when_none(value: object) -> bool:
+class _Wire(NamedTuple):
+    """The JSON type a recognised parameter's value must have on the wire.
+
+    ``name`` is how the type is named in a malformed-input message, so a caller
+    learns which type was expected as well as which one arrived. ``accepts``
+    tests a value against that type as the wire format defines it rather than as
+    Python does: a JSON ``true`` is a boolean and not the integer ``1``, even
+    though Python's ``bool`` is an ``int``, so ``{"n": true}`` is not ``n: 1``.
+    """
+
+    name: str
+    accepts: Callable[[object], bool]
+
+
+def _is_integer(value: object) -> bool:
+    """A JSON integer. A JSON ``true`` is a boolean, not the integer ``1``."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_boolean(value: object) -> bool:
+    return isinstance(value, bool)
+
+
+def _is_string_or_null(value: object) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _is_default_one(value: object) -> bool:
+    return value == 1
+
+
+def _is_default_false(value: object) -> bool:
+    return value is False
+
+
+def _is_default_none(value: object) -> bool:
     return value is None
 
 
-def _absent_when_falsy(value: object) -> bool:
-    return not value
-
-
-def _absent_when_one(value: object) -> bool:
-    return value is None or value == 1
+_INTEGER = _Wire("an integer", _is_integer)
+_BOOLEAN = _Wire("a boolean", _is_boolean)
+_STRING_OR_NULL = _Wire("a string or null", _is_string_or_null)
 
 
 class _Feature(NamedTuple):
     """An OpenAI parameter the gateway recognises and cannot honour.
 
     ``capability`` names what the parameter asks for, so the refusal says which
-    feature is missing rather than only which key was sent. ``absent`` decides
-    whether the value supplied actually asks for that feature: a parameter whose
-    value is the OpenAI default asks for nothing, and refusing it would reject a
-    request the gateway can serve in full.
+    feature is missing rather than only which key was sent. ``wire`` is the JSON
+    type its value must have, and ``default`` decides whether a value of that
+    type is the OpenAI default, which asks for nothing: refusing one would reject
+    a request the gateway can serve in full. A value whose wire type is wrong
+    asks for no feature and is not a capability the shape lacks — it is malformed
+    input, refused as an invalid request naming the type that arrived.
     """
 
     capability: str
-    absent: Callable[[object], bool]
+    wire: _Wire
+    default: Callable[[object], bool]
 
 
 _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
-    "n": _Feature(_MULTIPLE_CHOICES_CAPABILITY, _absent_when_one),
-    "logprobs": _Feature(_LOG_PROBABILITIES_CAPABILITY, _absent_when_falsy),
-    "echo": _Feature(_ECHO_CAPABILITY, _absent_when_falsy),
-    "suffix": _Feature(_SUFFIX_CAPABILITY, _absent_when_none),
-    "best_of": _Feature(_BEST_OF_CAPABILITY, _absent_when_one),
+    "n": _Feature(_MULTIPLE_CHOICES_CAPABILITY, _INTEGER, _is_default_one),
+    "logprobs": _Feature(_LOG_PROBABILITIES_CAPABILITY, _BOOLEAN, _is_default_false),
+    "echo": _Feature(_ECHO_CAPABILITY, _BOOLEAN, _is_default_false),
+    "suffix": _Feature(_SUFFIX_CAPABILITY, _STRING_OR_NULL, _is_default_none),
+    "best_of": _Feature(_BEST_OF_CAPABILITY, _INTEGER, _is_default_one),
 }
 """The recognised parameters this endpoint cannot honour, and what they ask for.
 
-Each is refused with a capability error naming the feature when its value asks
-for that feature, and accepted when its value is the upstream default that
-already matches gateway behaviour: ``n: 1`` and ``best_of: 1`` ask for the one
-completion and the one sample the gateway already produces, ``logprobs: false``
-and ``echo: false`` ask for the absence of something the gateway never adds, and
-a stated ``suffix`` always asks for suffix continuation, which the canonical
-request has no field for.
+Each carries the wire type its value must have and the OpenAI default that asks
+for nothing: ``n: 1`` and ``best_of: 1`` ask for the one completion and the one
+sample the gateway already produces, ``logprobs: false`` and ``echo: false`` ask
+for the absence of something the gateway never adds, and ``suffix: null`` states
+nothing at all. A value of the right type that is not that default asks for the
+feature, and is refused with a capability error naming it; a value of the wrong
+type is malformed input, and is refused as an invalid request (PRD section 9.5).
 """
 
 
@@ -701,12 +746,15 @@ def _reject_unsupported_parameters(body: Mapping[str, object]) -> None:
     """Refuse a parameter the gateway cannot honour, naming what it asked for.
 
     A key this endpoint does not recognise is malformed input. A key it does
-    recognise, whose value asks for something this gateway has no representation
-    for, is a capability the shape cannot provide — the request is well formed
-    and the refusal is about the feature (PRD section 9.5). A recognised key
-    whose value is the upstream default that already matches gateway behaviour
-    is accepted, because refusing it would reject a request the gateway can
-    serve in full.
+    recognise is judged on its wire type first: a value of the wrong type is
+    malformed input too, refused as an invalid request naming the parameter and
+    the type that arrived, because ``{"echo": 0}`` is ill-typed rather than a
+    request for the echo feature. A value of the right type that asks for
+    something this gateway has no representation for is a capability the shape
+    cannot provide — the request is well formed and the refusal is about the
+    feature (PRD section 9.5) — and a value that is the OpenAI default is
+    accepted, because refusing it would reject a request the gateway can serve in
+    full.
     """
     unknown = sorted(set(body) - _REQUEST_KEYS)
     if unknown:
@@ -719,7 +767,12 @@ def _reject_unsupported_parameters(body: Mapping[str, object]) -> None:
         if name not in body:
             continue
         feature = _UNSUPPORTED_FEATURES[name]
-        if feature.absent(body[name]):
+        value = body[name]
+        if not feature.wire.accepts(value):
+            raise InvalidArgumentError(
+                f"the request body {name!r} must be {feature.wire.name}, got {describe(value)}"
+            )
+        if feature.default(value):
             continue
         raise CapabilityError(
             f"the gateway cannot honour {name!r}; it would request {feature.capability!r}, which "
