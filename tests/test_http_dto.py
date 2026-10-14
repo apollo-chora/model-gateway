@@ -442,7 +442,7 @@ class TestChatRequestParameters:
             {"store": False},
             {"logprobs": False},
             {"modalities": ["text"]},
-            {"stream_options": None},
+            {"stream_options": {}},
         ],
     )
     def test_accepts_a_parameter_asking_for_the_openai_default(self, overrides):
@@ -486,6 +486,218 @@ class TestChatRequestParameters:
         assert invocation.invocation_id == "inv-1"
         assert invocation.actor_id == "caller-7"
         assert invocation.response_modality.value == "text"
+
+
+class TestChatRequestParameterWireTypes:
+    """Each recognised parameter's wire type is checked before its value is read.
+
+    A value of the wrong JSON type is malformed input, not a request for a
+    feature, so it is refused with a 400 naming the parameter and the type
+    supplied — including the values a value-only reading would misjudge:
+    ``true`` for an integer parameter, because ``True == 1``, and the falsy
+    ``0``, ``""``, ``[]`` and ``{}`` for a boolean or object parameter. A
+    correctly typed value that is the OpenAI default asks for nothing and is
+    accepted; any other correctly typed value keeps the capability refusal
+    (PRD section 9.5).
+    """
+
+    @pytest.mark.parametrize("value", [True, 1.5, "2", None, [], {}])
+    def test_refuses_an_n_that_is_not_an_integer(self, value):
+        with pytest.raises(InvalidArgumentError) as error:
+            ChatRequest.from_payload(body(n=value))
+
+        assert error.value.reason.value == "invalid_request"
+        assert "parameter 'n'" in error.value.message
+        assert "an integer" in error.value.message
+
+    @pytest.mark.parametrize("value", [0, 2])
+    def test_refuses_an_n_other_than_the_default_the_gateway_matches(self, value):
+        with pytest.raises(CapabilityError) as error:
+            ChatRequest.from_payload(body(n=value))
+
+        assert error.value.details["capability"] == "multiple_choices"
+        assert error.value.details["parameter"] == "n"
+
+    @pytest.mark.parametrize("name", ["logprobs", "store"])
+    @pytest.mark.parametrize("value", [0, 1, "", [], {}, None])
+    def test_refuses_a_flag_that_is_not_a_boolean(self, name, value):
+        with pytest.raises(InvalidArgumentError) as error:
+            ChatRequest.from_payload(body(**{name: value}))
+
+        assert f"parameter {name!r}" in error.value.message
+        assert "a boolean" in error.value.message
+
+    @pytest.mark.parametrize("name", ["logprobs", "store"])
+    def test_accepts_the_false_default(self, name):
+        assert ChatRequest.from_payload(body(**{name: False})).invocation.model == "text-default"
+
+    @pytest.mark.parametrize(
+        ("name", "capability"),
+        [("logprobs", "log_probabilities"), ("store", "response_storage")],
+    )
+    def test_refuses_a_flag_that_asks_for_the_feature(self, name, capability):
+        with pytest.raises(CapabilityError) as error:
+            ChatRequest.from_payload(body(**{name: True}))
+
+        assert error.value.details["capability"] == capability
+        assert error.value.details["parameter"] == name
+
+    @pytest.mark.parametrize("value", [True, 5.5, "5", [], {}])
+    def test_refuses_a_top_logprobs_that_is_not_an_integer_or_null(self, value):
+        with pytest.raises(InvalidArgumentError) as error:
+            ChatRequest.from_payload(body(top_logprobs=value))
+
+        assert "parameter 'top_logprobs'" in error.value.message
+
+    def test_accepts_a_null_top_logprobs(self):
+        assert ChatRequest.from_payload(body(top_logprobs=None)).invocation.model == "text-default"
+
+    def test_refuses_a_top_logprobs_that_asks_for_log_probabilities(self):
+        with pytest.raises(CapabilityError) as error:
+            ChatRequest.from_payload(body(top_logprobs=5))
+
+        assert error.value.details["capability"] == "log_probabilities"
+        assert error.value.details["parameter"] == "top_logprobs"
+
+    @pytest.mark.parametrize("name", ["logit_bias", "stream_options"])
+    @pytest.mark.parametrize("value", [None, 0, "", []])
+    def test_refuses_a_parameter_that_is_not_an_object(self, name, value):
+        with pytest.raises(InvalidArgumentError) as error:
+            ChatRequest.from_payload(body(**{name: value}))
+
+        assert f"parameter {name!r}" in error.value.message
+        assert "an object" in error.value.message
+
+    @pytest.mark.parametrize("name", ["logit_bias", "stream_options"])
+    def test_accepts_the_empty_object_default(self, name):
+        assert ChatRequest.from_payload(body(**{name: {}})).invocation.model == "text-default"
+
+    @pytest.mark.parametrize(
+        ("name", "value", "capability"),
+        [
+            ("logit_bias", {"123": 5}, "logit_bias"),
+            ("stream_options", {"include_usage": True}, "streaming"),
+        ],
+    )
+    def test_refuses_a_populated_object(self, name, value, capability):
+        with pytest.raises(CapabilityError) as error:
+            ChatRequest.from_payload(body(**{name: value}))
+
+        assert error.value.details["capability"] == capability
+        assert error.value.details["parameter"] == name
+
+    @pytest.mark.parametrize("value", [0, "yes", [], {}])
+    def test_refuses_a_parallel_tool_calls_that_is_not_a_boolean_or_null(self, value):
+        with pytest.raises(InvalidArgumentError) as error:
+            ChatRequest.from_payload(body(parallel_tool_calls=value))
+
+        assert "parameter 'parallel_tool_calls'" in error.value.message
+
+    def test_accepts_a_null_parallel_tool_calls(self):
+        assert (
+            ChatRequest.from_payload(body(parallel_tool_calls=None)).invocation.model
+            == "text-default"
+        )
+
+    @pytest.mark.parametrize("value", ["text", {}, None, 0])
+    def test_refuses_a_modalities_that_is_not_an_array(self, value):
+        with pytest.raises(InvalidArgumentError) as error:
+            ChatRequest.from_payload(body(modalities=value))
+
+        assert "parameter 'modalities'" in error.value.message
+
+    def test_accepts_the_text_only_default(self):
+        assert (
+            ChatRequest.from_payload(body(modalities=["text"])).invocation.model
+            == "text-default"
+        )
+
+    @pytest.mark.parametrize("value", [[], ["text", "audio"]])
+    def test_refuses_a_modalities_that_asks_for_non_text_output(self, value):
+        with pytest.raises(CapabilityError) as error:
+            ChatRequest.from_payload(body(modalities=value))
+
+        assert error.value.details["capability"] == "non_text_output"
+        assert error.value.details["parameter"] == "modalities"
+
+    @pytest.mark.parametrize("name", ["audio", "prediction", "web_search_options"])
+    @pytest.mark.parametrize("value", [[], "", 5])
+    def test_refuses_an_object_parameter_of_the_wrong_type(self, name, value):
+        with pytest.raises(InvalidArgumentError) as error:
+            ChatRequest.from_payload(body(**{name: value}))
+
+        assert f"parameter {name!r}" in error.value.message
+
+    @pytest.mark.parametrize("name", ["audio", "prediction", "web_search_options"])
+    def test_accepts_a_null_object_parameter(self, name):
+        assert ChatRequest.from_payload(body(**{name: None})).invocation.model == "text-default"
+
+    @pytest.mark.parametrize(
+        ("name", "capability"),
+        [
+            ("audio", "audio_output"),
+            ("prediction", "predicted_output"),
+            ("web_search_options", "grounded_search"),
+        ],
+    )
+    def test_refuses_a_populated_object_parameter(self, name, capability):
+        with pytest.raises(CapabilityError) as error:
+            ChatRequest.from_payload(body(**{name: {}}))
+
+        assert error.value.details["capability"] == capability
+        assert error.value.details["parameter"] == name
+
+    @pytest.mark.parametrize("name", ["reasoning_effort", "service_tier", "function_call"])
+    @pytest.mark.parametrize("value", [5, [], {}])
+    def test_refuses_a_string_parameter_of_the_wrong_type(self, name, value):
+        with pytest.raises(InvalidArgumentError) as error:
+            ChatRequest.from_payload(body(**{name: value}))
+
+        assert f"parameter {name!r}" in error.value.message
+
+    @pytest.mark.parametrize("name", ["reasoning_effort", "service_tier", "function_call"])
+    def test_accepts_a_null_string_parameter(self, name):
+        assert ChatRequest.from_payload(body(**{name: None})).invocation.model == "text-default"
+
+    @pytest.mark.parametrize(
+        ("name", "value", "capability"),
+        [
+            ("reasoning_effort", "low", "reasoning_effort"),
+            ("service_tier", "auto", "service_tier"),
+            ("function_call", "none", "legacy_functions"),
+        ],
+    )
+    def test_refuses_a_string_parameter_that_asks_for_the_feature(self, name, value, capability):
+        with pytest.raises(CapabilityError) as error:
+            ChatRequest.from_payload(body(**{name: value}))
+
+        assert error.value.details["capability"] == capability
+        assert error.value.details["parameter"] == name
+
+    @pytest.mark.parametrize("value", ["fn", 5, None])
+    def test_refuses_a_functions_that_is_not_an_array_or_object(self, value):
+        with pytest.raises(InvalidArgumentError) as error:
+            ChatRequest.from_payload(body(functions=value))
+
+        assert "parameter 'functions'" in error.value.message
+
+    @pytest.mark.parametrize("value", [[], {}])
+    def test_accepts_an_empty_functions(self, value):
+        assert ChatRequest.from_payload(body(functions=value)).invocation.model == "text-default"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            [{"type": "function", "function": {"name": "get_weather"}}],
+            {"get_weather": {"description": "Look up the weather"}},
+        ],
+    )
+    def test_refuses_a_populated_functions(self, value):
+        with pytest.raises(CapabilityError) as error:
+            ChatRequest.from_payload(body(functions=value))
+
+        assert error.value.details["capability"] == "legacy_functions"
+        assert error.value.details["parameter"] == "functions"
 
 
 class TestChatCompletion:

@@ -9,7 +9,9 @@ dropped. PRD section 9.5 forbids silently discarding a parameter, and a caller
 told its request succeeded while a parameter was discarded has been misled about
 what the model was asked. A parameter the gateway recognises but cannot honour —
 ``n`` above one, ``logprobs``, the legacy ``functions`` family, ``audio`` — is
-answered with a capability error naming it, and a key the OpenAI format does not
+answered with a capability error naming it, a recognised parameter whose value
+carries the wrong JSON type is answered with an invalid-request error naming
+the parameter and the type supplied, and a key the OpenAI format does not
 define is answered with an invalid-request error naming that key. That is a
 deliberately strict reading of "OpenAI-compatible": the response shapes are the
 compatible part, and the request shape is validated rather than waved through.
@@ -153,43 +155,78 @@ _BASE64_MARKER = ";base64,"
 _SECURE_SCHEMES = frozenset({"http", "https"})
 
 
-def _absent_when_none(value: object) -> bool:
-    return value is None
+def _is_int(value: object) -> bool:
+    # bool is a subclass of int, and JSON true is not an integer
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _absent_when_falsy(value: object) -> bool:
+def _is_bool(value: object) -> bool:
+    return isinstance(value, bool)
+
+
+def _is_text(value: object) -> bool:
+    return isinstance(value, str)
+
+
+def _is_object(value: object) -> bool:
+    return isinstance(value, Mapping)
+
+
+def _is_array(value: object) -> bool:
+    return isinstance(value, list)
+
+
+def _is_array_or_object(value: object) -> bool:
+    return isinstance(value, (list, Mapping))
+
+
+def _nullable(check: Callable[[object], bool]) -> Callable[[object], bool]:
+    def check_or_null(value: object) -> bool:
+        return value is None or check(value)
+
+    return check_or_null
+
+
+def _is_default_of(default: object) -> Callable[[object], bool]:
+    def is_default(value: object) -> bool:
+        return value is None if default is None else value == default
+
+    return is_default
+
+
+def _is_empty(value: object) -> bool:
     return not value
-
-
-def _absent_when_one(value: object) -> bool:
-    return value is None or value == 1
-
-
-def _absent_when_text_only(value: object) -> bool:
-    return value is None or value == ["text"]
 
 
 class _Feature(NamedTuple):
     """An OpenAI parameter the gateway recognises and cannot honour.
 
     ``capability`` names what the parameter asks for, so the refusal says which
-    feature is missing rather than only which key was sent. ``absent`` decides
-    whether the value supplied actually asks for that feature: a parameter whose
-    value is the OpenAI default asks for nothing, and refusing it would reject a
-    request the gateway can serve in full.
+    feature is missing rather than only which key was sent. ``wire`` states the
+    JSON type the value must carry and ``typed`` enforces it on the raw body:
+    a value of another type is malformed input — the caller sent something the
+    format does not define for that key — and is refused as a 400 naming the
+    parameter and the type supplied, before the capability question is reached.
+    ``default`` decides whether a correctly typed value actually asks for that
+    feature: a parameter whose value is the OpenAI default asks for nothing, and
+    refusing it would reject a request the gateway can serve in full.
     """
 
     capability: str
-    absent: Callable[[object], bool]
+    wire: str
+    typed: Callable[[object], bool]
+    default: Callable[[object], bool]
 
 
 _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
-    "n": _Feature("multiple_choices", _absent_when_one),
-    "logprobs": _Feature("log_probabilities", _absent_when_falsy),
-    "top_logprobs": _Feature("log_probabilities", _absent_when_none),
-    "logit_bias": _Feature("logit_bias", _absent_when_falsy),
-    "store": _Feature("response_storage", _absent_when_falsy),
-    "stream_options": _Feature("streaming", _absent_when_falsy),
+    "n": _Feature("multiple_choices", "an integer", _is_int, _is_default_of(1)),
+    "logprobs": _Feature("log_probabilities", "a boolean", _is_bool, _is_default_of(False)),
+    "top_logprobs": _Feature(
+        "log_probabilities", "an integer or null", _nullable(_is_int), _is_default_of(None)
+    ),
+    "logit_bias": _Feature("logit_bias", "an object", _is_object, _is_default_of({})),
+    "store": _Feature("response_storage", "a boolean", _is_bool, _is_default_of(False)),
+    "stream_options": _Feature("streaming", "an object", _is_object, _is_default_of({})),
     # Refused whatever its value, unlike the defaults above. ``true`` asks for
     # parallel tool calls and ``false`` asks for a guarantee of sequential ones,
     # and this slice implements neither and models no distinction between them,
@@ -197,15 +234,31 @@ _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
     # not have (PRD section 9.5). It is refused rather than mapped onto a
     # canonical field, because inventing that field is a contract change and not
     # a translation.
-    "parallel_tool_calls": _Feature("parallel_tool_calls", _absent_when_none),
-    "modalities": _Feature("non_text_output", _absent_when_text_only),
-    "audio": _Feature("audio_output", _absent_when_none),
-    "prediction": _Feature("predicted_output", _absent_when_none),
-    "reasoning_effort": _Feature("reasoning_effort", _absent_when_none),
-    "service_tier": _Feature("service_tier", _absent_when_none),
-    "web_search_options": _Feature("grounded_search", _absent_when_none),
-    "functions": _Feature("legacy_functions", _absent_when_falsy),
-    "function_call": _Feature("legacy_functions", _absent_when_none),
+    "parallel_tool_calls": _Feature(
+        "parallel_tool_calls", "a boolean or null", _nullable(_is_bool), _is_default_of(None)
+    ),
+    "modalities": _Feature("non_text_output", "an array", _is_array, _is_default_of(["text"])),
+    "audio": _Feature(
+        "audio_output", "an object or null", _nullable(_is_object), _is_default_of(None)
+    ),
+    "prediction": _Feature(
+        "predicted_output", "an object or null", _nullable(_is_object), _is_default_of(None)
+    ),
+    "reasoning_effort": _Feature(
+        "reasoning_effort", "a string or null", _nullable(_is_text), _is_default_of(None)
+    ),
+    "service_tier": _Feature(
+        "service_tier", "a string or null", _nullable(_is_text), _is_default_of(None)
+    ),
+    "web_search_options": _Feature(
+        "grounded_search", "an object or null", _nullable(_is_object), _is_default_of(None)
+    ),
+    "functions": _Feature(
+        "legacy_functions", "an array or object", _is_array_or_object, _is_empty
+    ),
+    "function_call": _Feature(
+        "legacy_functions", "a string or null", _nullable(_is_text), _is_default_of(None)
+    ),
 }
 
 _ROLE_NAMES = ", ".join(repr(member.value) for member in Role)
@@ -568,10 +621,13 @@ def _arguments_payload(arguments: Mapping[str, JsonValue] | str | None) -> str:
 def _reject_unsupported_parameters(body: Mapping[str, object]) -> None:
     """Refuse a parameter the gateway cannot honour, naming what it asked for.
 
-    A key the OpenAI format does not define is malformed input. A key it does
-    define, whose value asks for something this gateway has no representation
-    for, is a capability the route cannot provide — the request is well formed
-    and the refusal is about the feature (PRD section 9.5).
+    A key the OpenAI format does not define is malformed input, and so is a key
+    it does define whose value carries a type that format does not define for
+    it: a wrong-typed value is refused as a 400 naming the parameter and the
+    type supplied, which is a different error from the unsupported parameter.
+    A correctly typed value that asks for something this gateway has no
+    representation for is a capability the route cannot provide — the request is
+    well formed and the refusal is about the feature (PRD section 9.5).
     """
     for name in sorted(set(body) - _CHAT_REQUEST_KEYS):
         feature = _UNSUPPORTED_FEATURES.get(name)
@@ -581,7 +637,13 @@ def _reject_unsupported_parameters(body: Mapping[str, object]) -> None:
                 f"the request body has unsupported parameter {name!r}; supported parameters are "
                 f"{supported}"
             )
-        if feature.absent(body[name]):
+        value = body[name]
+        if not feature.typed(value):
+            raise InvalidArgumentError(
+                f"the request body parameter {name!r} must be {feature.wire}, got "
+                f"{_json_type(value)}"
+            )
+        if feature.default(value):
             continue
         raise CapabilityError(
             f"the gateway cannot honour {name!r}; it would request {feature.capability!r}, which "
