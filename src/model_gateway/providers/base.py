@@ -39,7 +39,11 @@ What a provider must not own (PRD section 9.2):
 Streaming is a separate capability (:class:`StreamingTextProvider`), not a mode
 of :class:`TextProvider`: a provider that cannot stream is refused rather than
 asked to fake token-by-token output from a whole answer (PRD sections 5.3, 16
-and 9.5).
+and 9.5). Embeddings are separate in the same way
+(:class:`EmbeddingProvider`): the operation is a different upstream call with a
+different answer, so a provider that cannot embed is refused rather than handed
+an embeddings request it would answer with something else (PRD sections 4.7,
+6.3 and 9.6).
 """
 
 from collections.abc import AsyncIterator
@@ -49,9 +53,15 @@ from typing import Protocol, runtime_checkable
 
 from model_gateway.config.routes import Route
 from model_gateway.domain import InvocationRequest, InvocationResponse
+from model_gateway.domain.embeddings import EmbeddingRequest, EmbeddingResponse
 from model_gateway.domain.streaming import StreamEvent
 
-__all__ = ["AttemptContext", "StreamingTextProvider", "TextProvider"]
+__all__ = [
+    "AttemptContext",
+    "EmbeddingProvider",
+    "StreamingTextProvider",
+    "TextProvider",
+]
 
 
 @dataclass(frozen=True)
@@ -186,6 +196,70 @@ class StreamingTextProvider(Protocol):
         A provider that cannot stream does not implement this method at all;
         the capability refusal is the gateway core's, raised before the first
         event is promised to a caller.
+        """
+        ...
+
+
+@runtime_checkable
+class EmbeddingProvider(Protocol):
+    """A provider that can turn text into vectors (PRD sections 4.7, 6.3 and 9.6).
+
+    Embedding is a capability of its own, not a mode of :class:`TextProvider`: it
+    is a different upstream operation with a different answer — vectors instead
+    of an answer in words — so a provider that cannot embed must be *refused*
+    rather than handed the request and left to improvise. There is no honest
+    degradation here: a chat provider asked for embeddings could only invent a
+    vector or fail, and either would tell the caller its request was served when
+    it was not (PRD section 9.5).
+
+    The protocol is structural and runtime-checkable, so the gateway core can ask
+    ``isinstance(provider, EmbeddingProvider)`` before it accepts an embeddings
+    request and raise a capability error naming ``embeddings`` when the answer is
+    no. A provider that implements :meth:`embed` satisfies it; one that does not
+    is simply not an embedding provider, and no attribute is faked onto it.
+
+    ``route`` is the resolved route — its endpoint, credential, authentication
+    type, headers, provider dialect and upstream model — and it is the embeddings
+    route the registry selected for the public model, never a chat route reached
+    through the same provider. ``request`` is the canonical embeddings request,
+    whose ``input`` is the texts to embed in the caller's order. ``context`` is
+    this attempt's own execution facts (:class:`AttemptContext`), carrying the
+    budget the attempt may use exactly as it does for
+    :meth:`TextProvider.complete`.
+
+    What the provider returns is upstream data translated into the canonical
+    shape: one vector per input text, each carrying the position it reported, the
+    usage the upstream reported, and the invocation the attempt belongs to. The
+    gateway core imposes the caller's ordering and checks the vectors against the
+    dimensionality the route declares, so a provider that returned a
+    wrong-shaped answer is refused there rather than passing it on.
+    """
+
+    async def embed(
+        self,
+        route: Route,
+        request: EmbeddingRequest,
+        context: AttemptContext,
+    ) -> EmbeddingResponse:
+        """Call the upstream named by ``route`` and return the canonical vectors.
+
+        Performs one gateway attempt for exactly one route, under the same policy
+        as :meth:`TextProvider.complete`: it does not retry, does not fall back to
+        another route, and does not choose between routes (PRD sections 9.2 and
+        11.3). It applies the budget on ``context`` to the call it makes, so the
+        upstream client is given the gateway's deadline rather than one of its
+        own choosing (PRD section 9.6).
+
+        The vectors come back in the order the upstream reported them, each
+        carrying its own index. Ordering them against the caller's input is the
+        gateway core's work, not the provider's: the provider reports what the
+        upstream said, and a provider that silently reordered or renumbered the
+        answer would hide a difference the gateway is required to notice.
+
+        One attempt is not the same as one upstream request. An implementation
+        may reach a library that retries internally without the gateway's
+        knowledge, so the wire-request count can exceed the attempt count and
+        must never be reported as it.
         """
         ...
 

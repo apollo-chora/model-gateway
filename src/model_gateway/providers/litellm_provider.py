@@ -98,6 +98,36 @@ Everything else
     Adding a dialect means adding a verified entry to :data:`SUPPORTED_DIALECTS`
     together with the test that proves its path.
 
+The embedding entry point
+------------------------
+``litellm.aembedding`` is a different library entry point from
+``litellm.acompletion``, and the gateway calls it for the embeddings operation
+exactly as PRD section 9.6's table lays the call out: the provider-prefixed
+model string, the route's base URL and credential, the texts to embed, the
+``dimensions`` the caller asked for, and ``num_retries=0``. The per-dialect
+client is :meth:`LiteLLMProvider._attempt_client`'s, never a second
+construction: the embedding path reaches the wire through exactly the one
+client the text path reaches it through, and the injected object is the one
+each dialect's embedding handler reads — an ``openai.AsyncOpenAI`` on the SDK
+path and an ``AsyncHTTPHandler`` on the generic one, where anything else is
+silently discarded and substituted with the library's own default. The
+dialect's refusal happens before any client is built, so an unverified dialect
+cannot reach the embedding call either.
+
+``encoding_format`` is deliberately not sent. The gateway's embeddings answer
+is the float form, which is also the upstream's own default, so the parameter
+is honoured by not asking for anything else; the gateway will not answer a
+caller who asked for ``base64`` with floats, and refuses that request with a
+capability error instead (PRD section 9.5).
+
+The translation of the upstream answer is this module's, and it reports what
+the upstream said rather than what the caller asked for: each vector carries
+the position the upstream reported, and the usage is the upstream's. Whether
+those positions can be matched to the caller's input, and whether the vectors
+match the dimensionality the route declares, is the inference service's check
+(PRD sections 4.7 and 9.6), because that check reads deployment configuration a
+provider does not own.
+
 What is still not closed
 ------------------------
 The generic path's connection-error retry is a second upstream request that no
@@ -130,7 +160,7 @@ directly, is :file:`tests/conftest.py`.
 """
 
 import ssl
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
 from typing import Any, Final
@@ -139,10 +169,14 @@ import httpx
 
 from model_gateway.config.routes import Route
 from model_gateway.domain import InvocationRequest, InvocationResponse
+from model_gateway.domain.embeddings import Embedding, EmbeddingRequest, EmbeddingResponse
 from model_gateway.domain.streaming import StreamEvent, StreamEventKind
-from model_gateway.errors import FailedPreconditionError, GatewayError
+from model_gateway.errors import FailedPreconditionError, GatewayError, InternalError
 from model_gateway.providers._litellm import AsyncHTTPHandler, litellm, openai
 from model_gateway.providers.base import AttemptContext
+from model_gateway.providers.litellm_translation import (
+    _usage as _canonical_usage,
+)
 from model_gateway.providers.litellm_translation import (
     from_litellm_chunk,
     from_litellm_response,
@@ -307,6 +341,15 @@ class LiteLLMProvider:
     separate from :meth:`complete` — a provider that cannot stream is refused
     by the gateway core rather than asked to fake token-by-token output from a
     whole answer (PRD sections 5.3, 16 and 9.5).
+
+    It serves embeddings through :meth:`embed`, which is the embeddings
+    operation rather than a mode of the text one: a different library entry
+    point, a different call, and a different canonical answer. It satisfies
+    :class:`~model_gateway.providers.base.EmbeddingProvider` structurally, and
+    it is the same single gateway attempt under the same controls — the
+    per-dialect client, ``num_retries=0``, the attempt timeout, the error
+    mapping — so the embeddings path is not a second, less careful way to reach
+    an upstream (PRD sections 4.7 and 9.6).
 
     What a caller may inject, and what it may not
     --------------------------------------------
@@ -525,6 +568,50 @@ class LiteLLMProvider:
         if finish is not None:
             yield replace(finish, sequence=sequence)
 
+    async def embed(
+        self,
+        route: Route,
+        request: EmbeddingRequest,
+        context: AttemptContext,
+    ) -> EmbeddingResponse:
+        """Perform the one embeddings attempt for this route (PRD sections 4.7 and 9.6).
+
+        The embedding counterpart of :meth:`complete`, and the same single
+        gateway attempt under the same controls: the parameters are the
+        embeddings translation of ``route`` and ``request``
+        (:func:`_embedding_params`) — the provider-prefixed model string, the
+        resolved base URL, the route's credential and extra headers, the texts,
+        the ``dimensions`` the caller asked for, and ``num_retries=0`` — plus
+        this attempt's own timeout and the per-dialect client built for this
+        attempt's budget, closed when the attempt ends. The client construction
+        is :meth:`_attempt_client`'s, not duplicated here: the dialect check and
+        the per-dialect wrapping are the security boundary, and this path reaches
+        the wire through exactly the same one as the text path.
+
+        The answer is normalised through :func:`_from_litellm_embedding` and
+        returned as the canonical response. Errors are mapped exactly as
+        :meth:`complete` maps them: a
+        :class:`~model_gateway.errors.GatewayError` — a dialect refusal, or an
+        upstream answer the canonical representation cannot carry — propagates
+        unchanged, and anything the call raises is mapped by
+        :func:`~model_gateway.providers.litellm_translation.map_litellm_error` and
+        re-raised, so a caller never sees a provider-shaped error. Cancellation
+        propagates unmapped, because it is a :exc:`BaseException` the mapping
+        does not catch (PRD section 15).
+        """
+        params = _embedding_params(route, request)
+        params["timeout"] = context.timeout
+        try:
+            async with self._attempt_client(route, context.timeout) as client:
+                response = await litellm.aembedding(**params, client=client)
+        except GatewayError:
+            raise
+        except Exception as exc:
+            raise map_litellm_error(exc) from exc
+        return _from_litellm_embedding(
+            route, request, response, invocation_id=context.invocation_id
+        )
+
     def _attempt_client(
         self, route: Route, budget: float | None
     ) -> AbstractAsyncContextManager[Any]:
@@ -546,3 +633,139 @@ class LiteLLMProvider:
         return _openai_sdk_client(
             route, budget, self._resolver, self._verify, self._inner_factory
         )
+
+
+def _embedding_params(route: Route, request: EmbeddingRequest) -> dict[str, object]:
+    """Translate an embeddings request into ``litellm.aembedding`` keyword arguments.
+
+    The route supplies everything the upstream call needs to be addressed, exactly
+    as it does for a completion: the provider-prefixed model string
+    ``<format>/<model_id>`` (PRD section 9.6), the resolved base URL, the route's
+    credential and its non-authentication extra headers. Retries are disabled
+    with ``num_retries=0`` because the gateway core owns the retry loop and the
+    invocation deadline, so there is exactly one retry layer and one deadline
+    (PRD section 11.3).
+
+    The request supplies the texts to embed, in the caller's order, and the
+    ``dimensions`` it asks for. ``dimensions`` is sent when the caller states one
+    and omitted otherwise, so the provider's own default applies; the gateway
+    deliberately substitutes no vendor default (PRD section 5.1). The route
+    model carries no flag for whether the route accepts the parameter, so the
+    gateway forwards what the caller asked for rather than dropping it, and
+    checks the answer's shape against the dimensionality the route declares
+    (PRD sections 6.3 and 9.6).
+
+    ``encoding_format`` is deliberately not sent: the gateway's embeddings answer
+    is the float form, which is the upstream's own default, so the parameter is
+    honoured by asking for nothing else. A caller who asked for ``base64`` is
+    refused by the gateway core with a capability error rather than answered in
+    floats (PRD section 9.5).
+
+    ``user`` and ``metadata`` are not forwarded. They are caller bookkeeping the
+    canonical request carries, and PRD section 5.1 forbids forwarding either to
+    the model or to the provider.
+    """
+    params: dict[str, object] = {
+        "model": route.litellm_model,
+        "api_base": route.base_url,
+        "api_key": route.api_key,
+        "extra_headers": dict(route.extra_headers),
+        "num_retries": 0,
+        "input": list(request.input),
+    }
+    if request.dimensions is not None:
+        params["dimensions"] = request.dimensions
+    return params
+
+
+def _from_litellm_embedding(
+    route: Route,
+    request: EmbeddingRequest,
+    response: EmbeddingResponse,
+    *,
+    invocation_id: str | None,
+) -> EmbeddingResponse:
+    """Normalise a LiteLLM embeddings answer into the canonical response.
+
+    ``response`` is upstream data, never forwarded unchanged (PRD section 9).
+    Each vector is read with the position the upstream reported, and the usage
+    is the upstream's, mapped by the same translation a completion's usage goes
+    through so the two cannot drift apart. The vectors are *not* reordered here:
+    the upstream's own order and indices are reported verbatim, and matching them
+    to the caller's input is the inference service's work, because that check
+    reads the caller's request and the deployment's declared dimensions —
+    neither of which a provider owns (PRD sections 4.7 and 9.6).
+
+    Raises :class:`~model_gateway.errors.InternalError` naming the field when the
+    upstream answer carries a semantic the canonical representation cannot
+    carry: a vector that is not a list of numbers — a base64-encoded string, say
+    — or a position that is not an integer. A refusal that recurs is evidence
+    about the canonical model, not a licence to widen the ignored set, so the
+    refusal stands rather than the value being coerced into a shape it never had
+    (PRD section 9.1).
+    """
+    if not invocation_id:
+        raise FailedPreconditionError(
+            "the attempt carries no invocation identifier, and the canonical embeddings "
+            "response must state the invocation it belongs to; the gateway mints that "
+            "identifier before the call"
+        )
+    return EmbeddingResponse(
+        model=request.model,
+        upstream_model=route.model_id,
+        data=tuple(_embedding_from(item) for item in _embedding_records(response)),
+        usage=_canonical_usage(getattr(response, "usage", None)),
+        invocation_id=invocation_id,
+    )
+
+
+def _embedding_records(response: EmbeddingResponse) -> tuple[object, ...]:
+    """The records the upstream answer carries, as an iterable of records.
+
+    The library types ``data`` as a list and fills it with an empty one when the
+    upstream reported nothing, so the usual case is a list. A value that is not
+    iterable at all — a ``null`` the library passed through, say — becomes an
+    empty tuple here rather than a ``TypeError`` escaping the binding: the
+    gateway core then refuses the answer for carrying no vector per input, which
+    is a gateway error a caller can act on rather than an unclassified failure
+    (PRD sections 5.4 and 9.1).
+    """
+    records = getattr(response, "data", None)
+    if records is None or isinstance(records, str | bytes):
+        return ()
+    try:
+        return tuple(records)
+    except TypeError:
+        return ()
+
+
+def _embedding_from(item: object) -> Embedding:
+    """One upstream embedding record as a canonical vector, position included.
+
+    The pinned library hands the records back either as
+    :class:`~litellm.types.utils.Embedding` objects or as the raw dictionaries
+    its own converter produced, so both shapes are read the same way. A record
+    whose position or values the canonical type cannot carry is refused rather
+    than coerced (PRD section 9.1).
+    """
+    index = _embedding_field(item, "index")
+    values = _embedding_field(item, "embedding")
+    if isinstance(values, str):
+        raise InternalError(
+            "the upstream returned a base64-encoded embedding vector, which the canonical "
+            "embedding representation cannot carry"
+        )
+    try:
+        return Embedding(index=index, values=tuple(values))
+    except (TypeError, ValueError) as error:
+        raise InternalError(
+            "the upstream returned an embedding record the canonical representation cannot "
+            "carry"
+        ) from error
+
+
+def _embedding_field(item: object, name: str) -> object:
+    """One field of an upstream embedding record, whichever shape it arrived in."""
+    if isinstance(item, Mapping):
+        return item.get(name)
+    return getattr(item, name, None)
