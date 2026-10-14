@@ -2,23 +2,38 @@
   "invocation_id": "inv-9b21c4",
   "model": "image-default",
   "upstream_model": "primary-image-model",
-  "text": "",
-  "tool_calls": [],
-  "images": [
+  "content": [
+    {
+      "type": "text",
+      "text": "Here is the first draft:"
+    },
     {
       "type": "image",
       "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
       "url": null,
       "media_type": "image/png"
+    },
+    {
+      "type": "text",
+      "text": "and here is the alternative:"
+    },
+    {
+      "type": "image",
+      "data": null,
+      "url": "https://images.example/draft-2.png",
+      "media_type": "image/png"
     }
   ],
   "finish_reason": "stop",
+  "raw_finish_reason": "stop",
   "usage": {
     "input_tokens": 12,
     "output_tokens": null,
     "total_tokens": 12,
     "cached_tokens": null,
-    "source": "estimate"
+    "estimated_fields": [
+      "total_tokens"
+    ]
   },
   "estimated_cost": null,
   "cost_currency": null,

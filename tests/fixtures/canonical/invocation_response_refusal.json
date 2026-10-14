@@ -1,0 +1,25 @@
+{
+  "invocation_id": "inv-4d80be",
+  "model": "text-default",
+  "upstream_model": "primary-chat-model",
+  "content": [
+    {
+      "type": "refusal",
+      "text": "I can't help with that request."
+    }
+  ],
+  "finish_reason": "content_filter",
+  "raw_finish_reason": "content_filter",
+  "usage": {
+    "input_tokens": 9,
+    "output_tokens": 7,
+    "total_tokens": 16,
+    "cached_tokens": null,
+    "estimated_fields": []
+  },
+  "estimated_cost": null,
+  "cost_currency": null,
+  "attempt_count": 1,
+  "fallback_used": false,
+  "idempotency_status": "not_applicable"
+}

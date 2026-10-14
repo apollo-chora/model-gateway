@@ -11,14 +11,20 @@ actually served it, how many provider attempts that took, whether a fallback was
 used, what happened to any idempotency key, and what the call cost. A caller that
 cannot see those cannot reconcile its own accounting, nor tell a first attempt
 from a rescued one (PRD sections 5.2, 11.2, 12 and 13).
+
+The answer itself is an ordered sequence of output items rather than a text field
+beside an image field, and the finish reason is reported beside the provider's own
+untranslated reason. Both exist for the same reason: a canonical state that cannot
+distinguish two different upstream events has already lost information by the time
+a caller sees it (PRD sections 5.2 and 9.1).
 """
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from typing import Self
 
-from model_gateway.domain.content import ImagePart, Message, as_image_parts, as_messages
+from model_gateway.domain.content import Message, as_messages
 from model_gateway.domain.generation import (
     FinishReason,
     GenerationConfig,
@@ -32,6 +38,13 @@ from model_gateway.domain.json_value import (
     JsonValue,
     thaw_json,
 )
+from model_gateway.domain.output import (
+    OutputItem,
+    as_output_items,
+    output_item_from_dict,
+    output_item_to_dict,
+)
+from model_gateway.domain.parts import ImagePart, RefusalPart, TextPart
 from model_gateway.domain.serialization import (
     as_enumeration,
     as_int,
@@ -52,7 +65,6 @@ from model_gateway.domain.tools import (
     ToolChoice,
     ToolChoiceMode,
     ToolDefinition,
-    as_tool_calls,
     as_tool_choice,
     as_tool_definitions,
 )
@@ -87,10 +99,9 @@ _RESPONSE_KEYS = frozenset(
         "invocation_id",
         "model",
         "upstream_model",
-        "text",
-        "tool_calls",
-        "images",
+        "content",
         "finish_reason",
+        "raw_finish_reason",
         "usage",
         "estimated_cost",
         "cost_currency",
@@ -99,6 +110,25 @@ _RESPONSE_KEYS = frozenset(
         "idempotency_status",
     }
 )
+
+_RESERVED_METADATA_KEYS = _REQUEST_KEYS | frozenset(
+    parameter.name for parameter in fields(GenerationConfig)
+)
+"""Field names metadata may not use: the canonical request and its generation parameters.
+
+Derived from the types themselves rather than restated, so a parameter added to
+``GenerationConfig`` is covered by the metadata rule without a second edit.
+"""
+
+FORWARDABLE_METADATA_KEYS: frozenset[str] = frozenset()
+"""Metadata keys a separately specified feature has claimed, and may forward.
+
+It is empty: no feature consumes metadata today, so no metadata reaches a model
+or a provider, and a key belongs here only once the feature that consumes it has
+its own specification. PRD section 5.1 defines ``metadata`` as request metadata,
+and treating it as a forwarding channel by default is what would turn it into a
+way to smuggle an unrepresentable semantic upstream.
+"""
 
 _CURRENCY_LENGTH = 3
 
@@ -158,15 +188,30 @@ class InvocationRequest:
     5.1. A ``Role.SYSTEM`` message inside ``messages`` is the conversation-level
     equivalent, and the two are not interchangeable: the gateway forwards both
     and merges neither, because silently folding one into the other would change
-    what the provider sees (PRD section 9.3).
+    what the provider sees (PRD section 9.1).
 
     ``fallback_models`` names the public model IDs the caller permits as
     fallbacks. An empty tuple means the caller imposes no restriction and the
     configured route order applies (PRD section 11.2).
 
-    ``metadata`` is non-sensitive request metadata. It is arbitrary JSON held as
-    an immutable mapping, so a validated request cannot acquire a field
-    afterwards, and the gateway must not place credentials in it.
+    ``metadata`` is non-sensitive request metadata and nothing more. It is
+    arbitrary JSON held as an immutable mapping, so a validated request cannot
+    acquire a field afterwards, and the gateway must not place credentials in it.
+
+    Two rules bound what it may carry. Both are enforced here rather than left as
+    prose, because a semantic parked in metadata is a semantic the gateway
+    neither represents nor forwards, and it would disappear between the caller
+    and the provider exactly as a dropped parameter does (PRD section 9.1):
+
+    * It is never forwarded to the model or the provider unless a separately
+      specified feature consumes a key. No feature does today, so the binding
+      must not send it upstream; :attr:`forwardable_metadata` states which keys
+      such a feature has claimed, and is empty.
+    * It is non-inference-semantic. A key naming a canonical invocation field or
+      a generation parameter is refused, because such a key can only be an
+      attempt to carry a model parameter outside the contract the gateway
+      validates — where it would either be dropped silently or reach the provider
+      unvalidated.
     """
 
     model: str
@@ -215,7 +260,22 @@ class InvocationRequest:
         object.__setattr__(
             self, "fallback_models", as_text_tuple("fallback_models", self.fallback_models)
         )
-        object.__setattr__(self, "metadata", as_json_object("metadata", self.metadata))
+        metadata = as_json_object("metadata", self.metadata)
+        _check_metadata_keys(metadata)
+        object.__setattr__(self, "metadata", metadata)
+
+    @property
+    def forwardable_metadata(self) -> FrozenJsonObject:
+        """The metadata a separately specified feature has claimed; empty while none does.
+
+        This is the whole of the metadata the gateway may send upstream. A
+        consumer that needs to know what may be forwarded reads it here rather
+        than reaching for ``metadata`` directly, so a key cannot start reaching a
+        provider merely because some call site forgot the rule.
+        """
+        return FrozenJsonObject(
+            {key: value for key, value in self.metadata.items() if key in FORWARDABLE_METADATA_KEYS}
+        )
 
     def to_dict(self) -> dict[str, JsonDocument]:
         return {
@@ -292,7 +352,24 @@ class InvocationResponse:
     accounting (PRD sections 5.2 and 11.2). ``upstream_model`` is the route's
     configured model ID, not the provider-prefixed ``<format>/<model_id>`` string
     the binding builds, because the provider format is a binding detail
-    (PRD section 9.4).
+    (PRD section 9.6).
+
+    ``content`` is the model's answer as an ordered sequence of output items, and
+    it is the only place the answer is stored. Text, images, refusals and tool
+    calls can interleave — a model may emit text, then an image, then more text,
+    or explain itself, call a tool and explain the result — and separate ``text``,
+    ``images`` and ``tool_calls`` fields cannot express that: concatenating the
+    text parts loses where the images fell. ``text``, ``images``, ``tool_calls``
+    and ``refusals`` are therefore derived views over ``content``, convenient for
+    the common case and never authoritative.
+
+    ``finish_reason`` is the gateway's classification, and ``raw_finish_reason``
+    is the provider's own reason recorded verbatim. The pair exists because
+    ``UNKNOWN`` must never mean "the gateway deleted what upstream told us": when
+    a reason could not be classified, the raw value still says what arrived, and
+    ``None`` means the provider supplied no reason at all. The classification is
+    checked against its source — a reason the vocabulary recognises cannot be
+    reported as anything else — so a consumer can trust that the two agree.
 
     ``attempt_count`` counts provider attempts, including retries of the same
     route, and is at least one because a response exists only once an attempt
@@ -309,10 +386,9 @@ class InvocationResponse:
     model: str
     upstream_model: str
     invocation_id: str | None = None
-    text: str = ""
-    tool_calls: tuple[ToolCall, ...] = ()
-    images: tuple[ImagePart, ...] = ()
+    content: tuple[OutputItem, ...] = ()
     finish_reason: FinishReason = FinishReason.UNKNOWN
+    raw_finish_reason: str | None = None
     usage: Usage = field(default_factory=Usage)
     estimated_cost: float | None = None
     cost_currency: str | None = None
@@ -331,6 +407,10 @@ class InvocationResponse:
                 "currency, or a currency without an amount, is not a cost the gateway can report"
             )
 
+        finish_reason = _as_finish_reason(self.finish_reason)
+        raw_finish_reason = _as_raw_finish_reason(self.raw_finish_reason)
+        _check_finish_reason(finish_reason, raw_finish_reason)
+
         object.__setattr__(self, "model", as_required_text("model", self.model))
         object.__setattr__(
             self, "upstream_model", as_required_text("upstream_model", self.upstream_model)
@@ -338,10 +418,9 @@ class InvocationResponse:
         object.__setattr__(
             self, "invocation_id", as_optional_text("invocation_id", self.invocation_id)
         )
-        object.__setattr__(self, "text", as_text("text", self.text))
-        object.__setattr__(self, "tool_calls", as_tool_calls("tool_calls", self.tool_calls))
-        object.__setattr__(self, "images", as_image_parts("images", self.images))
-        object.__setattr__(self, "finish_reason", _as_finish_reason(self.finish_reason))
+        object.__setattr__(self, "content", as_output_items("content", self.content))
+        object.__setattr__(self, "finish_reason", finish_reason)
+        object.__setattr__(self, "raw_finish_reason", raw_finish_reason)
         object.__setattr__(self, "usage", as_usage("usage", self.usage))
         object.__setattr__(self, "estimated_cost", estimated_cost)
         object.__setattr__(self, "cost_currency", cost_currency)
@@ -361,15 +440,34 @@ class InvocationResponse:
             ),
         )
 
+    @property
+    def text(self) -> str:
+        """The text parts concatenated in order; derived from ``content``, never stored."""
+        return "".join(item.text for item in self.content if isinstance(item, TextPart))
+
+    @property
+    def images(self) -> tuple[ImagePart, ...]:
+        """The image parts in order; derived from ``content``, never stored."""
+        return tuple(item for item in self.content if isinstance(item, ImagePart))
+
+    @property
+    def tool_calls(self) -> tuple[ToolCall, ...]:
+        """The tool calls in order; derived from ``content``, never stored."""
+        return tuple(item for item in self.content if isinstance(item, ToolCall))
+
+    @property
+    def refusals(self) -> tuple[RefusalPart, ...]:
+        """The refusal parts in order; derived from ``content``, never stored."""
+        return tuple(item for item in self.content if isinstance(item, RefusalPart))
+
     def to_dict(self) -> dict[str, JsonDocument]:
         return {
             "invocation_id": self.invocation_id,
             "model": self.model,
             "upstream_model": self.upstream_model,
-            "text": self.text,
-            "tool_calls": [call.to_dict() for call in self.tool_calls],
-            "images": [image.to_dict() for image in self.images],
+            "content": [output_item_to_dict(item) for item in self.content],
             "finish_reason": self.finish_reason.value,
+            "raw_finish_reason": self.raw_finish_reason,
             "usage": self.usage.to_dict(),
             "estimated_cost": self.estimated_cost,
             "cost_currency": self.cost_currency,
@@ -392,16 +490,12 @@ class InvocationResponse:
             invocation_id=as_optional_text(
                 f"{where} 'invocation_id'", payload.get("invocation_id")
             ),
-            text=as_text(f"{where} 'text'", payload.get("text", "")),
-            tool_calls=tuple(
-                ToolCall.from_dict(item)
-                for item in as_sequence(f"{where} 'tool_calls'", payload.get("tool_calls"))
-            ),
-            images=tuple(
-                ImagePart.from_dict(item)
-                for item in as_sequence(f"{where} 'images'", payload.get("images"))
+            content=tuple(
+                output_item_from_dict(item)
+                for item in as_sequence(f"{where} 'content'", payload.get("content"))
             ),
             finish_reason=_as_finish_reason(payload.get("finish_reason")),
+            raw_finish_reason=_as_raw_finish_reason(payload.get("raw_finish_reason")),
             usage=_nested(payload.get("usage"), Usage.from_dict, Usage()),
             estimated_cost=as_optional_float(
                 f"{where} 'estimated_cost'", payload.get("estimated_cost"), minimum=0.0
@@ -424,7 +518,7 @@ class InvocationResponse:
 
 
 def _check_tool_choice(tool_choice: ToolChoice | None, tools: tuple[ToolDefinition, ...]) -> None:
-    """Refuse a tool choice the declared tools cannot satisfy (PRD section 9.3)."""
+    """Refuse a tool choice the declared tools cannot satisfy (PRD section 9.5)."""
     if tool_choice is None or tool_choice.mode in (ToolChoiceMode.AUTO, ToolChoiceMode.NONE):
         return
     if not tools:
@@ -454,6 +548,58 @@ def _as_finish_reason(value: object) -> FinishReason:
     if value is None or isinstance(value, str):
         return FinishReason.coerce(value)
     raise ValueError(f"finish_reason must be a string, got {describe(value)}")
+
+
+def _as_raw_finish_reason(value: object) -> str | None:
+    """The provider's own finish reason, recorded verbatim, or ``None`` if it gave none.
+
+    The value is kept exactly as the provider supplied it, including an empty
+    string. The difference between "the provider said nothing" and "the provider
+    said something the gateway could not classify" is the whole reason for
+    keeping it, and a verbatim record is not something to tidy up (PRD 5.2).
+    """
+    if value is None:
+        return None
+    return as_text("raw_finish_reason", value)
+
+
+def _check_finish_reason(finish_reason: FinishReason, raw: str | None) -> None:
+    """Refuse a classification the recorded source reason contradicts.
+
+    A raw reason the vocabulary recognises has exactly one correct
+    classification, so reporting another one leaves a consumer unable to tell
+    which of the two to believe. A raw reason the vocabulary does not recognise
+    is left to the binding's own judgement — including ``UNKNOWN``, which is the
+    honest answer when the gateway has not been taught the reason — and ``None``
+    means the provider supplied none (PRD section 5.2).
+    """
+    if raw is None:
+        return
+    recognised = FinishReason.coerce(raw)
+    if recognised is not FinishReason.UNKNOWN and recognised is not finish_reason:
+        raise ValueError(
+            f"finish_reason {finish_reason.value!r} contradicts raw_finish_reason {raw!r}, which "
+            f"the gateway classifies as {recognised.value!r}; a response must not report a "
+            f"classification its own recorded source does not support"
+        )
+
+
+def _check_metadata_keys(metadata: Mapping[str, JsonValue]) -> None:
+    """Refuse metadata that names a canonical field (PRD section 9.1).
+
+    Metadata is non-inference-semantic. A key that spells a canonical invocation
+    or generation parameter is an attempt to carry a model parameter outside the
+    contract the gateway validates, and such a parameter would either be dropped
+    silently or reach a provider unchecked.
+    """
+    reserved = sorted(set(metadata) & _RESERVED_METADATA_KEYS)
+    if reserved:
+        raise ValueError(
+            f"metadata key {reserved[0]!r} is a canonical invocation field name; metadata is "
+            f"non-inference-semantic and is never forwarded to a model or provider, so a model "
+            f"parameter parked there is a semantic the gateway neither represents nor sends "
+            f"(PRD section 9.1)"
+        )
 
 
 def _as_currency(where: str, value: object) -> str | None:
