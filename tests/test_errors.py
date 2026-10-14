@@ -16,6 +16,7 @@ from model_gateway.errors import (
     GrpcStatus,
     InternalError,
     InvalidArgumentError,
+    MalformedResponseError,
     ModelNotFoundError,
     NotFoundError,
     PermissionDeniedError,
@@ -26,7 +27,8 @@ from model_gateway.errors import (
     sanitise_text,
 )
 
-# Every category in PRD section 5.4, plus the capability category of PRD 9.5.
+# Every category in PRD section 5.4, the malformed-response category of PRD
+# 11.2, plus the capability category of PRD 9.5.
 CATEGORY_TABLE = (
     (InvalidArgumentError, 400, GrpcStatus.INVALID_ARGUMENT, ErrorReason.INVALID_REQUEST),
     (UnauthenticatedError, 401, GrpcStatus.UNAUTHENTICATED, ErrorReason.AUTHENTICATION_REQUIRED),
@@ -38,6 +40,7 @@ CATEGORY_TABLE = (
     (DeadlineExceededError, 504, GrpcStatus.DEADLINE_EXCEEDED, ErrorReason.DEADLINE_EXCEEDED),
     (UnavailableError, 503, GrpcStatus.UNAVAILABLE, ErrorReason.PROVIDER_UNAVAILABLE),
     (InternalError, 500, GrpcStatus.INTERNAL, ErrorReason.INTERNAL_ERROR),
+    (MalformedResponseError, 502, GrpcStatus.UNKNOWN, ErrorReason.MALFORMED_RESPONSE),
     (CapabilityError, 422, GrpcStatus.FAILED_PRECONDITION, ErrorReason.UNSUPPORTED_CAPABILITY),
 )
 
@@ -58,6 +61,7 @@ CATEGORY_REASONS = {
     DeadlineExceededError: (ErrorReason.DEADLINE_EXCEEDED,),
     UnavailableError: (ErrorReason.PROVIDER_UNAVAILABLE,),
     InternalError: (ErrorReason.INTERNAL_ERROR,),
+    MalformedResponseError: (ErrorReason.MALFORMED_RESPONSE,),
     CapabilityError: (ErrorReason.UNSUPPORTED_CAPABILITY,),
 }
 
@@ -80,6 +84,7 @@ STABLE_REASON_VALUES = frozenset(
         "deadline_exceeded",
         "provider_unavailable",
         "internal_error",
+        "malformed_response",
         "unsupported_capability",
     }
 )
@@ -95,6 +100,7 @@ GRPC_STATUS_NAMES = frozenset(
         "DEADLINE_EXCEEDED",
         "UNAVAILABLE",
         "INTERNAL",
+        "UNKNOWN",
     }
 )
 
@@ -755,3 +761,47 @@ def test_only_a_capability_error_uses_the_unprocessable_content_status():
     ]
 
     assert unprocessable == ["CapabilityError"]
+
+
+# --- malformed upstream responses -----------------------------------------
+
+
+def test_a_malformed_response_error_is_its_own_category():
+    error = MalformedResponseError(
+        "the upstream returned fewer vectors than the caller's inputs"
+    )
+
+    assert not isinstance(error, InternalError)
+    assert not isinstance(error, UnavailableError)
+    assert not issubclass(MalformedResponseError, InternalError)
+    assert not issubclass(MalformedResponseError, UnavailableError)
+
+
+def test_a_malformed_response_error_is_a_bad_gateway():
+    """The provider answered; what it said is what cannot serve the request."""
+    error = MalformedResponseError("the answer cannot serve the request")
+
+    assert error.http_status == 502
+    assert error.grpc_code is GrpcStatus.UNKNOWN
+    assert error.reason is ErrorReason.MALFORMED_RESPONSE
+
+
+def test_only_a_malformed_response_error_uses_the_bad_gateway_status():
+    bad_gateway = [
+        error_class.__name__
+        for error_class, *_ in CATEGORY_TABLE
+        if error_class("x").http_status == 502
+    ]
+
+    assert bad_gateway == ["MalformedResponseError"]
+
+
+def test_an_internal_error_is_not_a_malformed_response():
+    """A gateway defect stays a 500, distinct from an upstream's wrong answer."""
+    internal = InternalError("the gateway could not complete the request")
+    malformed = MalformedResponseError("the answer cannot serve the request")
+
+    assert internal.reason is not malformed.reason
+    assert internal.http_status == 500
+    assert internal.grpc_code is GrpcStatus.INTERNAL
+    assert internal.to_payload() != malformed.to_payload()
