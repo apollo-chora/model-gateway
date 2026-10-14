@@ -16,7 +16,7 @@ gateway that has not been taught it yet. Compatibility here means the subset is
 stable and its refusals are explicit, not that any OpenAI client will work
 unmodified.
 
-Four modules make up this package, and the split follows the boundaries the PRD
+Five modules make up this package, and the split follows the boundaries the PRD
 draws rather than the file sizes:
 
 :mod:`~model_gateway.http.dto`
@@ -27,6 +27,8 @@ draws rather than the file sizes:
     ``GET /v1/models`` and ``GET /v1/models/{model_id}``.
 :mod:`~model_gateway.http.chat`
     ``POST /v1/chat/completions``.
+:mod:`~model_gateway.http.embeddings`
+    ``POST /v1/embeddings``.
 :mod:`~model_gateway.http.errors`
     The one place a :class:`~model_gateway.errors.GatewayError` becomes an HTTP
     response, and the one place an unclassified failure is sanitised.
@@ -51,6 +53,12 @@ from model_gateway.http.dto import (
     ModelCard,
     model_list_payload,
 )
+from model_gateway.http.embeddings import (
+    EmbeddingsResponse,
+    create_embeddings,
+    embedding_request_from_payload,
+    register_embeddings_routes,
+)
 from model_gateway.http.errors import (
     handle_gateway_error,
     handle_unexpected_error,
@@ -62,14 +70,18 @@ __all__ = [
     "ChatCompletion",
     "ChatMessage",
     "ChatRequest",
+    "EmbeddingsResponse",
     "ModelCard",
     "create_chat_completion",
+    "create_embeddings",
+    "embedding_request_from_payload",
     "get_model",
     "handle_gateway_error",
     "handle_unexpected_error",
     "list_models",
     "model_list_payload",
     "register_chat_routes",
+    "register_embeddings_routes",
     "register_error_handlers",
     "register_model_routes",
 ]

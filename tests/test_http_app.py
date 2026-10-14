@@ -20,7 +20,14 @@ from model_gateway.app import create_app
 from model_gateway.capabilities import Capability
 from model_gateway.config import Settings
 from model_gateway.config.routes import Operation, Route
-from model_gateway.domain import FinishReason, InvocationResponse, TextPart, Usage
+from model_gateway.domain import (
+    Embedding,
+    EmbeddingResponse,
+    FinishReason,
+    InvocationResponse,
+    TextPart,
+    Usage,
+)
 from model_gateway.inference import InferenceService
 from model_gateway.registry import ModelRegistry
 from model_gateway.reliability import ConcurrencyLimiter
@@ -28,6 +35,7 @@ from model_gateway.reliability import ConcurrencyLimiter
 SECRET_KEY = "sk-upstream-secret-key"
 UPSTREAM_ENDPOINT = "https://upstream.internal.example/v1"
 EXTRA_HEADER_VALUE = "tenant-header-value"
+EMBEDDING_VECTOR = (0.12, -0.34, 0.56)
 
 
 class FakeTextProvider:
@@ -63,6 +71,44 @@ def registry() -> ModelRegistry:
             ),
         )
     )
+
+
+def registry_with_embeddings() -> ModelRegistry:
+    """The text route plus an embeddings route, the two operations the factory serves."""
+    embeddings = Route(
+        operation=Operation.EMBEDDINGS,
+        index=0,
+        endpoint=UPSTREAM_ENDPOINT,
+        base_url=UPSTREAM_ENDPOINT,
+        model_id="upstream-embedding",
+        format="openai",
+        api_key=SECRET_KEY,
+        capabilities=frozenset({Capability.EMBEDDINGS}),
+        extra_headers={},
+        allow_absolute_path_url=False,
+    )
+    return ModelRegistry((*registry().routes_for("text-default"), embeddings))
+
+
+class FakeDualProvider(FakeTextProvider):
+    """A provider double that serves both operations the factory registers routes for."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding_calls = 0
+
+    async def embed(self, route: Route, request, context) -> EmbeddingResponse:
+        self.embedding_calls += 1
+        return EmbeddingResponse(
+            model=request.model,
+            upstream_model=route.model_id,
+            data=tuple(
+                Embedding(index=index, values=EMBEDDING_VECTOR)
+                for index in range(len(request.input))
+            ),
+            usage=Usage(input_tokens=3, total_tokens=3),
+            invocation_id="inv-7f3c1a90",
+        )
 
 
 @pytest.fixture
@@ -117,6 +163,48 @@ async def test_the_chat_endpoint_is_installed(client, provider):
     assert response.status == 200
     assert (await response.json())["object"] == "chat.completion"
     assert provider.calls == 1
+
+
+async def test_the_embeddings_endpoint_is_installed():
+    """The factory's own application answers ``POST /v1/embeddings`` (PRD section 4.7).
+
+    The embeddings handler's own tests build their own application, so none of
+    them can tell whether the factory registers the route at all — which is
+    exactly how an endpoint that answers on a hand-built application came to
+    return 404 on one started from configuration alone. This starts the
+    application the factory builds and posts to it, which is the only way a
+    process started with configuration alone is known to serve the endpoint.
+    """
+    models = registry_with_embeddings()
+    provider = FakeDualProvider()
+    app = create_app(
+        Settings.from_env({}),
+        registry=models,
+        service=InferenceService(models, provider),
+    )
+    await app.start()
+    try:
+        response = await TestClient(app).post(
+            "/v1/embeddings",
+            content=JSONContent(
+                {
+                    "model": "embedding-default",
+                    "input": ["First document"],
+                    "dimensions": len(EMBEDDING_VECTOR),
+                }
+            ),
+        )
+    finally:
+        await app.stop()
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["object"] == "list"
+    assert body["model"] == "embedding-default"
+    assert body["data"] == [
+        {"object": "embedding", "index": 0, "embedding": list(EMBEDDING_VECTOR)}
+    ]
+    assert provider.embedding_calls == 1
 
 
 async def test_the_error_handler_is_installed(client):
