@@ -117,12 +117,17 @@ class TextProvider(Protocol):
     ) -> InvocationResponse:
         """Call the upstream named by ``route`` and return the canonical response.
 
-        Performs exactly one upstream call for exactly one route. It does not
+        Performs one gateway attempt for exactly one route. It does not
         retry, does not fall back to another route, and does not choose between
         routes: those are the gateway core's (PRD sections 11.2 and 11.3). It
         applies the budget on ``context`` to the call it makes, so the upstream
         client is given the gateway's deadline rather than one of its own
         choosing (PRD section 9.6).
+
+        One attempt is not the same as one upstream request. An implementation
+        may reach a library that retries internally without the gateway's
+        knowledge, so the wire-request count can exceed the attempt count and
+        must never be reported as it.
         """
         ...
 
