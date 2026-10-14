@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import grpc
 import structlog
-from grpc_health.v1 import health_pb2_grpc
+from grpc_health.v1 import health_pb2, health_pb2_grpc
 
 from model_gateway.config import ConfigurationError, Settings
 from model_gateway.grpc import gateway_pb2_grpc
@@ -72,6 +72,13 @@ class GrpcServer:
             self._grpc,
         )
         self._health = HealthServicer()
+        # The package's constructor starts the overall service as SERVING, but
+        # this listener is not serving until start(); set() is a coroutine and
+        # cannot run in this synchronous constructor, so the initial state is
+        # assigned directly — the same write set() makes before any watcher
+        # exists, which a probe answered before startup would otherwise read as
+        # a serving lie.
+        self._health._server_status[""] = health_pb2.HealthCheckResponse.NOT_SERVING
         health_pb2_grpc.add_HealthServicer_to_server(self._health, self._grpc)
         self._port = self._grpc.add_insecure_port(f"{_BIND_ADDRESS}:{settings.grpc_port}")
         if not self._port:
@@ -88,7 +95,7 @@ class GrpcServer:
     async def start(self) -> None:
         """Start the listener and mark the overall health check serving."""
         await self._grpc.start()
-        self._health.set_serving(True)
+        await self._health.set("", health_pb2.HealthCheckResponse.SERVING)
         logger.info(
             "model-gateway gRPC listener started",
             grpc_port=self._port,
@@ -96,7 +103,14 @@ class GrpcServer:
         )
 
     async def stop(self) -> None:
-        """Stop the listener, refusing new calls and ending open ones."""
+        """Stop the listener, refusing new calls and ending open ones.
+
+        Graceful shutdown is entered before the server stops so a watcher is
+        told the transition to NOT_SERVING rather than left with a vanished
+        connection; entering it also ignores any later set, so a state change
+        after this point cannot report a listener that has stopped.
+        """
+        await self._health.enter_graceful_shutdown()
         await self._grpc.stop(grace=None)
         logger.info("model-gateway gRPC listener stopped")
 
