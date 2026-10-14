@@ -30,25 +30,40 @@ section 9's boundary, and this module is the policy side of it:
   upstream model that actually served it and the invocation's own reliability
   facts are the gateway's to state, because the gateway chose the route and made
   the attempts (PRD sections 5.2 and 9).
+* **Reliability.** One invocation has one deadline, one retry loop and one
+  attempt count (PRD sections 11.3 and 15), and the loop is built from the
+  primitives of :mod:`model_gateway.reliability`. :func:`_select_routes` decides
+  the primary route and the fallbacks that could serve the request;
+  :meth:`InferenceService._invoke_on` anchors a single
+  :class:`~model_gateway.reliability.Deadline` when the invocation begins and
+  walks that route order: the primary route is attempted first, a failure
+  :func:`~model_gateway.reliability.is_retryable` classifies as worth repeating
+  is retried on the same route within the configured retry count, waiting
+  :func:`~model_gateway.reliability.backoff_seconds` between attempts, and a
+  route whose attempts are used up hands the invocation to the next fallback.
+  Every attempt derives its budget from the one deadline, so a retry or a
+  fallback consumes what is left rather than starting a fresh budget, and no
+  attempt is started once that budget is gone. When no route could serve the
+  invocation, the failure reported is the last attempt's, which is the most
+  informative one; a deadline that ran out before another attempt could begin is
+  reported as a deadline error instead.
 
 The provider performs exactly one call and owns protocol translation and
 execution and nothing else (:mod:`model_gateway.providers.base`).
 
-**No retries, no fallbacks and no deadline policy yet.** Those are a later
-slice's, and PRD section 11.3 gives the gateway core the only retry loop. The
-call is structured so that slice can be added without reshaping it:
-:func:`_select_routes` decides the primary route and the fallbacks that could
-serve the request, :meth:`InferenceService._attempt` is a single provider call
-against a single route, :meth:`InferenceService._invoke_on` owns the route order,
-:class:`InvocationState` carries the reliability facts the response reports and
-:class:`~model_gateway.providers.base.AttemptContext` is where a computed
-deadline will travel. A retry wraps ``_attempt`` and advances
-``InvocationState``; a fallback walks the fallbacks selection returns.
-``fallback_used`` is already truthful without either, because it reports an
-actual fallback path rather than any route other than the first configured one.
-Adding a retry or a fallback must not change what ``invoke`` guarantees today.
+**``attempt_count`` counts gateway attempts, never upstream requests.** The
+gateway counts the calls it makes. The inference library has internal retry
+paths no supported knob disables (PRD section 11.3), so one gateway attempt can
+carry more than one wire request and this count may understate what the upstream
+saw. It must never be documented, reported or recorded as a wire-request count.
+
+**Cancellation propagates.** :exc:`asyncio.CancelledError` is a
+:exc:`BaseException` and is never caught here, so a cancelled invocation stops
+at the attempt in flight, releases the concurrency slot that attempt held, and
+makes no further attempt (PRD section 15).
 """
 
+import asyncio
 from dataclasses import dataclass, replace
 
 from model_gateway.capabilities import Capability
@@ -59,11 +74,26 @@ from model_gateway.domain import (
     InvocationResponse,
     ResponseFormatMode,
 )
-from model_gateway.errors import CapabilityError
+from model_gateway.errors import CapabilityError, DeadlineExceededError
 from model_gateway.providers.base import AttemptContext, TextProvider, _is_usable_budget
 from model_gateway.registry import ModelRegistry
+from model_gateway.reliability import (
+    ConcurrencyLimiter,
+    Deadline,
+    backoff_seconds,
+    is_retryable,
+)
 
 __all__ = ["InferenceService", "InvocationState"]
+
+_DEFAULT_MAX_CONCURRENT_REQUESTS = 100
+"""The concurrency bound a service is built with when no limiter is injected.
+
+It is ``PROVIDER_MAX_CONCURRENT_REQUESTS``'s own default (PRD section 15), so a
+service constructed without a deployment's configuration still bounds its
+simultaneous upstream attempts rather than leaving them unbounded. The
+application factory passes the configured value, or a limiter of its own.
+"""
 
 
 @dataclass(frozen=True)
@@ -79,7 +109,13 @@ class InvocationState:
 
     ``attempt_count`` starts at zero, because a state exists before the first
     call, and counts the attempts that were made — including ones that raised,
-    because a failed attempt is work the gateway did (PRD section 13).
+    because a failed attempt is work the gateway did (PRD section 13). It counts
+    *gateway* attempts: one call this service made, on one route, under one
+    attempt number. It is not a wire-request count. The inference library has
+    internal retry paths that no supported knob switches off (PRD section 11.3),
+    so a single attempt here can carry more than one upstream request, and this
+    count may understate what the upstream saw. Reporting it as the number of
+    upstream requests would be a claim the gateway cannot support.
 
     ``fallback_used`` records that the invocation took a *fallback path*: a route
     other than the primary one served it because the normal primary path could
@@ -92,9 +128,9 @@ class InvocationState:
     route served the invocation on its first attempt, rather than merely that no
     later route was configured.
 
-    Nothing here implements the reliability loop. :meth:`with_attempt` is the one
-    place the state advances, so the retry and fallback slice has a single seam
-    to move and no field to add in a second place.
+    :meth:`with_attempt` is the one place the state advances, so the retry and
+    fallback loop has a single seam to move it and no field to add in a second
+    place.
     """
 
     attempt_count: int = 0
@@ -131,36 +167,73 @@ class InferenceService:
         provider: TextProvider,
         *,
         attempt_timeout: float | None = None,
+        retry_count: int = 0,
+        retry_backoff_ms: int = 0,
+        max_concurrent_requests: int = _DEFAULT_MAX_CONCURRENT_REQUESTS,
+        limiter: ConcurrencyLimiter | None = None,
     ) -> None:
-        """Wire the service to the registry and the provider it calls through.
+        """Wire the service to the registry, the provider and the reliability policy.
 
-        ``attempt_timeout`` is the budget in seconds one attempt may use, handed
-        to the provider on every attempt context (PRD section 9.6). It stands in
-        for the per-invocation deadline the reliability slice will compute from
-        the caller's deadline; ``None`` means the gateway sets no budget for an
-        attempt, which is not the same as a budget of zero. The gateway core owns
-        this value, and a value no attempt could use is refused here rather than
-        on the first request.
+        ``attempt_timeout`` is the invocation's total budget in seconds and the
+        ceiling on every attempt inside it (PRD section 9.6). The deadline is
+        anchored when an invocation begins, and each attempt is handed the
+        smaller of this value and what is left of the deadline, so retries and
+        fallbacks draw from one budget instead of each getting a fresh one (PRD
+        section 15). ``None`` means the gateway sets no deadline at all, which is
+        not the same as a budget of zero. A value no attempt could use is refused
+        here rather than on the first request.
+
+        ``retry_count`` is how many times one route may be retried after its
+        first attempt fails retryably — the configured ``PROVIDER_RETRY_COUNT`` —
+        so a route is attempted at most ``retry_count + 1`` times.
+        ``retry_backoff_ms`` is the base delay between those attempts, the
+        configured ``PROVIDER_RETRY_BACKOFF_MS``, from which
+        :func:`~model_gateway.reliability.backoff_seconds` derives its
+        exponential schedule. Both default to no retry at all: a service built
+        without a reliability policy makes one attempt per route, and the
+        application factory passes the deployment's configured values.
+
+        ``max_concurrent_requests`` is the configured maximum
+        (``PROVIDER_MAX_CONCURRENT_REQUESTS``) that the concurrency limiter is
+        built from, and ``limiter`` replaces that limiter outright, so a test can
+        hold a small limit or a stub. One slot is held for the duration of one
+        attempt and released before any backoff wait: holding it across a retry's
+        delay would let a few slow callers occupy every slot while doing nothing,
+        and starve the callers queued behind them.
         """
         if attempt_timeout is not None and not _is_usable_budget(attempt_timeout):
             raise ValueError(
                 f"attempt_timeout must be a positive number of seconds or None, got "
                 f"{attempt_timeout!r}"
             )
+        _require_count("retry_count", retry_count)
+        _require_count("retry_backoff_ms", retry_backoff_ms)
         self._registry = registry
         self._provider = provider
         self._attempt_timeout = attempt_timeout
+        self._retry_count = retry_count
+        self._retry_backoff_ms = retry_backoff_ms
+        self._limiter = (
+            limiter if limiter is not None else ConcurrencyLimiter(max_concurrent_requests)
+        )
 
     async def invoke(self, request: InvocationRequest) -> InvocationResponse:
         """Invoke the public model named by ``request.model``.
 
         Resolves the ID to its configured routes, validates the request against
         the primary route's capability contract — the contract the registry
-        advertises for the model — makes one provider call and returns the
-        normalised response. Raises
+        advertises for the model — then serves the invocation under one deadline
+        and one retry loop (PRD sections 11.2, 11.3 and 15). Raises
         :class:`~model_gateway.errors.ModelNotFoundError` for an unknown ID and
         :class:`~model_gateway.errors.CapabilityError` when the primary route
-        cannot honour the request.
+        cannot honour the request; otherwise raises the failure of the last
+        attempt that was made, or a
+        :class:`~model_gateway.errors.DeadlineExceededError` when the invocation
+        budget ran out before another attempt could begin.
+
+        The returned ``attempt_count`` counts the gateway's own attempts and is
+        not a count of upstream requests: the inference library can issue more
+        than one request inside a single attempt (PRD section 11.3).
         """
         routes = self._registry.routes_for(request.model)
         return await self._invoke_on(request, routes)
@@ -170,37 +243,144 @@ class InferenceService:
     ) -> InvocationResponse:
         """Serve one invocation from the configured route order, primary first.
 
-        Selection decides which routes may serve the request: the primary route
-        — the one the public model advertises, which the request has already been
-        validated against — and, behind it, the later routes that could serve it
-        unchanged. Execution then makes one attempt against the primary route.
-        Today that is one attempt deep: there are no retries and no failure
-        fallbacks yet, so the primary route is the route and ``fallback_used``
-        stays false, because no non-primary route served anything. The later
-        reliability slice walks ``plan.fallbacks`` from here and wraps
-        :meth:`_attempt`; it does not reshape what ``invoke`` returns.
+        Selection decides which routes may serve the request; execution walks
+        them under the invocation's single deadline. Each route is attempted, and
+        retried on the same route while
+        :func:`~model_gateway.reliability.is_retryable` classifies the failure as
+        worth repeating and the configured retry count allows. When a route's
+        attempts are used up — because the retries ran out, or because the
+        failure was not one a repeat could change — the next route in
+        ``plan.fallbacks`` is tried. A fallback that answers is what makes
+        ``fallback_used`` true (PRD section 5.2).
+
+        One :class:`~model_gateway.reliability.Deadline` is anchored here, when
+        the invocation begins, and every attempt derives its budget from it, so
+        retries and fallbacks consume one budget rather than each getting a fresh
+        one (PRD section 15). An attempt is never started once that budget is
+        spent: the invocation fails with a
+        :class:`~model_gateway.errors.DeadlineExceededError` and no provider is
+        called.
+
+        When no route could serve the invocation, the failure raised is the last
+        attempt's rather than the first: the most recent failure is the one that
+        says why the invocation could not be served (PRD section 11.2).
+
+        The wait between attempts happens outside the concurrency slot, so a
+        caller in backoff holds nothing another caller could be using, and it is
+        waited only when a retry will actually follow it: the last attempt a
+        route is allowed never sleeps for a retry that will not be made.
         """
         plan = _select_routes(routes, request)
-        state = InvocationState().with_attempt()
-        response = await self._attempt(plan.primary, request, state)
-        return _normalise(plan.primary, request, response, state)
+        deadline = Deadline.after(self._attempt_timeout)
+        state = InvocationState()
+        failure: BaseException | None = None
+
+        for position, route in enumerate((plan.primary, *plan.fallbacks)):
+            for retry in range(self._retry_count + 1):
+                if _budget_is_spent(deadline.budget_for(self._attempt_timeout)):
+                    raise _deadline_exceeded(request, state) from failure
+                state = state.with_attempt(on_fallback=position > 0)
+                try:
+                    response = await self._attempt(route, request, state, deadline)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    failure = error
+                    if retry == self._retry_count or not is_retryable(
+                        error, remaining=deadline.remaining()
+                    ):
+                        break
+                    await _back_off(state.attempt_count, self._retry_backoff_ms, deadline)
+                    continue
+                return _normalise(route, request, response, state)
+
+        if failure is None:
+            raise _deadline_exceeded(request, state)
+        raise failure
 
     async def _attempt(
-        self, route: Route, request: InvocationRequest, state: InvocationState
+        self,
+        route: Route,
+        request: InvocationRequest,
+        state: InvocationState,
+        deadline: Deadline,
     ) -> InvocationResponse:
-        """One provider call against one route.
+        """One provider call against one route, inside one concurrency slot.
 
-        This is the unit the retry and fallback slice wraps: it holds no policy
-        of its own beyond performing the call the gateway already decided on, and
-        it hands the provider the attempt's own facts — which invocation, which
-        attempt, and the budget that attempt may use (PRD section 9.6).
+        The slot is held for this call and released when it returns or raises, so
+        the number of attempts in flight never exceeds the configured maximum,
+        and a cancelled attempt releases its slot like any other exit.
+
+        The budget handed to the provider is derived here, after the slot is
+        held, from the invocation's one deadline: waiting for a slot consumes
+        invocation budget too, so the budget is computed at the moment the
+        attempt starts rather than before the wait (PRD section 15). An attempt
+        whose budget is already spent is not made — the provider is not called
+        and a :class:`~model_gateway.errors.DeadlineExceededError` is raised
+        instead.
         """
-        context = AttemptContext(
-            invocation_id=request.invocation_id,
-            attempt_number=state.attempt_count,
-            timeout=self._attempt_timeout,
-        )
-        return await self._provider.complete(route, request, context)
+        async with self._limiter.slot():
+            budget = deadline.budget_for(self._attempt_timeout)
+            if _budget_is_spent(budget):
+                raise _deadline_exceeded(request, state)
+            context = AttemptContext(
+                invocation_id=request.invocation_id,
+                attempt_number=state.attempt_count,
+                timeout=budget,
+            )
+            return await self._provider.complete(route, request, context)
+
+
+def _require_count(name: str, value: int) -> None:
+    """Refuse a retry count or backoff that is not a non-negative integer.
+
+    A negative count would mean fewer than one attempt per route, and a boolean
+    is an ``int`` in Python but is not a count of anything. Both are refused at
+    construction rather than turning into a scheduling surprise on the first
+    request.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+
+
+def _budget_is_spent(budget: float | None) -> bool:
+    """Whether an attempt budget is exhausted, so no attempt may be started with it.
+
+    ``None`` is the gateway's own "no budget" marker — the deployment set neither
+    a provider timeout nor an invocation deadline — and is never spent. Zero is:
+    a deadline that has run out hands back zero, and an attempt given zero
+    seconds is one the gateway has already refused (PRD section 15).
+    """
+    return budget is not None and budget <= 0.0
+
+
+async def _back_off(attempt: int, base_ms: float, deadline: Deadline) -> None:
+    """Wait the delay that follows a failed attempt, when there is one to wait.
+
+    ``attempt`` is the 1-based number of the attempt that just failed, and the
+    delay is :func:`~model_gateway.reliability.backoff_seconds`'s exponential
+    schedule, clamped to what is left of ``deadline`` so a wait can never outlive
+    the invocation's budget. A delay of zero waits nothing — the retry is still
+    made, it simply does not sleep first. The sleep happens outside any
+    concurrency slot, so a caller in backoff occupies no upstream capacity.
+    """
+    delay = backoff_seconds(attempt, base_ms, remaining=deadline.remaining())
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
+def _deadline_exceeded(request: InvocationRequest, state: InvocationState) -> DeadlineExceededError:
+    """The refusal for an invocation whose budget is gone (PRD section 15).
+
+    The message and the details are built from gateway vocabulary and name only
+    the public model and the number of gateway attempts made, so no upstream
+    endpoint, model or credential can travel through them.
+    """
+    return DeadlineExceededError(
+        f"the invocation deadline for model {request.model!r} expired before a provider "
+        f"could serve it",
+        details={"model": request.model, "attempts": str(state.attempt_count)},
+    )
 
 
 @dataclass(frozen=True)
@@ -240,8 +420,10 @@ def _select_routes(routes: tuple[Route, ...], request: InvocationRequest) -> _Ro
     filtering afterwards is what keeps a fallback from expanding the advertised
     capabilities. A fallback may preserve them, never add to them.
 
-    This is not a fallback walk: nothing is retried and no route is abandoned for
-    having failed, so the plan is a decision about eligibility alone.
+    This is a decision about eligibility alone, not the walk itself: it retries
+    nothing and abandons no route for having failed. The walk that consumes
+    ``fallbacks`` is :meth:`InferenceService._invoke_on`'s, which attempts them
+    in this order when the routes before them cannot serve the invocation.
 
     Raises :class:`~model_gateway.errors.CapabilityError` when the primary route
     cannot serve the request.
