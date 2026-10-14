@@ -69,6 +69,13 @@ from model_gateway.domain.generation import (
     Usage,
     UsageSource,
 )
+from model_gateway.domain.images import (
+    IMAGE_RESPONSE_FORMATS,
+    GeneratedImage,
+    ImageRequest,
+    ImageResponse,
+    as_images,
+)
 from model_gateway.domain.invocation import (
     FORWARDABLE_METADATA_KEYS,
     IdempotencyStatus,
@@ -114,8 +121,12 @@ __all__ = [
     "FinishReason",
     "FrozenJsonObject",
     "GenerationConfig",
+    "GeneratedImage",
+    "IMAGE_RESPONSE_FORMATS",
     "IdempotencyStatus",
     "ImagePart",
+    "ImageRequest",
+    "ImageResponse",
     "InvocationRequest",
     "InvocationResponse",
     "JsonDocument",
@@ -139,6 +150,7 @@ __all__ = [
     "Usage",
     "UsageSource",
     "as_embeddings",
+    "as_images",
     "content_part_from_dict",
     "freeze_json",
     "output_item_from_dict",
