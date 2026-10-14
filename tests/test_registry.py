@@ -258,6 +258,27 @@ def test_the_embeddings_dimensions_come_from_the_embeddings_configuration():
     assert image.dimensions is None
 
 
+def test_the_advertised_dimensions_are_the_primary_routes_own():
+    """A fallback route's declared dimensionality is not the model's contract."""
+    env = environment(EMBEDDINGS_DIMENSIONS="1024")
+    env["EMBEDDINGS_ROUTES_JSON"] = json.dumps(
+        [{"endpoint": f"https://{PUBLIC_ADDRESS}/fallback/v1", "model_id": "fallback",
+          "format": "ollama", "dimensions": 512}]
+    )
+    models = ModelRegistry.from_env(env)
+
+    assert models.get("embedding-default").dimensions == 1024
+
+    undeclared = environment()
+    undeclared["EMBEDDINGS_ROUTES_JSON"] = json.dumps(
+        [{"endpoint": f"https://{PUBLIC_ADDRESS}/fallback/v1", "model_id": "fallback",
+          "format": "ollama", "dimensions": 512}]
+    )
+    models = ModelRegistry.from_env(undeclared)
+
+    assert models.get("embedding-default").dimensions is None
+
+
 def test_an_unconfigured_limit_is_none():
     models = ModelRegistry.from_env(environment())
 
@@ -283,7 +304,7 @@ def test_a_limit_is_read_as_the_integer_it_was_configured_as():
         environment(
             TEXT_LLM_CONTEXT_WINDOW=" 8000 ",
             TEXT_LLM_MAX_OUTPUT_TOKENS="+4096",
-            EMBEDDINGS_DIMENSIONS="0",
+            EMBEDDINGS_DIMENSIONS=" 512 ",
         )
     )
 
@@ -291,20 +312,29 @@ def test_a_limit_is_read_as_the_integer_it_was_configured_as():
 
     assert limits["text-default"].context_window == 8000
     assert limits["text-default"].max_output_tokens == 4096
-    assert limits["embedding-default"].dimensions == 0
+    assert limits["embedding-default"].dimensions == 512
 
 
-def test_a_malformed_limit_is_rejected_rather_than_guessed():
-    models = environment(TEXT_LLM_CONTEXT_WINDOW="plenty")
+def test_a_malformed_dimensionality_is_rejected_rather_than_guessed():
+    with pytest.raises(
+        ConfigurationError, match="EMBEDDINGS_DIMENSIONS must be a positive integer"
+    ):
+        ModelRegistry.from_env(environment(EMBEDDINGS_DIMENSIONS="plenty"))
 
-    with pytest.raises(ConfigurationError, match="TEXT_LLM_CONTEXT_WINDOW must be an integer"):
-        ModelRegistry.from_env(models)
 
-
-@pytest.mark.parametrize("variable", LIMIT_VARIABLES)
-def test_a_negative_limit_is_rejected(variable):
+@pytest.mark.parametrize(
+    "variable", ["TEXT_LLM_CONTEXT_WINDOW", "TEXT_LLM_MAX_OUTPUT_TOKENS"]
+)
+def test_a_negative_text_limit_is_rejected(variable):
     with pytest.raises(ConfigurationError, match=f"{variable} must not be negative"):
         ModelRegistry.from_env(environment(**{variable: "-1"}))
+
+
+def test_a_non_positive_embedding_dimension_is_rejected():
+    with pytest.raises(
+        ConfigurationError, match="EMBEDDINGS_DIMENSIONS must be a positive integer, got '0'"
+    ):
+        ModelRegistry.from_env(environment(EMBEDDINGS_DIMENSIONS="0"))
 
 
 def test_from_env_builds_the_registry_from_the_process_environment(monkeypatch):
@@ -328,6 +358,15 @@ def test_from_env_builds_the_registry_from_the_process_environment(monkeypatch):
 
 
 def test_a_registry_built_from_routes_reads_the_process_environment(monkeypatch):
+    """The text limits are process configuration; the embeddings limit is not.
+
+    Only ``TEXT_LLM_CONTEXT_WINDOW`` and ``TEXT_LLM_MAX_OUTPUT_TOKENS`` remain
+    environment configuration the registry reads from the process environment
+    when it is built from routes alone. The embeddings dimensionality is a
+    property of the primary route, so a value exported into the process
+    environment but absent from the routes the registry was given advertises
+    nothing.
+    """
     monkeypatch.setenv("TEXT_LLM_CONTEXT_WINDOW", "128000")
     monkeypatch.setenv("EMBEDDINGS_DIMENSIONS", "384")
 
@@ -336,7 +375,7 @@ def test_a_registry_built_from_routes_reads_the_process_environment(monkeypatch)
     limits = {info.id: info for info in models.list_models()}
 
     assert limits["text-default"].context_window == 128000
-    assert limits["embedding-default"].dimensions == 384
+    assert limits["embedding-default"].dimensions is None
 
 
 # ---------------------------------------------------------------------------

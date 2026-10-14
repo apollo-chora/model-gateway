@@ -74,6 +74,16 @@ class Route:
     non-authentication headers, because a reserved authentication header is
     refused at parse time, and it is immutable so that a validated route cannot
     acquire one afterwards.
+
+    ``dimensions`` and ``supports_dimensions_param`` are the embeddings
+    operation's own route properties (PRD sections 4.7, 6.3 and 9.6):
+    ``dimensions`` is the vector dimensionality the route declares — ``None``
+    when the deployment declared none, which checks nothing rather than checking
+    zero — and ``supports_dimensions_param`` states whether the route accepts a
+    caller-selectable dimensionality, so a caller's ``dimensions`` is forwarded
+    only on a route the operator configured to accept it. Both default to the
+    inert values on the routes of the other operations, where they are not
+    meaningful.
     """
 
     operation: Operation
@@ -86,6 +96,8 @@ class Route:
     capabilities: frozenset[Capability]
     extra_headers: Mapping[str, str]
     allow_absolute_path_url: bool
+    dimensions: int | None = None
+    supports_dimensions_param: bool = False
     auth_type: AuthType | None = None
 
     @property
@@ -162,6 +174,8 @@ _ENTRY_PATH = "path"
 _ENTRY_EXTRA_HEADERS = "extra_headers"
 _ENTRY_CAPABILITIES = "capabilities"
 _ENTRY_ALLOW_ABSOLUTE_PATH_URL = "allow_absolute_path_url"
+_ENTRY_DIMENSIONS = "dimensions"
+_ENTRY_SUPPORTS_DIMENSIONS_PARAM = "supports_dimensions_param"
 
 _ENTRY_KEYS: frozenset[str] = frozenset(
     {
@@ -174,6 +188,8 @@ _ENTRY_KEYS: frozenset[str] = frozenset(
         _ENTRY_EXTRA_HEADERS,
         _ENTRY_CAPABILITIES,
         _ENTRY_ALLOW_ABSOLUTE_PATH_URL,
+        _ENTRY_DIMENSIONS,
+        _ENTRY_SUPPORTS_DIMENSIONS_PARAM,
     }
 )
 
@@ -244,6 +260,18 @@ def _parse_block(block: _Block, env: Mapping[str, str], *, resolver: Resolver) -
     extra_headers = _singleton_extra_headers(
         block, _read(env, _variable(block, _EXTRA_HEADERS_JSON))
     )
+    dimensions = (
+        _singleton_dimensions(block, _read(env, _variable(block, _DIMENSIONS)))
+        if block.operation is Operation.EMBEDDINGS
+        else None
+    )
+    supports_variable = _variable(block, _SUPPORTS_DIMENSIONS_PARAM)
+    supports_raw = _read(env, supports_variable)
+    supports_dimensions_param = (
+        _parse_bool(supports_variable, supports_raw)
+        if supports_raw and block.operation is Operation.EMBEDDINGS
+        else False
+    )
 
     primary = Route(
         operation=block.operation,
@@ -264,6 +292,8 @@ def _parse_block(block: _Block, env: Mapping[str, str], *, resolver: Resolver) -
         capabilities=capabilities,
         extra_headers=extra_headers,
         allow_absolute_path_url=allow_absolute_path_url,
+        dimensions=dimensions,
+        supports_dimensions_param=supports_dimensions_param,
     )
 
     sources: list[tuple[str, Route]] = [(f"the {block.prefix}_* block", primary)]
@@ -366,7 +396,11 @@ def _parse_entry(
     model_id = _entry_required_text(where, entry, _ENTRY_MODEL_ID)
     format = _entry_required_text(where, entry, _ENTRY_FORMAT)
     path = _entry_optional_text(where, entry, _ENTRY_PATH)
-    allow_absolute_path_url = _entry_flag(where, entry)
+    allow_absolute_path_url = _entry_flag(where, entry, _ENTRY_ALLOW_ABSOLUTE_PATH_URL)
+    dimensions = _entry_dimensions(where, entry.get(_ENTRY_DIMENSIONS))
+    supports_dimensions_param = _entry_flag(
+        where, entry, _ENTRY_SUPPORTS_DIMENSIONS_PARAM
+    )
 
     return Route(
         operation=block.operation,
@@ -387,6 +421,8 @@ def _parse_entry(
         capabilities=_entry_capabilities(block, where, entry.get(_ENTRY_CAPABILITIES)),
         extra_headers=_entry_extra_headers(where, entry.get(_ENTRY_EXTRA_HEADERS)),
         allow_absolute_path_url=allow_absolute_path_url,
+        dimensions=dimensions,
+        supports_dimensions_param=supports_dimensions_param,
     )
 
 
@@ -447,6 +483,45 @@ def _singleton_capabilities(block: _Block, raw: str) -> frozenset[Capability]:
     if not raw:
         return frozenset({block.default_capability})
     return _capabilities_from(_variable(block, _CAPABILITIES), raw, raw.split(","))
+
+
+def _singleton_dimensions(block: _Block, raw: str) -> int | None:
+    """The block's declared embedding dimensionality: ``None`` when undeclared.
+
+    A declared dimensionality must be a positive integer (PRD section 6.3): a
+    vector of zero or negative length is not a dimensionality any model has, and
+    a value the gateway cannot read is a configuration error rather than
+    something to guess at (PRD section 11.1).
+    """
+    variable = _variable(block, _DIMENSIONS)
+    if not raw:
+        return None
+    return _dimensions_from(variable, raw)
+
+
+def _entry_dimensions(where: str, value: object) -> int | None:
+    """One route entry's declared dimensionality, ``None`` when undeclared."""
+    label = f"{where} {_ENTRY_DIMENSIONS!r}"
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigurationError(
+            f"{label} must be a positive integer, got {_json_type(value)}"
+        )
+    return _dimensions_from(label, str(value))
+
+
+def _dimensions_from(label: str, raw: str) -> int:
+    """Read a declared dimensionality, refusing anything but a positive integer."""
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ConfigurationError(
+            f"{label} must be a positive integer, got {raw!r}"
+        ) from None
+    if value < 1:
+        raise ConfigurationError(f"{label} must be a positive integer, got {raw!r}")
+    return value
 
 
 def _entry_capabilities(block: _Block, where: str, value: object) -> frozenset[Capability]:
@@ -572,14 +647,12 @@ def _entry_optional_text(where: str, entry: Mapping[str, object], key: str) -> s
     return value.strip()
 
 
-def _entry_flag(where: str, entry: Mapping[str, object]) -> bool:
-    value = entry.get(_ENTRY_ALLOW_ABSOLUTE_PATH_URL)
+def _entry_flag(where: str, entry: Mapping[str, object], key: str) -> bool:
+    value = entry.get(key)
     if value is None:
         return False
     if not isinstance(value, bool):
-        raise ConfigurationError(
-            f"{where} {_ENTRY_ALLOW_ABSOLUTE_PATH_URL!r} must be a boolean, got {_json_type(value)}"
-        )
+        raise ConfigurationError(f"{where} {key!r} must be a boolean, got {_json_type(value)}")
     return value
 
 

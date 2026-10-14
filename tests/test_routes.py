@@ -21,8 +21,9 @@ SUPPORTED_CAPABILITIES = (
 SUPPORTED_AUTH_TYPES = "'bearer', 'x-api-key', 'api-key', 'none', 'custom-header'"
 
 ENTRY_KEYS = (
-    "'allow_absolute_path_url', 'api_key', 'auth_type', 'capabilities', 'endpoint', "
-    "'extra_headers', 'format', 'model_id', 'path'"
+    "'allow_absolute_path_url', 'api_key', 'auth_type', 'capabilities', 'dimensions', "
+    "'endpoint', 'extra_headers', 'format', 'model_id', 'path', "
+    "'supports_dimensions_param'"
 )
 
 
@@ -1347,6 +1348,155 @@ def test_routes_are_returned_in_a_stable_order():
 
 
 # ---------------------------------------------------------------------------
+# The embeddings route properties
+# ---------------------------------------------------------------------------
+
+
+def embeddings_block(**overrides: str) -> dict[str, str]:
+    env = {
+        "EMBEDDINGS_ENDPOINT": "https://embeddings.example/v1",
+        "EMBEDDINGS_MODEL_ID": "embedding-model",
+        "EMBEDDINGS_FORMAT": "openai",
+    }
+    env.update(overrides)
+    return env
+
+
+def test_embedding_properties_default_to_the_inert_values():
+    for env in (
+        block(),
+        embeddings_block(),
+        {
+            "IMAGE_GEN_ENDPOINT": "https://images.example/v1",
+            "IMAGE_GEN_MODEL_ID": "image-model",
+            "IMAGE_GEN_FORMAT": "openai",
+        },
+    ):
+        (route,) = parse(env)
+
+        assert route.dimensions is None
+        assert route.supports_dimensions_param is False
+
+
+def test_the_singleton_block_declares_the_routes_embedding_properties():
+    (route,) = parse(embeddings_block(EMBEDDINGS_DIMENSIONS="1024"))
+
+    assert route.dimensions == 1024
+    assert route.supports_dimensions_param is False
+
+    (route,) = parse(
+        embeddings_block(
+            EMBEDDINGS_DIMENSIONS="1024",
+            EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM="true",
+        )
+    )
+
+    assert route.dimensions == 1024
+    assert route.supports_dimensions_param is True
+
+
+def test_a_declared_dimensionality_must_be_a_positive_integer():
+    for value in ["0", "-1", "abc", "1.5", "1024.0"]:
+        assert message(embeddings_block(EMBEDDINGS_DIMENSIONS=value)) == (
+            f"EMBEDDINGS_DIMENSIONS must be a positive integer, got {value!r}"
+        )
+
+
+def test_a_blank_declared_dimensionality_is_absent():
+    (route,) = parse(embeddings_block(EMBEDDINGS_DIMENSIONS="   "))
+
+    assert route.dimensions is None
+
+
+def test_the_dimensions_flag_is_validated_when_the_block_is_configured():
+    assert message(embeddings_block(EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM="perhaps")) == (
+        "EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM must be a boolean, got 'perhaps'; expected one of "
+        "'0', '1', 'false', 'no', 'off', 'on', 'true', 'yes'"
+    )
+
+
+def test_an_entry_declares_its_own_embedding_properties():
+    env = {
+        **embeddings_block(EMBEDDINGS_DIMENSIONS="1024"),
+        "EMBEDDINGS_ROUTES_JSON": json.dumps(
+            [
+                entry(
+                    endpoint="https://embeddings-2.example/v1",
+                    model_id="embedding-2",
+                    dimensions=512,
+                    supports_dimensions_param=True,
+                )
+            ]
+        ),
+    }
+
+    routes = parse(env)
+
+    assert routes[0].dimensions == 1024
+    assert routes[0].supports_dimensions_param is False
+    assert routes[1].dimensions == 512
+    assert routes[1].supports_dimensions_param is True
+
+
+def test_an_entry_does_not_inherit_the_singletons_embedding_properties():
+    env = {
+        **embeddings_block(
+            EMBEDDINGS_DIMENSIONS="1024",
+            EMBEDDINGS_SUPPORTS_DIMENSIONS_PARAM="true",
+        ),
+        "EMBEDDINGS_ROUTES_JSON": json.dumps([entry()]),
+    }
+
+    (primary, fallback) = parse(env)
+
+    assert primary.dimensions == 1024
+    assert primary.supports_dimensions_param is True
+    assert fallback.dimensions is None
+    assert fallback.supports_dimensions_param is False
+
+
+def test_an_entry_dimensionality_must_be_a_positive_integer():
+    env = {
+        **embeddings_block(),
+        "EMBEDDINGS_ROUTES_JSON": json.dumps([entry(dimensions=0)]),
+    }
+
+    assert message(env) == (
+        "EMBEDDINGS_ROUTES_JSON entry 1 'dimensions' must be a positive integer, got '0'"
+    )
+
+
+def test_an_entry_dimensionality_must_not_be_a_string():
+    env = {
+        **embeddings_block(),
+        "EMBEDDINGS_ROUTES_JSON": json.dumps([entry(dimensions="1024")]),
+    }
+
+    assert message(env) == (
+        "EMBEDDINGS_ROUTES_JSON entry 1 'dimensions' must be a positive integer, got a string"
+    )
+
+
+def test_an_entry_dimensions_flag_must_be_a_boolean():
+    env = {
+        **embeddings_block(),
+        "EMBEDDINGS_ROUTES_JSON": json.dumps([entry(supports_dimensions_param="true")]),
+    }
+
+    assert message(env) == (
+        "EMBEDDINGS_ROUTES_JSON entry 1 'supports_dimensions_param' must be a boolean, "
+        "got a string"
+    )
+
+
+def test_an_embedding_property_on_another_operations_route_is_ignored():
+    """Only the embeddings block's variables declare the operation's properties."""
+    (route,) = parse(block(TEXT_LLM_DIMENSIONS="1024"))
+
+    assert route.dimensions is None
+
+
+# ---------------------------------------------------------------------------
 # The PRD's own examples
 # ---------------------------------------------------------------------------
 
@@ -1426,3 +1576,5 @@ def test_the_prd_complete_environment_example_is_accepted():
     assert routes[1].capabilities == frozenset({Capability.GENERATION})
     assert routes[2].capabilities == frozenset({Capability.EMBEDDINGS})
     assert [route.auth_type for route in routes] == [AuthType.BEARER] * 3
+    assert routes[2].dimensions == 1024
+    assert routes[2].supports_dimensions_param is False
