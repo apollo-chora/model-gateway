@@ -16,7 +16,7 @@ gateway that has not been taught it yet. Compatibility here means the subset is
 stable and its refusals are explicit, not that any OpenAI client will work
 unmodified.
 
-Five modules make up this package, and the split follows the boundaries the PRD
+Six modules make up this package, and the split follows the boundaries the PRD
 draws rather than the file sizes:
 
 :mod:`~model_gateway.http.dto`
@@ -29,9 +29,11 @@ draws rather than the file sizes:
     ``POST /v1/chat/completions``.
 :mod:`~model_gateway.http.embeddings`
     ``POST /v1/embeddings``.
-:mod:`~model_gateway.http.errors`
+:mod:`~model_gateway.http.errors``
     The one place a :class:`~model_gateway.errors.GatewayError` becomes an HTTP
     response, and the one place an unclassified failure is sanitised.
+:mod:`~model_gateway.http.images`
+    ``POST /v1/images/generations`` and ``POST /v1/images/edits``.
 
 Handlers are built by factory functions rather than reaching for module-level
 state, so a route's dependencies are its arguments: ``list_models(registry)``
@@ -64,6 +66,14 @@ from model_gateway.http.errors import (
     handle_unexpected_error,
     register_error_handlers,
 )
+from model_gateway.http.images import (
+    ImageGenerationResponse,
+    create_image_edits,
+    create_image_generations,
+    image_edit_request_from_payload,
+    image_generation_request_from_payload,
+    register_image_routes,
+)
 from model_gateway.http.models import get_model, list_models, register_model_routes
 
 __all__ = [
@@ -71,17 +81,23 @@ __all__ = [
     "ChatMessage",
     "ChatRequest",
     "EmbeddingsResponse",
+    "ImageGenerationResponse",
     "ModelCard",
     "create_chat_completion",
     "create_embeddings",
+    "create_image_edits",
+    "create_image_generations",
     "embedding_request_from_payload",
     "get_model",
     "handle_gateway_error",
     "handle_unexpected_error",
+    "image_edit_request_from_payload",
+    "image_generation_request_from_payload",
     "list_models",
     "model_list_payload",
     "register_chat_routes",
     "register_embeddings_routes",
     "register_error_handlers",
+    "register_image_routes",
     "register_model_routes",
 ]

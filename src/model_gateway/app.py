@@ -39,10 +39,12 @@ from model_gateway.http import (
     register_chat_routes,
     register_embeddings_routes,
     register_error_handlers,
+    register_image_routes,
     register_model_routes,
 )
 from model_gateway.http.auth import create_auth_middleware
 from model_gateway.inference import InferenceService
+from model_gateway.providers.litellm_image import ensure_supported_image_dialect
 from model_gateway.providers.litellm_provider import (
     LiteLLMProvider,
     ensure_supported_dialect,
@@ -53,13 +55,19 @@ from model_gateway.security.api_keys import ApiKeySet
 
 logger = structlog.get_logger(__name__)
 
-_BINDING_OPERATIONS: frozenset[Operation] = frozenset({Operation.TEXT, Operation.EMBEDDINGS})
+_BINDING_OPERATIONS: frozenset[Operation] = frozenset(
+    {Operation.TEXT, Operation.IMAGE, Operation.EMBEDDINGS}
+)
 """The operations the production binding runs, and so the ones its start validates.
 
-The binding has one entry point per operation: the text completion and the
-embedding call. An operation it does not run has no route this process would
-serve, so a dialect it could not keep behind the transport controls is not a
-reason to refuse to start — that route is inert here.
+The binding has one entry point per operation: the text completion, the
+embedding call and the image call. An operation it does not run has no route
+this process would serve, so a dialect it could not keep behind the transport
+controls is not a reason to refuse to start — that route is inert here. The
+image operation was absent from this set only because it had no binding, and a
+binding for it now exists, so its routes are checked like the others: an image
+dialect whose HTTP path has not been verified is refused at startup rather
+than on the first caller (PRD sections 6.2 and 14.1).
 """
 
 
@@ -70,11 +78,11 @@ def _ensure_binding_can_run(registry: ModelRegistry) -> None:
     duplicate of that check: a deployment whose configuration the transport
     controls cannot survive should not reach the point of serving requests at
     all (PRD sections 6, 14.1 and 21). Every operation the binding runs is
-    checked — the text and embeddings operations today — so no route this
-    process would actually serve is unusable at startup and discoverable only
-    when a caller arrives. An operation with no binding is not checked, because
-    this process would never run its routes. The check runs only when this
-    factory builds the binding, since an injected service brings its own
+    checked — the text, embeddings and image operations today — so no route
+    this process would actually serve is unusable at startup and discoverable
+    only when a caller arrives. An operation with no binding is not checked,
+    because this process would never run its routes. The check runs only when
+    this factory builds the binding, since an injected service brings its own
     provider.
     """
     for model in registry.list_models():
@@ -82,7 +90,10 @@ def _ensure_binding_can_run(registry: ModelRegistry) -> None:
             continue
         for route in registry.routes_for(model.id):
             try:
-                ensure_supported_dialect(route.format)
+                if model.operation is Operation.IMAGE:
+                    ensure_supported_image_dialect(route.format)
+                else:
+                    ensure_supported_dialect(route.format)
             except FailedPreconditionError as error:
                 raise ConfigurationError(
                     f"{model.id}: {error}. The gateway does not start with a route it cannot "
@@ -159,6 +170,7 @@ def create_app(
     register_model_routes(app.router, registry)
     register_chat_routes(app.router, service)
     register_embeddings_routes(app.router, service)
+    register_image_routes(app.router, service)
     register_error_handlers(app)
 
     @app.on_start
