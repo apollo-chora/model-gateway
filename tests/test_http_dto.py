@@ -7,6 +7,7 @@ from model_gateway.domain import (
     FinishReason,
     ImagePart,
     InvocationResponse,
+    RefusalPart,
     Role,
     TextPart,
     ToolCall,
@@ -131,7 +132,10 @@ class TestChatRequestMessages:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "What is this?"},
-                        {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,QUJD"},
+                        },
                     ],
                 }
             ]
@@ -141,8 +145,33 @@ class TestChatRequestMessages:
 
         assert request.invocation.messages[0].content == (
             TextPart("What is this?"),
-            ImagePart(url="https://example.com/a.png"),
+            ImagePart(data="QUJD", media_type="image/png"),
         )
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.com/a.png",
+            "http://example.com/a.png",
+            "http://127.0.0.1/a.png",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.1/a.png",
+            "http://[::1]/a.png",
+        ],
+    )
+    def test_refuses_a_remote_image_url_the_gateway_cannot_screen(self, url):
+        payload = body(
+            messages=[
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]}
+            ]
+        )
+
+        with pytest.raises(CapabilityError) as error:
+            ChatRequest.from_payload(payload)
+
+        assert error.value.reason.value == "unsupported_capability"
+        assert error.value.details["capability"] == "remote_image_fetch"
+        assert error.value.http_status == 422
 
     def test_parses_a_base64_data_uri_into_inline_image_content(self):
         payload = body(
@@ -412,13 +441,30 @@ class TestChatRequestParameters:
             {"n": 1},
             {"store": False},
             {"logprobs": False},
-            {"parallel_tool_calls": True},
             {"modalities": ["text"]},
             {"stream_options": None},
         ],
     )
     def test_accepts_a_parameter_asking_for_the_openai_default(self, overrides):
         assert ChatRequest.from_payload(body(**overrides)).invocation.model == "text-default"
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_refuses_an_explicit_parallel_tool_calls_flag(self, value):
+        """Neither direction is a promise this slice can keep.
+
+        ``true`` asks for parallel tool calls and ``false`` asks for a guarantee
+        of sequential ones; nothing here implements or preserves either, so
+        accepting the flag would advertise a capability the gateway lacks.
+        """
+        with pytest.raises(CapabilityError) as error:
+            ChatRequest.from_payload(body(parallel_tool_calls=value))
+
+        assert error.value.reason.value == "unsupported_capability"
+        assert error.value.details["capability"] == "parallel_tool_calls"
+        assert error.value.details["parameter"] == "parallel_tool_calls"
+
+    def test_accepts_an_absent_parallel_tool_calls_flag(self):
+        assert ChatRequest.from_payload(body()).invocation.model == "text-default"
 
     def test_carries_stream_rather_than_acting_on_it(self):
         assert ChatRequest.from_payload(body(stream=True)).stream is True
@@ -501,8 +547,6 @@ class TestChatCompletion:
         assert call["function"]["arguments"] == "{not json"
 
     def test_reports_a_refusal_beside_the_content(self):
-        from model_gateway.domain import RefusalPart
-
         completion = ChatCompletion.from_invocation(
             response(content=(RefusalPart("I cannot help with that."),)),
             completion_id="chatcmpl-1",
@@ -540,6 +584,65 @@ class TestChatCompletion:
             )
 
         assert error.value.details["capability"] == "image_output"
+
+    def test_reports_text_followed_by_tool_calls(self):
+        completion = ChatCompletion.from_invocation(
+            response(
+                content=(
+                    TextPart("Checking the weather now."),
+                    ToolCall(id="call_1", name="get_weather", arguments={"city": "Rome"}),
+                ),
+                finish_reason=FinishReason.TOOL_CALLS,
+                raw_finish_reason="tool_calls",
+            ),
+            completion_id="chatcmpl-1",
+            created=0,
+        )
+
+        message = completion.to_dict()["choices"][0]["message"]
+
+        assert message["content"] == "Checking the weather now."
+        assert message["tool_calls"][0]["function"]["name"] == "get_weather"
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            (
+                ToolCall(id="call_1", name="get_weather"),
+                TextPart("The weather is sunny."),
+            ),
+            (
+                TextPart("Checking."),
+                ToolCall(id="call_1", name="get_weather"),
+                TextPart("It is sunny."),
+            ),
+            (
+                ToolCall(id="call_1", name="get_weather"),
+                RefusalPart("I cannot share that."),
+            ),
+        ],
+    )
+    def test_refuses_an_output_order_the_response_shape_cannot_carry(self, content):
+        """Concatenating the text and hoisting the calls would invent an answer.
+
+        The OpenAI message records no order between ``content`` and
+        ``tool_calls``, so an interleaved canonical response has no faithful
+        representation in it (PRD section 9.1).
+        """
+        with pytest.raises(CapabilityError) as error:
+            ChatCompletion.from_invocation(
+                response(
+                    content=content,
+                    finish_reason=FinishReason.TOOL_CALLS,
+                    raw_finish_reason="tool_calls",
+                ),
+                completion_id="chatcmpl-1",
+                created=0,
+            )
+
+        assert error.value.reason.value == "unsupported_capability"
+        assert error.value.details["capability"] == "interleaved_output"
+        assert error.value.http_status == 422
 
     def test_derives_the_total_the_provider_omitted(self):
         completion = ChatCompletion.from_invocation(

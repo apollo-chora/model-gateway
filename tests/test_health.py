@@ -3,11 +3,17 @@ from blacksheep.testing import TestClient
 
 from model_gateway import health
 from model_gateway.app import create_app
+from model_gateway.inference import InferenceService
+from model_gateway.providers import MockProvider
+from model_gateway.registry import ModelRegistry
 
 
 @pytest.fixture
 async def client():
-    app = create_app()
+    # The factory selects no provider implicitly, so the health tests inject the
+    # deterministic mock explicitly rather than relying on a default.
+    registry = ModelRegistry(())
+    app = create_app(registry=registry, service=InferenceService(registry, MockProvider()))
     await app.start()
     try:
         yield TestClient(app)
