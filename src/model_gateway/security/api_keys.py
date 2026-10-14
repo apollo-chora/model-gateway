@@ -31,8 +31,9 @@ Configuration-time keys are plaintext secrets
 ---------------------------------------------
 The keys live in the operator's environment as plaintext: that is the PRD's
 configuration model (sections 6 and 18), not a defect this module can remove.
-They are kept in memory for the process lifetime so that presentations can be
-verified, and the gateway never logs, echoes or serialises them — error
+At startup each configured key is reduced to its SHA-256 digest and the
+plaintext is discarded, so the store holds a digest rather than the key for the
+process lifetime. The gateway never logs, echoes or serialises a key — error
 messages name the rule that was violated and never the key that violated it,
 and the store's repr shows only derived labels. Secret redaction (PRD section
 14) and the rule that credentials are never logged (PRD section 17) apply to
@@ -40,26 +41,49 @@ everything in this module.
 
 Verification
 ------------
-A presentation is compared against every configured key with
-:func:`hmac.compare_digest`, and the scan runs to the last key whether or not
-an earlier one matched. Returning on the first match would make response time
-reveal which key matched — and, with it, how many keys are configured — so
-the number of comparisons is constant for every outcome. A wrong key is
-rejected with :class:`~model_gateway.errors.UnauthenticatedError` carrying
-``INVALID_CREDENTIALS``; no credential at all carries
+A presentation is hashed to a fixed-length SHA-256 digest and compared against
+every configured key's precomputed digest with :func:`hmac.compare_digest`, and
+the scan runs to the last key whether or not an earlier one matched. Because the
+scan never returns early, the number of comparisons does not depend on which key
+matched: the match position is not revealed. Every comparison is between two
+256-bit digests, so a comparison takes the same time whatever the length of the
+presented key.
+
+What the scan does NOT hide is the number of configured credentials. Total work
+is proportional to that number, so the time an attempt takes still correlates
+with how many keys the deployment configures, and an observer who can time the
+gateway can estimate that count. Hiding it is deliberately not attempted: the
+count is not a secret worth the complexity, because it says nothing about the
+credentials themselves and an attacker cannot act on it.
+
+A wrong key is rejected with :class:`~model_gateway.errors.UnauthenticatedError`
+carrying ``INVALID_CREDENTIALS``; no credential at all carries
 ``AUTHENTICATION_REQUIRED``. Neither message echoes the presented key.
 
 ``authenticate`` verifies regardless of :attr:`ApiKeySet.enabled`; whether a
 request may proceed without authentication is the caller's decision, made by
 consulting ``enabled`` and assigning :meth:`ApiKeySet.anonymous`.
 
-``key_id``
----------
-The label carried on ``Identity.key_id`` is the first 12 hexadecimal
-characters of the SHA-256 digest of the UTF-8 key. The digest is one-way, so
-the key cannot be recovered from the label; its only purpose is letting logs
-and accounting tell presentations of one configured key apart from another.
-It is never a credential and must never be used as one.
+``credential_id`` and ``key_label``
+-----------------------------------
+``Identity`` carries two derived values for a matched key, and they serve
+different consumers:
+
+- ``credential_id`` is the full SHA-256 digest of the key: a
+  collision-resistant identifier, and the principal downstream policy — rate
+  limiting, concurrency limits, idempotency and accounting — keys on.
+- ``key_label`` is the first 12 hexadecimal characters of the same digest, a
+  short display string for logs. It is deliberately truncated and must never be
+  used as a principal: 48 bits can collide at scale, so two different keys could
+  share a label. It exists to let an operator correlate log lines, nothing more.
+
+Neither is a credential. A hash prefix is not encryption, and a configured key
+may be low entropy: the PRD's own example keys (``primary-key``,
+``internal-tooling``) are guessable, so an attacker holding a logged label can
+test candidate keys offline until one hashes to it. The label is therefore a
+correlation aid and not a secret to rely on. The operational consequence is that
+credentials must be generated with high entropy, and the label must be treated
+as public.
 """
 
 import hashlib
@@ -73,42 +97,46 @@ from model_gateway.security.identity import Identity
 
 __all__ = ["ApiKeySet"]
 
-_KEY_ID_LENGTH = 12
+_KEY_LABEL_LENGTH = 12
 
 _SETTINGS_VARIABLE = "GATEWAY_API_KEYS"
 
 _AUTH_ENABLED_VARIABLE = "GATEWAY_AUTH_ENABLED"
 
 
-def key_id_for(key: str) -> str:
-    """Return the short, non-secret log label for ``key``.
+def _digest_for(key: str) -> str:
+    """The full-length SHA-256 digest of ``key``, as hexadecimal text.
 
-    The first 12 hexadecimal characters of the SHA-256 digest of the UTF-8
-    key: one-way, safe to log, and usable only to correlate presentations of
-    the same configured key — never to recover the key or to authenticate
-    with it.
+    Fixed at 64 characters whatever the key's length, so every comparison this
+    module performs is between two equal-length strings.
     """
-    return hashlib.sha256(key.encode()).hexdigest()[:_KEY_ID_LENGTH]
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 @dataclass(frozen=True)
 class _KeyBinding:
     """One configured key and the tenant it is bound to.
 
-    ``key`` is plaintext secret material. It is compared against
-    presentations and nothing else: it is never logged, echoed or included
-    in the repr, which shows only the derived ``key_id``.
+    ``digest`` is the full SHA-256 digest of the key, computed once at startup;
+    the plaintext key is not retained. It is compared against presentations and
+    nothing else, and the repr shows only the truncated ``key_label``.
     """
 
-    key: str
+    digest: str
     tenant: str | None
 
     @property
-    def key_id(self) -> str:
-        return key_id_for(self.key)
+    def credential_id(self) -> str:
+        """The collision-resistant identifier downstream policy keys on."""
+        return self.digest
+
+    @property
+    def key_label(self) -> str:
+        """The short display label for logs; never a principal."""
+        return self.digest[:_KEY_LABEL_LENGTH]
 
     def __repr__(self) -> str:
-        return f"_KeyBinding(tenant={self.tenant!r}, key_id={self.key_id!r})"
+        return f"_KeyBinding(tenant={self.tenant!r}, key_label={self.key_label!r})"
 
 
 @dataclass(frozen=True)
@@ -159,32 +187,42 @@ class ApiKeySet:
         presented key matches nothing (``INVALID_CREDENTIALS``). The error
         messages never echo the presented key.
 
-        The scan compares against all configured keys with
-        :func:`hmac.compare_digest` and never returns early on a match, so
-        the comparison count is constant for every outcome.
+        The presentation is hashed once to a fixed-length digest, and the scan
+        compares that digest against every configured key's precomputed digest
+        with :func:`hmac.compare_digest`, never returning early on a match. The
+        match position therefore does not determine the number of comparisons;
+        the number of configured keys is not hidden, and hiding it is
+        deliberately not attempted.
         """
         if not presented:
             raise UnauthenticatedError("no API key was presented")
 
+        digest = _digest_for(presented)
         match: _KeyBinding | None = None
         for binding in self._bindings:
-            if hmac.compare_digest(presented.encode(), binding.key.encode()):
+            if hmac.compare_digest(digest, binding.digest):
                 match = binding
         if match is None:
             raise UnauthenticatedError(
                 "the presented API key is not valid",
                 reason=ErrorReason.INVALID_CREDENTIALS,
             )
-        return Identity(authenticated=True, tenant=match.tenant, key_id=match.key_id)
+        return Identity(
+            authenticated=True,
+            tenant=match.tenant,
+            credential_id=match.credential_id,
+            key_label=match.key_label,
+        )
 
     def anonymous(self) -> Identity:
         """The identity assigned when authentication is disabled.
 
         Unauthenticated means exactly this and nothing more: the caller has
         NO tenant (``tenant is None`` — a request-body ``tenant_id`` can never
-        supply one, PRD section 5.1) and no key label.
+        supply one, PRD section 5.1), no credential identifier and no key
+        label.
         """
-        return Identity(authenticated=False, tenant=None, key_id=None)
+        return Identity(authenticated=False, tenant=None, credential_id=None, key_label=None)
 
     def __repr__(self) -> str:
         return f"ApiKeySet(enabled={self._enabled!r}, bindings={self._bindings!r})"
@@ -194,8 +232,10 @@ def _parse_bindings(entries: Iterable[str]) -> tuple[_KeyBinding, ...]:
     """Parse configured entries into bindings, rejecting ambiguous ones.
 
     Every entry is ``<key>`` or ``<key>:<tenant>`` after trimming; blank
-    entries are dropped. Anything unreadable — an empty key half, an empty
-    tenant half, a second separator, a key that appears twice — raises
+    entries are dropped. Each key is reduced to its digest here, and only the
+    digest is kept, so the plaintext never outlives construction. Anything
+    unreadable — an empty key half, an empty tenant half, a second separator, a
+    key that appears twice — raises
     :class:`~model_gateway.config.ConfigurationError` naming the rule and
     never the key material.
     """
@@ -227,11 +267,12 @@ def _parse_bindings(entries: Iterable[str]) -> tuple[_KeyBinding, ...]:
                 )
             key = key_part.strip()
 
-        if key in seen:
+        digest = _digest_for(key)
+        if digest in seen:
             raise ConfigurationError(
                 f"{_SETTINGS_VARIABLE} contains a key more than once; each key must "
                 "appear exactly once"
             )
-        seen.add(key)
-        bindings.append(_KeyBinding(key=key, tenant=tenant))
+        seen.add(digest)
+        bindings.append(_KeyBinding(digest=digest, tenant=tenant))
     return tuple(bindings)
