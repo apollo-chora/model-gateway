@@ -47,6 +47,7 @@ from model_gateway.providers.litellm_provider import (
     ensure_supported_dialect,
 )
 from model_gateway.registry import ModelRegistry
+from model_gateway.reliability import ConcurrencyLimiter
 from model_gateway.security.api_keys import ApiKeySet
 
 logger = structlog.get_logger(__name__)
@@ -97,11 +98,14 @@ def create_app(
     ``InferenceService(registry, provider)`` naming the provider this process
     should call upstream with. When no service is injected the factory builds
     the production one: :class:`~model_gateway.providers.litellm_provider.LiteLLMProvider`
-    over the registry's routes, with ``PROVIDER_TIMEOUT_SECONDS`` as the budget
-    every attempt context carries (PRD section 9.6). That budget is the
-    provider's own ceiling today; a later slice makes it the minimum of the
-    configured timeout and the invocation deadline remaining when the attempt
-    begins (PRD section 15), so a retry can never outlive the caller's budget.
+    over the registry's routes, with the deployment's configured reliability
+    policy — ``PROVIDER_TIMEOUT_SECONDS`` as the attempt budget,
+    ``PROVIDER_RETRY_COUNT`` and ``PROVIDER_RETRY_BACKOFF_MS`` as the retry
+    schedule, and a limiter built from ``PROVIDER_MAX_CONCURRENT_REQUESTS``
+    (PRD section 9.6). The service anchors one deadline per invocation and
+    hands each attempt the smaller of the configured timeout and what is left
+    of that deadline, so a retry can never outlive the caller's budget (PRD
+    section 15).
 
     Building that binding also validates the routes it would run: a text route
     whose dialect the binding cannot keep behind the transport controls fails
@@ -121,6 +125,9 @@ def create_app(
             registry,
             LiteLLMProvider(),
             attempt_timeout=settings.provider_timeout_seconds,
+            retry_count=settings.provider_retry_count,
+            retry_backoff_ms=settings.provider_retry_backoff_ms,
+            limiter=ConcurrencyLimiter(settings.provider_max_concurrent_requests),
         )
 
     api_keys = ApiKeySet.from_settings(settings)
