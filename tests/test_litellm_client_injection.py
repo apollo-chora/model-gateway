@@ -125,35 +125,6 @@ class RecordingCompletion:
         return completion_response()
 
 
-class StubClient:
-    """A stand-in for a client a caller supplied: buildable and closable, never connected."""
-
-    def __init__(self) -> None:
-        self.entered = False
-        self.exited = False
-
-    async def __aenter__(self) -> "StubClient":
-        self.entered = True
-        return self
-
-    async def __aexit__(self, *exc_info: object) -> None:
-        self.exited = True
-
-
-class StubClientFactory:
-    """A factory that builds a fresh stub client per call and records what it was called with."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-        self.clients: list[StubClient] = []
-
-    def __call__(self, **kwargs: object) -> StubClient:
-        self.calls.append(kwargs)
-        client = StubClient()
-        self.clients.append(client)
-        return client
-
-
 @pytest.fixture
 def wire(monkeypatch: pytest.MonkeyPatch):
     """Wire a provider to the real per-dialect construction and a recording completion."""
@@ -306,6 +277,45 @@ class TestTheAttemptsOwnTransport:
 
 
 # ---------------------------------------------------------------------------
+# The injected inputs
+# ---------------------------------------------------------------------------
+
+
+class TestTheInjectedInputs:
+    """The constructor's inputs are the client's own: the pinning wraps what the caller supplied.
+
+    The provider takes the pinned builder's inputs, not a client, so the
+    client the binding builds is always its own — but it is built *from* the
+    supplied inputs, which is what lets a deployment resolve through its own
+    stub or supply its own socket layer without leaving the controls.
+    """
+
+    async def test_the_client_is_built_from_the_injected_inputs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        completion = RecordingCompletion()
+        monkeypatch.setattr(litellm, "acompletion", completion)
+        built: list[httpx.AsyncBaseTransport] = []
+
+        def inner_factory() -> httpx.AsyncBaseTransport:
+            transport = httpx.AsyncHTTPTransport()
+            built.append(transport)
+            return transport
+
+        provider = LiteLLMProvider(inner_factory=inner_factory)
+
+        await provider.complete(
+            make_route(format=HTTP_HANDLER_DIALECTS[0]), make_request(), make_context()
+        )
+
+        (call,) = completion.calls
+        handler = call["client"]
+        assert isinstance(handler, AsyncHTTPHandler)
+        assert len(built) == 1
+        assert handler.transport._inner is built[0]  # pyright: ignore[reportPrivateUsage]
+
+
+# ---------------------------------------------------------------------------
 # The refusal
 # ---------------------------------------------------------------------------
 
@@ -341,33 +351,33 @@ class TestTheRefusal:
 
         assert completion.calls == []
 
-    async def test_an_explicit_factory_does_not_make_an_unverified_dialect_acceptable(self) -> None:
-        """The refusal is about the path the library takes, not about the client it is given."""
-        factory = StubClientFactory()
-        provider = LiteLLMProvider(client_factory=factory)
+    async def test_custom_transport_inputs_do_not_make_an_unverified_dialect_acceptable(
+        self,
+    ) -> None:
+        """The refusal is about the path the library takes, not about the inputs it is given.
+
+        Every injectable input is custom and hostile to the controls in the only
+        way it can be — a resolver that would fail the test if it were ever
+        consulted — and the refusal still wins, before any client is built.
+        """
+        built: list[httpx.AsyncBaseTransport] = []
+
+        def inner_factory() -> httpx.AsyncBaseTransport:
+            transport = httpx.AsyncHTTPTransport()
+            built.append(transport)
+            return transport
+
+        def resolver(host: str) -> tuple[str, ...]:
+            raise AssertionError(f"the resolver must not be called for {host}")
+
+        provider = LiteLLMProvider(resolver=resolver, verify=False, inner_factory=inner_factory)
 
         with pytest.raises(FailedPreconditionError):
             await provider.complete(
                 make_route(format=UNVERIFIED_DIALECT), make_request(), make_context()
             )
 
-        assert factory.calls == []
-
-    async def test_an_explicit_factory_still_supplies_the_client_for_a_verified_dialect(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The seam is unchanged: what the factory returns is what LiteLLM receives."""
-        factory = StubClientFactory()
-        completion = RecordingCompletion()
-        monkeypatch.setattr(litellm, "acompletion", completion)
-        provider = LiteLLMProvider(client_factory=factory)
-
-        await provider.complete(
-            make_route(format=HTTP_HANDLER_DIALECTS[0]), make_request(), make_context()
-        )
-
-        assert factory.calls == [{"budget": 30.0}]
-        assert injected_client(completion) is factory.clients[0]
+        assert built == []
 
 
 class _StubProvider:

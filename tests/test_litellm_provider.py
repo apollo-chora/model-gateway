@@ -1,11 +1,12 @@
-"""Tests for the LiteLLM provider: one upstream call through the pinned binding (PRD 9, 11.3, 14.1).
+"""Tests for the LiteLLM provider: one gateway attempt through the pinned binding
+(PRD 9, 11.3, 14.1).
 
-No test reaches the network. ``litellm.acompletion`` is monkeypatched with a
-recording stand-in, the transport's client factory is replaced with a local
-stub that builds no socket, and the response fixtures are the real LiteLLM
-types — built through LiteLLM's own converter from a realistic upstream
-payload — so what runs is exactly what the installed binding does with a real
-provider's answer.
+No test reaches the network: ``litellm.acompletion`` is monkeypatched with a
+recording stand-in, so the real per-dialect client is built and closed around a
+transport that is never asked for a request, and the response fixtures are the
+real LiteLLM types — built through LiteLLM's own converter from a realistic
+upstream payload — so what runs is exactly what the installed binding does with
+a real provider's answer.
 
 The failure paths construct LiteLLM's and the OpenAI SDK's exception classes
 in memory, which is where the mapping of PRD section 5.4 lives. The tests that
@@ -17,6 +18,7 @@ and only a fresh process can show whether the seam suppressed it.
 import asyncio
 import inspect
 import os
+import ssl
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +30,7 @@ import pytest
 from litellm.litellm_core_utils.llm_response_utils.convert_dict_to_response import (
     convert_to_model_response_object,
 )
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.types.utils import ModelResponse
 
 from model_gateway.capabilities import Capability
@@ -54,11 +57,13 @@ from model_gateway.errors import (
     UnavailableError,
 )
 from model_gateway.providers.base import AttemptContext, TextProvider
-from model_gateway.providers.litellm_provider import LiteLLMProvider
+from model_gateway.providers.litellm_provider import SUPPORTED_DIALECTS, LiteLLMProvider
+from model_gateway.security.transport import PinnedAddressTransport
 
 ENDPOINT = "https://upstream.internal.example/v1"
 SECRET_KEY = "sk-upstream-secret-key"
 UPSTREAM_MODEL = "gpt-4o"
+PUBLIC_ADDRESS = "93.184.216.34"
 
 ALL_CAPABILITIES = frozenset(
     {
@@ -158,33 +163,34 @@ def response_from(payload: dict[str, object]) -> ModelResponse:
     return response
 
 
-class StubClient:
-    """Stands for the transport's outbound client: buildable and closable, never connected."""
+def pinned_transport_of(client: object) -> PinnedAddressTransport:
+    """The pinned transport ``client`` connects through, whichever shape it is.
 
-    def __init__(self) -> None:
-        self.entered = False
-        self.exited = False
+    Both shapes keep the httpx client that owns the connection in one
+    attribute; the OpenAI SDK's is private, which is why this is a helper
+    rather than an assertion in each test.
+    """
+    http_client = (
+        client._client  # pyright: ignore[reportPrivateUsage]  # the SDK keeps its httpx client here
+        if isinstance(client, openai.AsyncOpenAI)
+        else client.client  # pyright: ignore[reportAttributeAccessIssue]  # AsyncHTTPHandler property
+    )
+    transport = http_client._transport  # pyright: ignore[reportPrivateUsage]  # httpx keeps its transport here
+    assert isinstance(transport, PinnedAddressTransport)
+    return transport
 
-    async def __aenter__(self) -> "StubClient":
-        self.entered = True
-        return self
 
-    async def __aexit__(self, *exc_info: object) -> None:
-        self.exited = True
+def recording_aclose(monkeypatch: pytest.MonkeyPatch) -> list[PinnedAddressTransport]:
+    """Record every pinned transport closed while the test runs."""
+    closed: list[PinnedAddressTransport] = []
+    original = PinnedAddressTransport.aclose
 
+    async def record(self: PinnedAddressTransport) -> None:
+        closed.append(self)
+        await original(self)
 
-class StubClientFactory:
-    """A factory that builds a fresh stub client per call and records what it was called with."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-        self.clients: list[StubClient] = []
-
-    def __call__(self, **kwargs: object) -> StubClient:
-        self.calls.append(kwargs)
-        client = StubClient()
-        self.clients.append(client)
-        return client
+    monkeypatch.setattr(PinnedAddressTransport, "aclose", record)
+    return closed
 
 
 class RecordingCompletion:
@@ -203,16 +209,14 @@ class RecordingCompletion:
 
 @pytest.fixture
 def wire(monkeypatch: pytest.MonkeyPatch):
-    """Wire a provider to a stub client factory and a scripted completion; no network."""
+    """Wire a provider to a scripted completion; the real client is built, never connected."""
 
     def wire_outcome(
         outcome: object,
-    ) -> tuple[LiteLLMProvider, StubClientFactory, RecordingCompletion]:
-        factory = StubClientFactory()
+    ) -> tuple[LiteLLMProvider, RecordingCompletion]:
         completion = RecordingCompletion(outcome)
         monkeypatch.setattr(litellm, "acompletion", completion)
-        provider = LiteLLMProvider(client_factory=factory)
-        return provider, factory, completion
+        return LiteLLMProvider(), completion
 
     return wire_outcome
 
@@ -228,7 +232,7 @@ class TestTheCall:
     async def test_the_parameters_are_the_translation_plus_the_attempts_own_controls(
         self, wire
     ) -> None:
-        provider, _, completion = wire(response_from(completion_payload()))
+        provider, completion = wire(response_from(completion_payload()))
 
         await provider.complete(make_route(), make_request(), make_context())
 
@@ -243,27 +247,37 @@ class TestTheCall:
         assert call["num_retries"] == 0
         assert call["timeout"] == 30.0
 
-    async def test_the_injected_client_is_the_one_the_factory_built(self, wire) -> None:
-        provider, factory, completion = wire(response_from(completion_payload()))
+    async def test_the_injected_client_is_the_sdk_client_over_the_pinned_transport(
+        self, wire
+    ) -> None:
+        provider, completion = wire(response_from(completion_payload()))
 
         await provider.complete(make_route(), make_request(), make_context())
 
         (call,) = completion.calls
-        (built,) = factory.calls
-        assert call["client"] is factory.clients[0]
-        assert built == {"budget": 30.0}
+        client = call["client"]
+        assert isinstance(client, openai.AsyncOpenAI)
+        # The SDK reads these off the object it is handed, which is why a bare
+        # httpx client fails this path outright rather than losing the controls.
+        assert client.api_key == SECRET_KEY
+        assert str(client.base_url).rstrip("/") == ENDPOINT
+        assert client.max_retries == 0
+        http_client = client._client  # pyright: ignore[reportPrivateUsage]
+        assert http_client.follow_redirects is False
+        assert http_client.trust_env is False
+        assert isinstance(pinned_transport_of(client), PinnedAddressTransport)
 
-    async def test_the_client_is_closed_when_the_attempt_ends(self, wire) -> None:
-        provider, factory, _ = wire(response_from(completion_payload()))
+    async def test_the_client_is_closed_when_the_attempt_ends(self, wire, monkeypatch) -> None:
+        closed = recording_aclose(monkeypatch)
+        provider, completion = wire(response_from(completion_payload()))
 
         await provider.complete(make_route(), make_request(), make_context())
 
-        (client,) = factory.clients
-        assert client.entered
-        assert client.exited
+        (call,) = completion.calls
+        assert closed == [pinned_transport_of(call["client"])]
 
     async def test_the_attempt_budget_is_the_calls_timeout(self, wire) -> None:
-        provider, _, completion = wire(response_from(completion_payload()))
+        provider, completion = wire(response_from(completion_payload()))
 
         await provider.complete(make_route(), make_request(), make_context(timeout=12.5))
 
@@ -271,27 +285,29 @@ class TestTheCall:
 
     async def test_no_budget_is_passed_through_as_none(self, wire) -> None:
         """The gateway set no budget; the binding invents none of its own."""
-        provider, _, completion = wire(response_from(completion_payload()))
+        provider, completion = wire(response_from(completion_payload()))
 
         await provider.complete(make_route(), make_request(), make_context(timeout=None))
 
         assert completion.calls[0]["timeout"] is None
 
-    async def test_each_attempt_gets_a_fresh_client_with_its_own_budget(self, wire) -> None:
-        provider, factory, completion = wire(response_from(completion_payload()))
+    async def test_each_attempt_gets_a_fresh_client_with_its_own_budget(
+        self, wire, monkeypatch
+    ) -> None:
+        closed = recording_aclose(monkeypatch)
+        provider, completion = wire(response_from(completion_payload()))
 
         await provider.complete(make_route(), make_request(), make_context(timeout=7.0))
         await provider.complete(make_route(), make_request(), make_context(timeout=7.0))
 
-        assert len(factory.clients) == 2
-        assert factory.clients[0] is not factory.clients[1]
-        assert all(client.entered and client.exited for client in factory.clients)
-        assert [call["budget"] for call in factory.calls] == [7.0, 7.0]
-        assert completion.calls[0]["client"] is factory.clients[0]
-        assert completion.calls[1]["client"] is factory.clients[1]
+        first, second = (call["client"] for call in completion.calls)
+        assert first is not second
+        assert closed == [pinned_transport_of(first), pinned_transport_of(second)]
+        assert first.timeout == httpx.Timeout(7.0)
+        assert second.timeout == httpx.Timeout(7.0)
 
     async def test_the_call_is_made_exactly_once_per_attempt(self, wire) -> None:
-        provider, _, completion = wire(response_from(completion_payload()))
+        provider, completion = wire(response_from(completion_payload()))
 
         await provider.complete(make_route(), make_request(), make_context())
 
@@ -299,7 +315,7 @@ class TestTheCall:
 
     async def test_the_instruction_is_forwarded_as_its_own_system_message(self, wire) -> None:
         """The invocation-level instruction and a conversation system message stay unmerged."""
-        provider, _, completion = wire(response_from(completion_payload()))
+        provider, completion = wire(response_from(completion_payload()))
         request = make_request(
             system_instruction="answer concisely",
             messages=(
@@ -317,7 +333,7 @@ class TestTheCall:
         ]
 
     async def test_the_answer_is_normalised_into_the_canonical_response(self, wire) -> None:
-        provider, _, _ = wire(response_from(completion_payload()))
+        provider, _ = wire(response_from(completion_payload()))
 
         response = await provider.complete(make_route(), make_request(), make_context())
 
@@ -353,7 +369,7 @@ class TestTheCall:
                 }
             ]
         )
-        provider, _, _ = wire(response_from(payload))
+        provider, _ = wire(response_from(payload))
 
         response = await provider.complete(make_route(), make_request(), make_context())
 
@@ -530,7 +546,7 @@ class TestFailures:
     async def test_every_failure_is_mapped_onto_the_taxonomy(
         self, wire, error: Exception, category: type, reason: str
     ) -> None:
-        provider, _, _ = wire(error)
+        provider, _ = wire(error)
 
         with pytest.raises(category) as excinfo:
             await provider.complete(make_route(), make_request(), make_context())
@@ -548,7 +564,7 @@ class TestFailures:
             model=UPSTREAM_MODEL,
             response=http_error(401),
         )
-        provider, _, _ = wire(error)
+        provider, _ = wire(error)
 
         with pytest.raises(UnauthenticatedError) as excinfo:
             await provider.complete(make_route(), make_request(), make_context())
@@ -561,7 +577,7 @@ class TestFailures:
         self, wire
     ) -> None:
         """A refusal part has no upstream representation: a refusal, not a mapped failure."""
-        provider, _, _ = wire(response_from(completion_payload()))
+        provider, _ = wire(response_from(completion_payload()))
         request = make_request(
             messages=(
                 Message(
@@ -578,18 +594,22 @@ class TestFailures:
 
     async def test_cancellation_propagates_unmapped(self, wire) -> None:
         """PRD section 15: cancellation is propagated, not reported as a gateway failure."""
-        provider, _, _ = wire(asyncio.CancelledError())
+        provider, _ = wire(asyncio.CancelledError())
 
         with pytest.raises(asyncio.CancelledError):
             await provider.complete(make_route(), make_request(), make_context())
 
-    async def test_the_client_is_closed_when_the_call_is_cancelled(self, wire) -> None:
-        provider, factory, _ = wire(asyncio.CancelledError())
+    async def test_the_client_is_closed_when_the_call_is_cancelled(
+        self, wire, monkeypatch
+    ) -> None:
+        closed = recording_aclose(monkeypatch)
+        provider, completion = wire(asyncio.CancelledError())
 
         with pytest.raises(asyncio.CancelledError):
             await provider.complete(make_route(), make_request(), make_context())
 
-        assert factory.clients[0].exited
+        (call,) = completion.calls
+        assert closed == [pinned_transport_of(call["client"])]
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +621,7 @@ class TestTheProtocol:
     """The provider is usable wherever a :class:`TextProvider` is expected."""
 
     async def test_the_provider_satisfies_the_text_provider_protocol(self) -> None:
-        provider = LiteLLMProvider(client_factory=StubClientFactory())
+        provider = LiteLLMProvider()
 
         assert inspect.iscoroutinefunction(provider.complete)
         assert list(inspect.signature(provider.complete).parameters) == [
@@ -616,6 +636,78 @@ class TestTheProtocol:
         response = await provider.complete(make_route(), make_request(), make_context())
 
         assert response.model == "text-default"
+
+
+# ---------------------------------------------------------------------------
+# The seam is beneath the security boundary
+# ---------------------------------------------------------------------------
+
+
+class TestTheSeamIsBeneathTheBoundary:
+    """What a caller may inject is the transport's inputs, never the client (PRD 14.1).
+
+    The constructor accepts the pinned builder's inputs and nothing else, so no
+    public input can replace the per-dialect client construction: it is
+    impossible through the public API to obtain an unsafe client for a verified
+    dialect, and the attempt does not need to raise to prevent one.
+    """
+
+    def test_the_constructor_accepts_no_client_or_client_factory(self) -> None:
+        parameters = inspect.signature(LiteLLMProvider.__init__).parameters
+        assert set(parameters) == {"self", "resolver", "verify", "inner_factory"}
+        for name, parameter in parameters.items():
+            if name == "self":
+                continue
+            assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+    @pytest.mark.parametrize("dialect", sorted(SUPPORTED_DIALECTS))
+    async def test_custom_transport_inputs_still_yield_a_pinned_non_redirecting_client(
+        self, dialect: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every injectable input is custom; the injected client is still the safe one.
+
+        ``verify`` does not reach a supplied inner transport, as the transport
+        documents; what the custom inputs must not change is the pinning and
+        the refused redirect following, whichever of them is supplied.
+        """
+        completion = RecordingCompletion(response_from(completion_payload()))
+        monkeypatch.setattr(litellm, "acompletion", completion)
+        built: list[httpx.AsyncBaseTransport] = []
+
+        def inner_factory() -> httpx.AsyncBaseTransport:
+            transport = httpx.AsyncHTTPTransport()
+            built.append(transport)
+            return transport
+
+        def resolver(host: str) -> tuple[str, ...]:
+            return (PUBLIC_ADDRESS,)
+
+        provider = LiteLLMProvider(
+            resolver=resolver,
+            verify=ssl.create_default_context(),
+            inner_factory=inner_factory,
+        )
+
+        await provider.complete(make_route(format=dialect), make_request(), make_context())
+
+        (call,) = completion.calls
+        client = call["client"]
+        if dialect == "openai":
+            assert isinstance(client, openai.AsyncOpenAI)
+            assert client.max_retries == 0
+            http_client = client._client  # pyright: ignore[reportPrivateUsage]
+        else:
+            assert isinstance(client, AsyncHTTPHandler)
+            assert client.follow_redirects is False
+            http_client = client.client
+            assert http_client._transport is client.transport  # pyright: ignore[reportPrivateUsage]
+        assert http_client.follow_redirects is False
+        assert http_client.trust_env is False
+        transport = http_client._transport  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(transport, PinnedAddressTransport)
+        assert len(built) == 1
+        assert transport._inner is built[0]  # pyright: ignore[reportPrivateUsage]
+        assert transport._resolver is resolver  # pyright: ignore[reportPrivateUsage]
 
 
 # ---------------------------------------------------------------------------
