@@ -1,4 +1,4 @@
-"""Canonical domain types and their golden fixtures (PRD sections 4, 5, 9.1, 9.2, 9.3, 13)."""
+"""Canonical domain types and their golden fixtures (PRD sections 4, 5, 9.1, 9.3, 9.4 and 13)."""
 
 import dataclasses
 import json
@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from model_gateway.domain import (
+    FORWARDABLE_METADATA_KEYS,
     FinishReason,
     FrozenJsonObject,
     GenerationConfig,
@@ -15,6 +16,9 @@ from model_gateway.domain import (
     InvocationRequest,
     InvocationResponse,
     Message,
+    RefusalPart,
+    ResponseFormat,
+    ResponseFormatMode,
     ResponseModality,
     Role,
     TextPart,
@@ -27,6 +31,7 @@ from model_gateway.domain import (
     UsageSource,
     content_part_from_dict,
     freeze_json,
+    output_item_from_dict,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "canonical"
@@ -35,6 +40,7 @@ FIXTURE_TYPES = {
     "invocation_request.json": InvocationRequest,
     "invocation_response.json": InvocationResponse,
     "invocation_response_image.json": InvocationResponse,
+    "invocation_response_refusal.json": InvocationResponse,
 }
 
 FIXTURE_NAMES = tuple(sorted(FIXTURE_TYPES))
@@ -135,13 +141,37 @@ def test_request_fixture_pins_a_multimodal_message() -> None:
     assert parts[2].media_type == "image/jpeg"
 
 
-def test_response_fixture_pins_a_tool_call_with_structured_arguments() -> None:
+def test_request_fixture_pins_a_structured_output_requirement() -> None:
+    document, _ = fixture("invocation_request.json")
+    parsed = InvocationRequest.from_dict(document)
+
+    response_format = parsed.generation_config.response_format
+    assert response_format is not None
+    assert response_format.mode is ResponseFormatMode.JSON_SCHEMA
+    assert response_format.name == "weather_report"
+    assert response_format.strict is True
+    assert response_format.schema is not None
+    assert response_format.schema["required"] == ("city", "temp_c")
+    assert response_format.schema["properties"]["temp_c"] == {"type": "number"}
+
+
+def test_response_fixture_pins_ordered_output_with_a_tool_call() -> None:
     document, _ = fixture("invocation_response.json")
     parsed = InvocationResponse.from_dict(document)
 
     assert parsed.finish_reason is FinishReason.TOOL_CALLS
+    assert parsed.raw_finish_reason == "tool_calls"
+    assert parsed.content == (
+        TextPart(text="Checking the weather now."),
+        ToolCall(
+            id="call_01",
+            name="get_weather",
+            arguments={"city": "Paris", "units": "metric", "days": 1},
+        ),
+    )
     assert parsed.tool_calls[0].arguments == {"city": "Paris", "units": "metric", "days": 1}
-    assert parsed.usage.source is UsageSource.PROVIDER
+    assert parsed.usage.estimated_fields == frozenset()
+    assert parsed.usage.source_of("input_tokens") is UsageSource.PROVIDER
     assert parsed.usage.cached_tokens == 256
     assert parsed.attempt_count == 2
     assert parsed.fallback_used is True
@@ -150,16 +180,49 @@ def test_response_fixture_pins_a_tool_call_with_structured_arguments() -> None:
     assert parsed.cost_currency == "USD"
 
 
-def test_image_response_fixture_pins_image_output_and_estimated_usage() -> None:
+def test_image_response_fixture_pins_interleaved_text_and_images() -> None:
+    """Text, image, text, image is not the same response as both texts, then both images."""
     document, _ = fixture("invocation_response_image.json")
     parsed = InvocationResponse.from_dict(document)
 
-    assert parsed.text == ""
-    assert parsed.images[0].media_type == "image/png"
-    assert parsed.usage.source is UsageSource.ESTIMATE
+    assert [type(item).__name__ for item in parsed.content] == [
+        "TextPart",
+        "ImagePart",
+        "TextPart",
+        "ImagePart",
+    ]
+    assert parsed.text == "Here is the first draft:and here is the alternative:"
+    assert [image.media_type for image in parsed.images] == ["image/png", "image/png"]
+    assert parsed.images[0].data is not None and parsed.images[0].url is None
+    assert parsed.images[1].data is None and parsed.images[1].url == (
+        "https://images.example/draft-2.png"
+    )
+    assert parsed.tool_calls == ()
+
+
+def test_image_response_fixture_pins_per_count_usage_provenance() -> None:
+    """Reported input tokens are a fact even when the total beside them is an estimate."""
+    document, _ = fixture("invocation_response_image.json")
+    parsed = InvocationResponse.from_dict(document)
+
+    assert parsed.usage.estimated_fields == frozenset({"total_tokens"})
     assert parsed.usage.is_estimated is True
+    assert parsed.usage.source_of("input_tokens") is UsageSource.PROVIDER
+    assert parsed.usage.source_of("total_tokens") is UsageSource.ESTIMATE
     assert parsed.usage.output_tokens is None
+    assert parsed.usage.source_of("output_tokens") is UsageSource.PROVIDER
     assert parsed.estimated_cost is None
+
+
+def test_refusal_response_fixture_pins_a_refusal_apart_from_text() -> None:
+    document, _ = fixture("invocation_response_refusal.json")
+    parsed = InvocationResponse.from_dict(document)
+
+    assert parsed.content == (RefusalPart(text="I can't help with that request."),)
+    assert parsed.refusals == (RefusalPart(text="I can't help with that request."),)
+    assert parsed.text == ""
+    assert parsed.finish_reason is FinishReason.CONTENT_FILTER
+    assert parsed.raw_finish_reason == "content_filter"
 
 
 # --------------------------------------------------------------------------- enums
@@ -181,6 +244,10 @@ def test_finish_reason_vocabulary() -> None:
 
 def test_usage_source_vocabulary() -> None:
     assert [source.value for source in UsageSource] == ["provider", "estimate"]
+
+
+def test_response_format_mode_vocabulary() -> None:
+    assert [mode.value for mode in ResponseFormatMode] == ["text", "json_object", "json_schema"]
 
 
 def test_response_modality_vocabulary() -> None:
@@ -236,6 +303,47 @@ def test_response_refuses_a_finish_reason_that_is_not_a_string() -> None:
         response(finish_reason=5)
 
 
+def test_response_keeps_an_unclassified_reason_apart_from_a_missing_one() -> None:
+    """UNKNOWN must never mean 'the gateway deleted what upstream told us' (PRD 5.2)."""
+    unclassified = response(raw_finish_reason="brand_new_semantic")
+    missing = response()
+
+    assert unclassified.finish_reason is missing.finish_reason is FinishReason.UNKNOWN
+    assert unclassified.raw_finish_reason == "brand_new_semantic"
+    assert missing.raw_finish_reason is None
+    assert unclassified != missing
+    assert InvocationResponse.from_dict(unclassified.to_dict()) == unclassified
+
+
+def test_response_records_the_provider_reason_verbatim() -> None:
+    """The raw reason is evidence, so it is not tidied up on the way in."""
+    assert response(raw_finish_reason="STOP").raw_finish_reason == "STOP"
+    assert response(raw_finish_reason="").raw_finish_reason == ""
+
+
+def test_response_accepts_a_recognised_reason_classified_as_itself() -> None:
+    result = response(finish_reason=FinishReason.STOP, raw_finish_reason="stop")
+
+    assert (result.finish_reason, result.raw_finish_reason) == (FinishReason.STOP, "stop")
+
+
+def test_response_refuses_a_classification_its_recorded_source_contradicts() -> None:
+    with pytest.raises(ValueError, match="contradicts raw_finish_reason"):
+        response(finish_reason=FinishReason.STOP, raw_finish_reason="length")
+
+
+def test_response_refuses_to_report_unknown_for_a_reason_it_can_classify() -> None:
+    with pytest.raises(ValueError, match="contradicts raw_finish_reason"):
+        response(raw_finish_reason="stop")
+
+
+def test_response_allows_a_binding_classification_of_an_unrecognised_reason() -> None:
+    """A reason the gateway's own vocabulary does not know is the binding's to classify."""
+    result = response(finish_reason=FinishReason.LENGTH, raw_finish_reason="max_tokens")
+
+    assert (result.finish_reason, result.raw_finish_reason) == (FinishReason.LENGTH, "max_tokens")
+
+
 def test_message_accepts_a_role_by_its_string_value() -> None:
     assert Message(role="user").role is Role.USER
 
@@ -251,7 +359,7 @@ def test_message_refuses_a_role_that_is_not_a_string() -> None:
 
 
 def test_message_refuses_an_unknown_role_when_parsing() -> None:
-    """A role the gateway cannot name cannot be carried into a message (PRD 9.3)."""
+    """A role the gateway cannot name cannot be carried into a message (PRD 9.1)."""
     with pytest.raises(ValueError, match="message 'role' must be one of"):
         Message.from_dict({"role": "wizard", "content": []})
 
@@ -262,12 +370,14 @@ def test_message_refuses_an_unknown_role_when_parsing() -> None:
 INSTANCES = (
     ("text part", TextPart(text="hi"), "text"),
     ("image part", ImagePart(data="AAAA"), "data"),
+    ("refusal part", RefusalPart(text="I can't help with that."), "text"),
     ("message", USER_MESSAGE, "role"),
     ("tool definition", ToolDefinition(name="get_weather"), "name"),
     ("tool call", ToolCall(id="call_01", name="get_weather"), "id"),
     ("tool result", ToolResult(tool_call_id="call_01"), "content"),
     ("tool choice", ToolChoice.specific("get_weather"), "mode"),
     ("generation config", GenerationConfig(temperature=0.2), "temperature"),
+    ("response format", ResponseFormat(mode=ResponseFormatMode.JSON_OBJECT), "mode"),
     ("usage", Usage(input_tokens=1), "input_tokens"),
     ("request", REQUEST, "model"),
     ("response", RESPONSE, "model"),
@@ -427,10 +537,37 @@ def test_image_part_round_trip() -> None:
 def test_content_part_dispatches_on_its_type() -> None:
     assert content_part_from_dict({"type": "text", "text": "hi"}) == TextPart(text="hi")
     assert content_part_from_dict({"type": "image", "data": "AAAA"}) == ImagePart(data="AAAA")
+    assert content_part_from_dict({"type": "refusal", "text": "no"}) == RefusalPart(text="no")
+
+
+def test_refusal_part_round_trip() -> None:
+    part = RefusalPart(text="I can't help with that.")
+
+    assert RefusalPart.from_dict(part.to_dict()) == part
+    assert part.to_dict() == {"type": "refusal", "text": "I can't help with that."}
+
+
+def test_refusal_part_allows_empty_text() -> None:
+    assert RefusalPart(text="").text == ""
+
+
+def test_refusal_part_refuses_a_non_string() -> None:
+    with pytest.raises(ValueError, match="refusal part 'text' must be a string"):
+        RefusalPart(text=1)
+
+
+def test_refusal_part_refuses_an_unknown_key() -> None:
+    with pytest.raises(ValueError, match="unsupported key 'reason'"):
+        RefusalPart.from_dict({"type": "refusal", "text": "no", "reason": "safety"})
+
+
+def test_refusal_part_is_a_content_part_but_not_a_text_part() -> None:
+    """Collapsing a refusal into text would lose the provider's own decision (PRD 5.2)."""
+    assert RefusalPart(text="no") != TextPart(text="no")
 
 
 def test_content_part_refuses_an_unknown_type() -> None:
-    """A part the gateway cannot represent must not be skipped (PRD section 9.3)."""
+    """A part the gateway cannot represent must not be skipped (PRD section 9.1)."""
     with pytest.raises(ValueError, match="does not define"):
         content_part_from_dict({"type": "audio", "data": "AAAA"})
 
@@ -445,18 +582,69 @@ def test_content_part_refuses_a_non_object() -> None:
         content_part_from_dict(["text"])
 
 
+# --------------------------------------------------------------------------- output items
+
+
+def test_output_item_dispatches_on_its_type() -> None:
+    assert output_item_from_dict({"type": "text", "text": "hi"}) == TextPart(text="hi")
+    assert output_item_from_dict({"type": "image", "data": "AAAA"}) == ImagePart(data="AAAA")
+    assert output_item_from_dict({"type": "refusal", "text": "no"}) == RefusalPart(text="no")
+    assert output_item_from_dict({"type": "tool_call", "id": "call_01", "name": "get_weather"}) == (
+        ToolCall(id="call_01", name="get_weather")
+    )
+
+
+def test_output_item_refuses_an_unknown_type() -> None:
+    """A dropped item changes the answer the caller receives (PRD section 9.1)."""
+    with pytest.raises(ValueError, match="does not define"):
+        output_item_from_dict({"type": "audio", "data": "AAAA"})
+
+
+def test_output_item_names_every_supported_type_in_its_error() -> None:
+    with pytest.raises(ValueError, match="'tool_call'"):
+        output_item_from_dict({"type": "audio", "data": "AAAA"})
+
+
+def test_output_item_refuses_a_missing_discriminator() -> None:
+    with pytest.raises(ValueError, match="discriminator"):
+        output_item_from_dict({"id": "call_01", "name": "get_weather"})
+
+
+def test_output_item_refuses_a_non_object() -> None:
+    with pytest.raises(ValueError, match="output item must be a JSON object"):
+        output_item_from_dict(["text"])
+
+
+def test_tool_call_output_item_refuses_an_unknown_key() -> None:
+    with pytest.raises(ValueError, match="unsupported key 'index'"):
+        output_item_from_dict(
+            {"type": "tool_call", "id": "call_01", "name": "get_weather", "index": 0}
+        )
+
+
 def test_message_parses_its_content_parts() -> None:
     message = Message.from_dict(
         {
             "role": "user",
-            "content": [{"type": "text", "text": "hi"}, {"type": "image", "data": "AAAA"}],
+            "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "image", "data": "AAAA"},
+                {"type": "refusal", "text": "no"},
+            ],
             "name": None,
             "tool_calls": [],
             "tool_call_id": None,
         }
     )
 
-    assert message.content == (TextPart(text="hi"), ImagePart(data="AAAA"))
+    assert message.content == (TextPart(text="hi"), ImagePart(data="AAAA"), RefusalPart(text="no"))
+
+
+def test_assistant_history_may_carry_a_refusal() -> None:
+    """A refusal from an earlier turn is history, and history has to round-trip."""
+    message = Message(role=Role.ASSISTANT, content=(RefusalPart(text="I can't help with that."),))
+
+    assert Message.from_dict(message.to_dict()) == message
 
 
 def test_message_round_trip() -> None:
@@ -511,7 +699,7 @@ def test_tool_message_carries_its_call_id() -> None:
 
 
 def test_message_refuses_a_content_part_that_is_not_a_part() -> None:
-    with pytest.raises(ValueError, match="must be a TextPart or an ImagePart"):
+    with pytest.raises(ValueError, match="must be a TextPart, an ImagePart or a RefusalPart"):
         Message(role=Role.USER, content=("hi",))
 
 
@@ -601,19 +789,42 @@ def test_tool_call_refuses_arguments_that_are_not_json() -> None:
 def test_tool_result_defaults() -> None:
     result = ToolResult(tool_call_id="call_01")
 
-    assert result.content == ""
+    assert result.content == ()
+    assert result.text == ""
     assert result.is_error is False
 
 
 def test_tool_result_round_trip() -> None:
-    result = ToolResult(tool_call_id="call_01", content="18C", is_error=True)
+    result = ToolResult(
+        tool_call_id="call_01", content=(TextPart(text="18C"),), is_error=True
+    )
 
     assert ToolResult.from_dict(result.to_dict()) == result
     assert result.to_dict() == {
         "tool_call_id": "call_01",
-        "content": "18C",
+        "content": [{"type": "text", "text": "18C"}],
         "is_error": True,
     }
+
+
+def test_tool_result_carries_the_same_content_parts_a_message_does() -> None:
+    """A tool result that can only be text would need a migration the first time one is not."""
+    result = ToolResult(
+        tool_call_id="call_01",
+        content=(
+            TextPart(text="Paris:"),
+            ImagePart(data="AAAA", media_type="image/png"),
+            RefusalPart(text="the rest is restricted"),
+        ),
+    )
+
+    assert result.text == "Paris:"
+    assert ToolResult.from_dict(result.to_dict()) == result
+
+
+def test_tool_result_refuses_a_bare_string_as_content() -> None:
+    with pytest.raises(ValueError, match="must be a JSON array"):
+        ToolResult(tool_call_id="call_01", content="18C")
 
 
 def test_tool_result_requires_the_call_it_answers() -> None:
@@ -672,6 +883,7 @@ def test_generation_config_defaults_leave_every_parameter_unset() -> None:
     assert config.seed is None
     assert config.presence_penalty is None
     assert config.frequency_penalty is None
+    assert config.response_format is None
 
 
 def test_generation_config_keeps_unset_apart_from_zero() -> None:
@@ -689,6 +901,12 @@ def test_generation_config_round_trip() -> None:
         seed=7,
         presence_penalty=0.0,
         frequency_penalty=0.5,
+        response_format=ResponseFormat(
+            mode=ResponseFormatMode.JSON_SCHEMA,
+            schema={"type": "object", "required": ["city"]},
+            name="weather_report",
+            strict=True,
+        ),
     )
 
     assert GenerationConfig.from_dict(config.to_dict()) == config
@@ -700,6 +918,12 @@ def test_generation_config_round_trip() -> None:
         "seed": 7,
         "presence_penalty": 0.0,
         "frequency_penalty": 0.5,
+        "response_format": {
+            "mode": "json_schema",
+            "schema": {"type": "object", "required": ["city"]},
+            "name": "weather_report",
+            "strict": True,
+        },
     }
 
 
@@ -755,6 +979,126 @@ def test_generation_config_parses_an_absent_parameter_set() -> None:
     assert GenerationConfig.from_dict({}) == GenerationConfig()
 
 
+def test_generation_config_refuses_a_response_format_that_is_not_one() -> None:
+    with pytest.raises(ValueError, match="response_format must be a ResponseFormat"):
+        GenerationConfig(response_format={"mode": "json_object"})
+
+
+# --------------------------------------------------------------------------- response format
+
+
+def test_response_format_defaults_to_text_without_a_schema() -> None:
+    response_format = ResponseFormat()
+
+    assert response_format.mode is ResponseFormatMode.TEXT
+    assert response_format.schema is None
+    assert response_format.name is None
+    assert response_format.strict is False
+
+
+def test_response_format_json_object_needs_no_schema() -> None:
+    response_format = ResponseFormat(mode=ResponseFormatMode.JSON_OBJECT)
+
+    assert response_format.mode is ResponseFormatMode.JSON_OBJECT
+    assert response_format.schema is None
+
+
+def test_response_format_keeps_the_schema_it_was_given() -> None:
+    """A schema the gateway had rewritten would describe a different requirement."""
+    schema = {"type": "object", "properties": {"city": {"type": "string"}}}
+
+    response_format = ResponseFormat(mode=ResponseFormatMode.JSON_SCHEMA, schema=schema)
+
+    assert isinstance(response_format.schema, FrozenJsonObject)
+    assert response_format.schema == schema
+    assert isinstance(response_format.schema["properties"]["city"], FrozenJsonObject)
+
+
+def test_response_format_schema_round_trip() -> None:
+    response_format = ResponseFormat(
+        mode=ResponseFormatMode.JSON_SCHEMA,
+        schema={"type": "object", "required": ["city"]},
+        name="weather_report",
+        strict=True,
+    )
+
+    assert ResponseFormat.from_dict(response_format.to_dict()) == response_format
+    assert response_format.to_dict() == {
+        "mode": "json_schema",
+        "schema": {"type": "object", "required": ["city"]},
+        "name": "weather_report",
+        "strict": True,
+    }
+
+
+def test_response_format_round_trips_its_defaults() -> None:
+    response_format = ResponseFormat()
+
+    assert ResponseFormat.from_dict(response_format.to_dict()) == response_format
+    assert response_format.to_dict() == {
+        "mode": "text",
+        "schema": None,
+        "name": None,
+        "strict": False,
+    }
+
+
+def test_response_format_accepts_a_mode_by_its_string_value() -> None:
+    assert ResponseFormat(mode="json_object").mode is ResponseFormatMode.JSON_OBJECT
+
+
+def test_response_format_refuses_an_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="response format 'mode' must be one of"):
+        ResponseFormat(mode="yaml")
+
+
+def test_response_format_refuses_a_schema_mode_without_a_schema() -> None:
+    """The requirement could not be stated, let alone enforced (PRD section 9.5)."""
+    with pytest.raises(ValueError, match="must carry the 'schema'"):
+        ResponseFormat(mode=ResponseFormatMode.JSON_SCHEMA)
+    with pytest.raises(ValueError, match="must carry the 'schema'"):
+        ResponseFormat(mode=ResponseFormatMode.JSON_SCHEMA, name="weather_report", strict=True)
+
+
+@pytest.mark.parametrize(
+    "mode", [ResponseFormatMode.TEXT, ResponseFormatMode.JSON_OBJECT]
+)
+def test_response_format_refuses_a_schema_in_a_mode_that_does_not_use_one(
+    mode: ResponseFormatMode,
+) -> None:
+    with pytest.raises(ValueError, match="must not carry a 'schema'"):
+        ResponseFormat(mode=mode, schema={"type": "object"})
+
+
+@pytest.mark.parametrize(
+    "mode", [ResponseFormatMode.TEXT, ResponseFormatMode.JSON_OBJECT]
+)
+def test_response_format_refuses_a_name_in_a_mode_that_has_no_schema(
+    mode: ResponseFormatMode,
+) -> None:
+    with pytest.raises(ValueError, match="must not carry a 'name'"):
+        ResponseFormat(mode=mode, name="weather_report")
+
+
+@pytest.mark.parametrize(
+    "mode", [ResponseFormatMode.TEXT, ResponseFormatMode.JSON_OBJECT]
+)
+def test_response_format_refuses_strictness_without_a_schema(mode: ResponseFormatMode) -> None:
+    with pytest.raises(ValueError, match="must not be strict"):
+        ResponseFormat(mode=mode, strict=True)
+
+
+def test_response_format_refuses_a_schema_that_is_not_an_object() -> None:
+    """A boolean JSON Schema is refused explicitly rather than coerced (PRD 9.1)."""
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        ResponseFormat(mode=ResponseFormatMode.JSON_SCHEMA, schema=True)
+
+
+def test_response_format_refuses_an_unknown_key() -> None:
+    with pytest.raises(ValueError, match="unsupported key 'temperature'"):
+        ResponseFormat.from_dict({"mode": "json_object", "temperature": 0.2})
+
+
 # --------------------------------------------------------------------------- usage
 
 
@@ -766,17 +1110,39 @@ def test_usage_defaults_are_unknown_not_zero() -> None:
     assert usage.output_tokens is None
     assert usage.total_tokens is None
     assert usage.cached_tokens is None
-    assert usage.source is UsageSource.PROVIDER
+    assert usage.estimated_fields == frozenset()
     assert usage.is_estimated is False
+    assert usage.source_of("input_tokens") is UsageSource.PROVIDER
 
 
-def test_usage_distinguishes_reported_counts_from_estimates() -> None:
+def test_usage_records_provenance_for_each_count() -> None:
+    """Reported input and output tokens stay facts when only the total was derived."""
+    usage = Usage(
+        input_tokens=412,
+        output_tokens=38,
+        total_tokens=450,
+        estimated_fields={"total_tokens"},
+    )
+
+    assert usage.source_of("input_tokens") is UsageSource.PROVIDER
+    assert usage.source_of("output_tokens") is UsageSource.PROVIDER
+    assert usage.source_of("total_tokens") is UsageSource.ESTIMATE
+    assert usage.source_of("cached_tokens") is UsageSource.PROVIDER
+    assert usage.is_estimated is True
+
+
+def test_usage_distinguishes_a_wholly_reported_record_from_a_wholly_derived_one() -> None:
     reported = Usage(input_tokens=412, output_tokens=38, total_tokens=450)
-    estimated = Usage(input_tokens=412, output_tokens=38, total_tokens=450, source="estimate")
+    derived = Usage(
+        input_tokens=412,
+        output_tokens=38,
+        total_tokens=450,
+        estimated_fields={"input_tokens", "output_tokens", "total_tokens"},
+    )
 
     assert reported.is_estimated is False
-    assert estimated.is_estimated is True
-    assert reported != estimated
+    assert derived.is_estimated is True
+    assert reported != derived
 
 
 def test_usage_keeps_an_unreported_cached_count_apart_from_zero() -> None:
@@ -785,7 +1151,13 @@ def test_usage_keeps_an_unreported_cached_count_apart_from_zero() -> None:
 
 
 def test_usage_round_trip() -> None:
-    usage = Usage(input_tokens=412, output_tokens=38, total_tokens=450, cached_tokens=256)
+    usage = Usage(
+        input_tokens=412,
+        output_tokens=38,
+        total_tokens=450,
+        cached_tokens=256,
+        estimated_fields={"total_tokens"},
+    )
 
     assert Usage.from_dict(usage.to_dict()) == usage
     assert usage.to_dict() == {
@@ -793,8 +1165,18 @@ def test_usage_round_trip() -> None:
         "output_tokens": 38,
         "total_tokens": 450,
         "cached_tokens": 256,
-        "source": "provider",
+        "estimated_fields": ["total_tokens"],
     }
+
+
+def test_usage_emits_estimated_fields_in_a_stable_order() -> None:
+    usage = Usage(
+        input_tokens=1,
+        output_tokens=2,
+        estimated_fields=frozenset({"output_tokens", "input_tokens"}),
+    )
+
+    assert usage.to_dict()["estimated_fields"] == ["input_tokens", "output_tokens"]
 
 
 def test_usage_round_trips_an_unknown_record() -> None:
@@ -803,8 +1185,28 @@ def test_usage_round_trips_an_unknown_record() -> None:
     assert Usage.from_dict(usage.to_dict()) == usage
 
 
-def test_usage_defaults_an_absent_source_to_provider() -> None:
-    assert Usage.from_dict({"input_tokens": 1}).source is UsageSource.PROVIDER
+def test_usage_defaults_absent_provenance_to_provider() -> None:
+    assert Usage.from_dict({"input_tokens": 1}).estimated_fields == frozenset()
+
+
+def test_usage_refuses_an_estimated_field_that_is_not_a_count() -> None:
+    with pytest.raises(ValueError, match="not a token count this record defines"):
+        Usage(input_tokens=1, estimated_fields={"reasoning_tokens"})
+
+
+def test_usage_refuses_to_call_an_unknown_count_an_estimate() -> None:
+    with pytest.raises(ValueError, match="but that count is unknown"):
+        Usage(estimated_fields={"total_tokens"})
+
+
+def test_usage_refuses_a_bare_string_as_estimated_fields() -> None:
+    with pytest.raises(ValueError, match="must be a JSON array of strings"):
+        Usage(input_tokens=1, estimated_fields="input_tokens")
+
+
+def test_usage_source_of_refuses_a_name_that_is_not_a_count() -> None:
+    with pytest.raises(ValueError, match="not a token count this record defines"):
+        Usage().source_of("reasoning_tokens")
 
 
 @pytest.mark.parametrize(
@@ -818,11 +1220,6 @@ def test_usage_refuses_a_negative_count(field: str) -> None:
 def test_usage_refuses_a_boolean_count() -> None:
     with pytest.raises(ValueError, match="input_tokens must be an integer"):
         Usage(input_tokens=True)
-
-
-def test_usage_refuses_an_unknown_source() -> None:
-    with pytest.raises(ValueError, match="source must be one of"):
-        Usage(source="guessed")
 
 
 # --------------------------------------------------------------------------- invocation request
@@ -867,6 +1264,44 @@ def test_request_metadata_is_frozen_json() -> None:
 def test_request_refuses_metadata_that_is_not_json() -> None:
     with pytest.raises(ValueError, match="cannot carry"):
         request(metadata={"when": object()})
+
+
+def test_request_metadata_is_never_forwarded() -> None:
+    """No feature consumes a metadata key, so none of it may reach a provider."""
+    invocation = request(metadata={"trace": {"sampled": True}, "request_source": "console"})
+
+    assert not FORWARDABLE_METADATA_KEYS
+    assert invocation.forwardable_metadata == {}
+    assert isinstance(invocation.forwardable_metadata, FrozenJsonObject)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        pytest.param("model", id="public model id"),
+        pytest.param("messages", id="conversation"),
+        pytest.param("tools", id="tool declarations"),
+        pytest.param("response_modality", id="response modality"),
+        pytest.param("metadata", id="metadata"),
+        pytest.param("temperature", id="generation parameter"),
+        pytest.param("response_format", id="structured output"),
+    ],
+)
+def test_request_refuses_metadata_that_names_a_canonical_field(key: str) -> None:
+    """Metadata is not a place to park a model parameter the contract cannot carry."""
+    with pytest.raises(ValueError, match=f"metadata key {key!r} is a canonical invocation field"):
+        request(metadata={key: "anything"})
+
+
+def test_request_refuses_a_canonical_metadata_key_when_parsing() -> None:
+    with pytest.raises(ValueError, match="is a canonical invocation field name"):
+        InvocationRequest.from_dict(
+            {
+                "model": "text-default",
+                "messages": [{"role": "user", "content": []}],
+                "metadata": {"temperature": 0.2},
+            }
+        )
 
 
 def test_request_round_trip() -> None:
@@ -960,10 +1395,13 @@ def test_response_defaults() -> None:
     result = response()
 
     assert result.invocation_id is None
+    assert result.content == ()
     assert result.text == ""
-    assert result.tool_calls == ()
     assert result.images == ()
+    assert result.tool_calls == ()
+    assert result.refusals == ()
     assert result.finish_reason is FinishReason.UNKNOWN
+    assert result.raw_finish_reason is None
     assert result.usage == Usage()
     assert result.estimated_cost is None
     assert result.cost_currency is None
@@ -994,11 +1432,21 @@ def test_response_reports_the_upstream_model_separately_from_the_public_one() ->
 def test_response_round_trip() -> None:
     result = response(
         invocation_id="inv-1",
-        text="Checking the weather now.",
-        tool_calls=(ToolCall(id="call_01", name="get_weather", arguments={"city": "Paris"}),),
-        images=(ImagePart(data="AAAA", media_type="image/png"),),
+        content=(
+            TextPart(text="Checking the weather now."),
+            ToolCall(id="call_01", name="get_weather", arguments={"city": "Paris"}),
+            ImagePart(data="AAAA", media_type="image/png"),
+            RefusalPart(text="the rest is restricted"),
+        ),
         finish_reason=FinishReason.TOOL_CALLS,
-        usage=Usage(input_tokens=412, output_tokens=38, total_tokens=450, cached_tokens=256),
+        raw_finish_reason="tool_calls",
+        usage=Usage(
+            input_tokens=412,
+            output_tokens=38,
+            total_tokens=450,
+            cached_tokens=256,
+            estimated_fields={"total_tokens"},
+        ),
         estimated_cost=0.00042,
         cost_currency="USD",
         attempt_count=2,
@@ -1012,6 +1460,88 @@ def test_response_round_trip() -> None:
 def test_response_round_trips_its_defaults() -> None:
     result = response()
 
+    assert InvocationResponse.from_dict(result.to_dict()) == result
+
+
+def test_response_keeps_interleaved_output_in_order() -> None:
+    """Text A, image 1, text B, image 2 must not collapse into two concatenations."""
+    result = response(
+        content=(
+            TextPart(text="text A"),
+            ImagePart(data="AAAA"),
+            TextPart(text="text B"),
+            ImagePart(url="https://images.example/second.png"),
+        )
+    )
+
+    assert [type(item).__name__ for item in result.content] == [
+        "TextPart",
+        "ImagePart",
+        "TextPart",
+        "ImagePart",
+    ]
+    assert result.text == "text Atext B"
+    assert len(result.images) == 2
+
+    reparsed = InvocationResponse.from_dict(result.to_dict())
+    assert reparsed == result
+    assert reparsed.content == result.content
+    assert [type(item).__name__ for item in reparsed.content] == [
+        "TextPart",
+        "ImagePart",
+        "TextPart",
+        "ImagePart",
+    ]
+    assert reparsed.to_dict()["content"] == [
+        {"type": "text", "text": "text A"},
+        {"type": "image", "data": "AAAA", "url": None, "media_type": None},
+        {"type": "text", "text": "text B"},
+        {
+            "type": "image",
+            "data": None,
+            "url": "https://images.example/second.png",
+            "media_type": None,
+        },
+    ]
+
+
+def test_response_derives_its_views_without_storing_them() -> None:
+    result = response(
+        content=(
+            TextPart(text="first "),
+            ToolCall(id="call_01", name="get_weather"),
+            TextPart(text="second"),
+            ImagePart(data="AAAA"),
+            RefusalPart(text="no more"),
+        )
+    )
+
+    assert result.text == "first second"
+    assert result.tool_calls == (ToolCall(id="call_01", name="get_weather"),)
+    assert result.images == (ImagePart(data="AAAA"),)
+    assert result.refusals == (RefusalPart(text="no more"),)
+    assert set(result.to_dict()) == {
+        "invocation_id",
+        "model",
+        "upstream_model",
+        "content",
+        "finish_reason",
+        "raw_finish_reason",
+        "usage",
+        "estimated_cost",
+        "cost_currency",
+        "attempt_count",
+        "fallback_used",
+        "idempotency_status",
+    }
+
+
+def test_response_content_round_trips_a_tool_call_with_a_discriminator() -> None:
+    result = response(content=(ToolCall(id="call_01", name="get_weather", arguments=None),))
+
+    assert result.to_dict()["content"] == [
+        {"type": "tool_call", "id": "call_01", "name": "get_weather", "arguments": None}
+    ]
     assert InvocationResponse.from_dict(result.to_dict()) == result
 
 
@@ -1042,14 +1572,11 @@ def test_response_accepts_an_idempotency_status_by_its_string_value() -> None:
     assert response(idempotency_status="new").idempotency_status is IdempotencyStatus.NEW
 
 
-def test_response_refuses_an_image_that_is_not_an_image_part() -> None:
-    with pytest.raises(ValueError, match=r"images\[0\] must be an ImagePart"):
-        response(images=({"data": "AAAA"},))
-
-
-def test_response_refuses_a_tool_call_that_is_not_a_tool_call() -> None:
-    with pytest.raises(ValueError, match=r"tool_calls\[0\] must be a ToolCall"):
-        response(tool_calls=({"id": "call_01"},))
+def test_response_refuses_a_content_item_that_is_not_an_item() -> None:
+    with pytest.raises(
+        ValueError, match=r"content\[0\] must be a TextPart, an ImagePart, a RefusalPart"
+    ):
+        response(content=({"type": "text", "text": "hi"},))
 
 
 def test_response_refuses_a_usage_that_is_not_a_usage() -> None:
@@ -1098,7 +1625,12 @@ def test_response_parses_its_defaults_from_a_minimal_document() -> None:
         ),
         pytest.param(
             ToolResult,
-            {"tool_call_id": "call_01", "content": "18C", "is_error": False, "extra": 1},
+            {
+                "tool_call_id": "call_01",
+                "content": [{"type": "text", "text": "18C"}],
+                "is_error": False,
+                "extra": 1,
+            },
             id="tool result",
         ),
         pytest.param(
@@ -1110,6 +1642,11 @@ def test_response_parses_its_defaults_from_a_minimal_document() -> None:
             GenerationConfig,
             {"temperature": 0.2, "logit_bias": {}},
             id="generation config",
+        ),
+        pytest.param(
+            ResponseFormat,
+            {"mode": "json_object", "max_tokens": 512},
+            id="response format",
         ),
         pytest.param(
             Usage,
@@ -1126,10 +1663,15 @@ def test_response_parses_its_defaults_from_a_minimal_document() -> None:
             {"text": "hi", "cache_control": {"type": "ephemeral"}},
             id="text part",
         ),
+        pytest.param(
+            RefusalPart,
+            {"text": "no", "category": "safety"},
+            id="refusal part",
+        ),
     ],
 )
 def test_an_unrepresentable_field_fails_explicitly(kind: type, document: dict) -> None:
-    """PRD section 9.3: a parameter must never disappear silently."""
+    """PRD section 9.1: a parameter must never disappear silently."""
     with pytest.raises(ValueError, match="unsupported key"):
         kind.from_dict(document)
 

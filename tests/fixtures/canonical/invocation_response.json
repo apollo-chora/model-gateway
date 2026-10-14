@@ -2,9 +2,13 @@
   "invocation_id": "inv-7f3c1a90",
   "model": "text-default",
   "upstream_model": "primary-chat-model",
-  "text": "Checking the weather now.",
-  "tool_calls": [
+  "content": [
     {
+      "type": "text",
+      "text": "Checking the weather now."
+    },
+    {
+      "type": "tool_call",
       "id": "call_01",
       "name": "get_weather",
       "arguments": {
@@ -14,14 +18,14 @@
       }
     }
   ],
-  "images": [],
   "finish_reason": "tool_calls",
+  "raw_finish_reason": "tool_calls",
   "usage": {
     "input_tokens": 412,
     "output_tokens": 38,
     "total_tokens": 450,
     "cached_tokens": 256,
-    "source": "provider"
+    "estimated_fields": []
   },
   "estimated_cost": 0.00042,
   "cost_currency": "USD",

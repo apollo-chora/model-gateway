@@ -1,4 +1,4 @@
-"""Canonical, vendor-neutral domain types (PRD sections 4, 5, 9.1, 9.2 and 13).
+"""Canonical, vendor-neutral domain types (PRD sections 4, 5, 9.3, 9.4 and 13).
 
 This package is the gateway's own representation of an inference invocation: the
 request, the response, the conversation they carry, and the accounting they
@@ -26,40 +26,44 @@ shape is pinned rather than implied, and ``from_dict`` accepts exactly that
 shape. The fixtures under ``tests/fixtures/canonical/`` pin a representative
 request and response to that shape.
 
-**Explicit about what it cannot represent (PRD section 9.3).** A key the
+**Explicit about what it cannot represent (PRD section 9.1).** A key the
 canonical type does not define, a value of the wrong JSON type, a content part
 with an unknown discriminator, a message role outside the canonical vocabulary,
-an image part carrying neither data nor a URL, a value JSON cannot carry at all —
-each raises ``ValueError`` instead of being ignored. The rule is the PRD's: *a
-feature the gateway cannot represent must fail explicitly rather than being
-silently dropped.* A parameter that quietly disappears between the caller and the
+an image part carrying neither data nor a URL, a structured-output mode without
+the schema it requires, a value JSON cannot carry at all — each raises
+``ValueError`` instead of being ignored. The rule is the PRD's: *a feature the
+gateway cannot represent must fail explicitly rather than being silently
+dropped.* A parameter that quietly disappears between the caller and the
 provider is worse than a rejected request, because the caller is told the request
 succeeded.
+
+**Nothing upstream is discarded.** Where a provider's own vocabulary does not
+line up with the gateway's, the canonical type keeps both: the classification
+beside the raw finish reason, and each token count's provenance beside its value.
+A canonical state that cannot tell "the provider said nothing" from "the gateway
+could not classify what it said" has already lost information.
 
 The one deliberate exception is ``FinishReason``: an unrecognised provider reason
 maps to ``FinishReason.UNKNOWN`` rather than failing, because the field must
 always carry a value and ``UNKNOWN`` states plainly that the gateway did not
-recognise the reason (PRD sections 5.2 and 9.3).
+recognise the reason (PRD sections 5.2 and 9.1). The raw reason is preserved
+beside it, so ``UNKNOWN`` never means the gateway threw the reason away.
 
 The domain layer raises builtin ``ValueError`` and defines no error type of its
 own; deciding which error category a caller sees belongs to the gateway core.
 """
 
-from model_gateway.domain.content import (
-    ContentPart,
-    ImagePart,
-    Message,
-    Role,
-    TextPart,
-    content_part_from_dict,
-)
+from model_gateway.domain.content import Message, Role
 from model_gateway.domain.generation import (
     FinishReason,
     GenerationConfig,
+    ResponseFormat,
+    ResponseFormatMode,
     Usage,
     UsageSource,
 )
 from model_gateway.domain.invocation import (
+    FORWARDABLE_METADATA_KEYS,
     IdempotencyStatus,
     InvocationRequest,
     InvocationResponse,
@@ -72,6 +76,14 @@ from model_gateway.domain.json_value import (
     freeze_json,
     thaw_json,
 )
+from model_gateway.domain.output import OutputItem, output_item_from_dict
+from model_gateway.domain.parts import (
+    ContentPart,
+    ImagePart,
+    RefusalPart,
+    TextPart,
+    content_part_from_dict,
+)
 from model_gateway.domain.tools import (
     ToolCall,
     ToolChoice,
@@ -82,6 +94,7 @@ from model_gateway.domain.tools import (
 
 __all__ = [
     "ContentPart",
+    "FORWARDABLE_METADATA_KEYS",
     "FinishReason",
     "FrozenJsonObject",
     "GenerationConfig",
@@ -92,6 +105,10 @@ __all__ = [
     "JsonDocument",
     "JsonValue",
     "Message",
+    "OutputItem",
+    "RefusalPart",
+    "ResponseFormat",
+    "ResponseFormatMode",
     "ResponseModality",
     "Role",
     "TextPart",
@@ -104,5 +121,6 @@ __all__ = [
     "UsageSource",
     "content_part_from_dict",
     "freeze_json",
+    "output_item_from_dict",
     "thaw_json",
 ]
