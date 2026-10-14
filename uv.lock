@@ -1014,6 +1014,7 @@ source = { editable = "." }
 dependencies = [
     { name = "blacksheep" },
     { name = "granian" },
+    { name = "httpx" },
     { name = "litellm-core" },
     { name = "orjson" },
     { name = "structlog" },
@@ -1030,6 +1031,7 @@ dev = [
 requires-dist = [
     { name = "blacksheep", specifier = "==2.6.4" },
     { name = "granian", specifier = "==2.8.4" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "litellm-core", specifier = "==1.106.0rc1" },
     { name = "orjson", specifier = "==3.13.0" },
     { name = "structlog", specifier = "==26.1.0" },
