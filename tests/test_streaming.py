@@ -17,6 +17,7 @@ library's own types, exactly as the non-streaming tests build their responses.
 import dataclasses
 
 import pytest
+from litellm import stream_chunk_builder
 from litellm.types.utils import (
     ChatCompletionAudioResponse,
     ChatCompletionDeltaToolCall,
@@ -111,6 +112,46 @@ def finish_chunk(finish_reason: str, **kwargs: object) -> ModelResponseStream:
     )
 
 
+def library_trailing_usage(prompt_tokens: int, completion_tokens: int) -> Usage:
+    """The usage record the pinned library assembles for a trailing usage chunk.
+
+    Built by driving LiteLLM's own ``stream_chunk_builder`` with a scripted
+    OpenAI-shaped stream, so the fixture is the library's real output —
+    placeholder values included — rather than a handcrafted approximation of
+    it. On an OpenAI-backed base the library sets usage reporting itself and
+    assembles this record at end of stream.
+    """
+    response = stream_chunk_builder(
+        chunks=[
+            {
+                "id": "chatcmpl-library",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "gpt-4o",
+                "choices": [
+                    {"index": 0, "delta": {"content": "Hello"}, "finish_reason": None}
+                ],
+            },
+            {
+                "id": "chatcmpl-library",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "gpt-4o",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
+            },
+        ]
+    )
+    assert response is not None
+    usage = response.usage
+    assert usage is not None
+    return usage
+
+
 # --------------------------------------------------------------------------- canonical events
 
 
@@ -122,6 +163,7 @@ class TestStreamEventKind:
         assert StreamEventKind.TOOL_CALL == "tool_call"
         assert StreamEventKind.USAGE == "usage"
         assert StreamEventKind.FINISH == "finish"
+        assert StreamEventKind.ERROR == "error"
 
 
 class TestStreamEventRoundTrip:
@@ -178,6 +220,31 @@ class TestStreamEventRoundTrip:
         assert event.to_dict()["finish_reason"] == "stop"
         assert event.to_dict()["raw_finish_reason"] == "stop"
 
+    def test_error_event_round_trip(self) -> None:
+        """The gateway's reason and its sanitised message survive the trip (PRD 5.4)."""
+        event = StreamEvent(
+            kind=StreamEventKind.ERROR,
+            sequence=5,
+            invocation_id=INVOCATION_ID,
+            error_reason="provider_unavailable",
+            error_message="the upstream connection failed",
+        )
+        assert StreamEvent.from_dict(event.to_dict()) == event
+        assert event.to_dict()["kind"] == "error"
+        assert event.to_dict()["error_reason"] == "provider_unavailable"
+        assert event.to_dict()["error_message"] == "the upstream connection failed"
+
+    def test_error_event_without_a_message_round_trips(self) -> None:
+        """The reason is what a caller switches on; the message only explains it."""
+        event = StreamEvent(
+            kind=StreamEventKind.ERROR,
+            sequence=0,
+            invocation_id=INVOCATION_ID,
+            error_reason="internal_error",
+        )
+        assert StreamEvent.from_dict(event.to_dict()) == event
+        assert event.to_dict()["error_message"] is None
+
     def test_to_dict_emits_every_field(self) -> None:
         """The serialised shape is pinned rather than implied, so nothing can hide."""
         event = StreamEvent(
@@ -192,6 +259,8 @@ class TestStreamEventRoundTrip:
             "usage": None,
             "finish_reason": None,
             "raw_finish_reason": None,
+            "error_reason": None,
+            "error_message": None,
         }
 
     def test_unrecognised_finish_reason_round_trip(self) -> None:
@@ -360,6 +429,117 @@ class TestStreamEventConstructionRefusals:
                 invocation_id=INVOCATION_ID,
                 text="hi",
                 raw_finish_reason="stop",
+            )
+
+    def test_error_event_without_a_reason_is_refused(self) -> None:
+        """A terminal event says what ended the stream, and what ends an error is its reason."""
+        with pytest.raises(ValueError, match="carries none of"):
+            StreamEvent(kind=StreamEventKind.ERROR, sequence=0, invocation_id=INVOCATION_ID)
+
+    def test_error_event_with_an_empty_reason_is_refused(self) -> None:
+        """An empty reason asserts no failure while claiming to report one."""
+        with pytest.raises(ValueError, match="must not be empty"):
+            StreamEvent(
+                kind=StreamEventKind.ERROR,
+                sequence=0,
+                invocation_id=INVOCATION_ID,
+                error_reason="",
+            )
+
+    def test_error_event_carrying_a_finish_reason_is_refused(self) -> None:
+        """A failure is not a finish, so the two terminal kinds are disjoint (PRD 5.2, 5.4)."""
+        with pytest.raises(ValueError, match="carries 'finish_reason'"):
+            StreamEvent(
+                kind=StreamEventKind.ERROR,
+                sequence=0,
+                invocation_id=INVOCATION_ID,
+                error_reason="provider_unavailable",
+                finish_reason=FinishReason.UNKNOWN,
+            )
+
+    def test_error_event_carrying_the_raw_finish_reason_is_refused(self) -> None:
+        """``raw_finish_reason`` is the provider's own reason, and a failure has none."""
+        with pytest.raises(ValueError, match="carries 'raw_finish_reason'"):
+            StreamEvent(
+                kind=StreamEventKind.ERROR,
+                sequence=0,
+                invocation_id=INVOCATION_ID,
+                error_reason="provider_unavailable",
+                raw_finish_reason="provider_unavailable",
+            )
+
+    def test_error_event_carrying_text_is_refused(self) -> None:
+        """A failure is not a fragment of the answer; the two are different events."""
+        with pytest.raises(ValueError, match="carries 'text'"):
+            StreamEvent(
+                kind=StreamEventKind.ERROR,
+                sequence=0,
+                invocation_id=INVOCATION_ID,
+                error_reason="provider_unavailable",
+                text="hi",
+            )
+
+    def test_error_event_carrying_usage_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="carries 'usage'"):
+            StreamEvent(
+                kind=StreamEventKind.ERROR,
+                sequence=0,
+                invocation_id=INVOCATION_ID,
+                error_reason="provider_unavailable",
+                usage=TokenUsage(total_tokens=1),
+            )
+
+    def test_error_event_carrying_a_tool_call_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="carries 'tool_call'"):
+            StreamEvent(
+                kind=StreamEventKind.ERROR,
+                sequence=0,
+                invocation_id=INVOCATION_ID,
+                error_reason="provider_unavailable",
+                tool_call=ToolCallDelta(index=0),
+            )
+
+    def test_finish_event_carrying_an_error_reason_is_refused(self) -> None:
+        """A finish reason classifies why generation stopped; a failure is not one."""
+        with pytest.raises(ValueError, match="carries 'error_reason'"):
+            StreamEvent(
+                kind=StreamEventKind.FINISH,
+                sequence=0,
+                invocation_id=INVOCATION_ID,
+                finish_reason=FinishReason.STOP,
+                error_reason="provider_unavailable",
+            )
+
+    def test_finish_event_carrying_an_error_message_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="carries 'error_message'"):
+            StreamEvent(
+                kind=StreamEventKind.FINISH,
+                sequence=0,
+                invocation_id=INVOCATION_ID,
+                finish_reason=FinishReason.STOP,
+                error_message="the upstream connection failed",
+            )
+
+    def test_content_event_carrying_an_error_reason_is_refused(self) -> None:
+        """A failure is a terminal event, never a fragment of the answer."""
+        with pytest.raises(ValueError, match="carries 'error_reason'"):
+            StreamEvent(
+                kind=StreamEventKind.CONTENT,
+                sequence=0,
+                invocation_id=INVOCATION_ID,
+                text="hi",
+                error_reason="provider_unavailable",
+            )
+
+    def test_usage_event_carrying_an_error_message_is_refused(self) -> None:
+        """The message explains a failure; beside a token report it explains nothing."""
+        with pytest.raises(ValueError, match="carries 'error_message'"):
+            StreamEvent(
+                kind=StreamEventKind.USAGE,
+                sequence=0,
+                invocation_id=INVOCATION_ID,
+                usage=TokenUsage(total_tokens=1),
+                error_message="the upstream connection failed",
             )
 
     def test_negative_sequence_is_refused(self) -> None:
@@ -658,6 +838,39 @@ class TestFromLitellmChunkUsage:
         events = from_litellm_chunk(content_chunk("hi"), invocation_id=INVOCATION_ID, sequence=0)
         assert [event.kind for event in events] == [StreamEventKind.CONTENT]
 
+    def test_a_trailing_usage_chunk_produces_only_a_usage_event(self) -> None:
+        """The library's trailing usage chunk carries no text, no call and no reason.
+
+        Its choice is empty of everything reportable, so the one event it can
+        produce is the usage report — the provider's ordering rule relies on that
+        being a non-terminal event that may legally follow the finish reason.
+        """
+        chunk = ModelResponseStream(
+            choices=[StreamingChoices(index=0, delta=Delta())],
+            usage=Usage(prompt_tokens=25, completion_tokens=42, total_tokens=67),
+        )
+        events = from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
+        assert [event.kind for event in events] == [StreamEventKind.USAGE]
+        assert events[0].usage == TokenUsage(input_tokens=25, output_tokens=42, total_tokens=67)
+
+    def test_the_librarys_own_trailing_usage_record_is_accepted(self) -> None:
+        """The placeholder values the library fills are not provider facts (PRD 9.1).
+
+        The usage record is the one LiteLLM's own ``stream_chunk_builder``
+        assembles for a trailing usage chunk: ``completion_tokens_details``
+        carrying ``reasoning_tokens=0`` and ``text_tokens=completion_tokens``,
+        the library's own schema satisfaction rather than a provider-reported
+        breakdown. Refusing it fails a stream at the very end, after the caller
+        has already seen the whole answer, so the translation accepts it.
+        """
+        chunk = ModelResponseStream(
+            choices=[StreamingChoices(index=0, finish_reason="stop")],
+            usage=library_trailing_usage(25, 42),
+        )
+        events = from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
+        usage = next(event.usage for event in events if event.kind is StreamEventKind.USAGE)
+        assert usage == TokenUsage(input_tokens=25, output_tokens=42, total_tokens=67)
+
 
 class TestFromLitellmChunkFinish:
     """The terminal event carries the gateway's classification and the raw reason (PRD 5.3)."""
@@ -898,6 +1111,27 @@ class TestFromLitellmChunkRefusals:
             ),
         )
         with pytest.raises(InternalError, match="reasoning_tokens"):
+            from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
+
+    def test_a_semantic_completion_detail_value_is_still_refused(self) -> None:
+        """A provider-reported count with no canonical target is refused, not dropped.
+
+        The placeholder exception is drawn on the value, not the field: a
+        non-zero count the canonical usage model cannot carry — here an
+        audio-token count — is still refused, because silently dropping it
+        would tell the caller the usage was honoured when part of the report
+        was dropped (PRD 9.1).
+        """
+        chunk = ModelResponseStream(
+            choices=[StreamingChoices(index=0, finish_reason="stop")],
+            usage=Usage(
+                prompt_tokens=25,
+                completion_tokens=42,
+                total_tokens=67,
+                completion_tokens_details={"audio_tokens": 10},
+            ),
+        )
+        with pytest.raises(InternalError, match="audio_tokens"):
             from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
 
     def test_a_log_probability_block_is_refused(self) -> None:
