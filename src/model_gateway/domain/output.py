@@ -11,6 +11,10 @@ it may say what it is about to do, call a tool, and then explain what came back.
 Keeping tool calls in the same sequence is what preserves that ordering, and it
 is why this union is wider than ``ContentPart`` alone.
 
+A refusal is a valid item: a model's ordered output is exactly where a refusal
+comes from, so the restriction on where a refusal may appear is enforced by the
+containers that are not the model's own output, not here.
+
 An item whose type the gateway does not know is refused rather than skipped: a
 dropped item changes the answer the caller receives (PRD section 9.1).
 """

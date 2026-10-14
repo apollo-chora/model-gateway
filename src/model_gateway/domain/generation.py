@@ -129,8 +129,10 @@ class ResponseFormat:
     normalised would describe a different requirement. It is required by
     ``JSON_SCHEMA`` and refused by every other mode, because a mode that never
     consults a schema carrying one is a contradiction rather than a request the
-    gateway can send. A JSON Schema that is not an object — the boolean schemas
-    the specification permits — is refused explicitly rather than coerced.
+    gateway can send. A JSON Schema is an object or one of the two boolean
+    schemas the specification permits — ``true`` admits every value, ``false``
+    admits none — and anything else, a string, a number, an array or null, is
+    refused rather than coerced.
 
     ``name`` labels the schema for providers that require a name, and ``strict``
     asks the provider to enforce the schema rather than merely accept it. Both
@@ -139,17 +141,13 @@ class ResponseFormat:
     """
 
     mode: ResponseFormatMode = ResponseFormatMode.TEXT
-    schema: Mapping[str, JsonValue] | None = None
+    schema: Mapping[str, JsonValue] | bool | None = None
     name: str | None = None
     strict: bool = False
 
     def __post_init__(self) -> None:
         mode = as_enumeration("response format 'mode'", self.mode, ResponseFormatMode)
-        schema = (
-            None
-            if self.schema is None
-            else as_json_object("response format 'schema'", self.schema)
-        )
+        schema = _as_schema("response format 'schema'", self.schema)
         name = as_optional_text("response format 'name'", self.name)
         strict = as_optional_boolean("response format 'strict'", self.strict, False)
 
@@ -201,7 +199,7 @@ class ResponseFormat:
             mode=as_enumeration(
                 f"{where} 'mode'", payload.get("mode", ResponseFormatMode.TEXT), ResponseFormatMode
             ),
-            schema=None if schema is None else as_json_object(f"{where} 'schema'", schema),
+            schema=_as_schema(f"{where} 'schema'", schema),
             name=as_optional_text(f"{where} 'name'", payload.get("name")),
             strict=as_optional_boolean(f"{where} 'strict'", payload.get("strict"), False),
         )
@@ -475,3 +473,17 @@ def _optional_response_format(value: object) -> ResponseFormat | None:
     if value is None:
         return None
     return ResponseFormat.from_dict(value)
+
+
+def _as_schema(where: str, value: object) -> Mapping[str, JsonValue] | bool | None:
+    """A JSON Schema: an object, or one of the boolean schemas.
+
+    The JSON Schema specification permits ``true`` and ``false`` as complete
+    schema documents — ``true`` admits every value, ``false`` admits none — and
+    this type exists to state a schema requirement, so both are accepted and
+    kept exactly as supplied. Anything else — a string, a number, an array — is
+    refused rather than coerced, and ``None`` means no schema was supplied.
+    """
+    if value is None or isinstance(value, bool):
+        return value
+    return as_json_object(where, value)

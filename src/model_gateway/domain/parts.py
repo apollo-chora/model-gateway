@@ -7,6 +7,13 @@ emitted them. Defining the parts once, here, is what lets those three share one
 representation instead of three that drift apart — and it is why this module
 depends on nothing but the JSON and parsing vocabulary.
 
+One part is valid only where the model is the author. A refusal is the model's
+own decision to decline, never something a caller writes, so it belongs to an
+assistant message — replayed as history — and to a model's output, and to
+nothing else. The containers enforce that rule, because a refusal found in a
+message the caller authored, or in a tool result, would invent a semantic the
+gateway has no business forwarding.
+
 An image arrives either as base64 data or as an authorised remote URL, and never
 as anything else: the gateway does not fetch an image on its own authority, so a
 URL that reaches this type is one the URL policy has already admitted.
@@ -36,6 +43,7 @@ __all__ = [
     "TextPart",
     "as_content_parts",
     "content_part_from_dict",
+    "reject_refusal_parts",
 ]
 
 _TYPE = "type"
@@ -141,13 +149,15 @@ class RefusalPart:
     response. A refusal is therefore a content part of its own, carrying the
     provider's refusal text verbatim.
 
-    A refusal is an output-side fact. No caller asks a model to refuse, so this
-    part never expresses an instruction. It is nonetheless a ``ContentPart``, and
-    so may appear in a message: an assistant refusal from an earlier turn is
-    conversation history, and re-sending that history is how a caller continues a
-    conversation whose last answer was a refusal. A refusal part inside a
-    ``Role.USER`` message is not a request the gateway invents meaning for — it is
-    forwarded as the text it is, exactly as the caller wrote it.
+    A refusal is an output-side fact: the model's own decision to decline, never
+    something a caller authors. It is a ``ContentPart``, so it can be stored and
+    serialised anywhere a part can — but it is valid only where the model is the
+    author. An assistant message may carry one, because a refusal from an earlier
+    turn is conversation history, and re-sending that history is how a caller
+    continues a conversation whose last answer was a refusal. Every other
+    container refuses it, naming the context it cannot appear in: a system,
+    developer, user or tool message is authored by the caller, and a tool result
+    reports an error through ``is_error`` — a tool cannot issue a model refusal.
 
     Empty refusal text is allowed for the same reason empty text is: a provider
     may report a refusal with nothing in it, and refusing that would leave the
@@ -211,3 +221,22 @@ def as_content_parts(where: str, value: object) -> tuple[ContentPart, ...]:
                 f"{describe(part)}"
             )
     return parts
+
+
+def reject_refusal_parts(context: str, parts: tuple[ContentPart, ...]) -> None:
+    """Refuse a refusal part in a context the model did not author.
+
+    ``context`` names the container the parts were found in — "a 'user' message",
+    "a tool result" — so the error says which context cannot carry a refusal,
+    rather than only that one was found. A refusal is the model's own decision to
+    decline: a caller-authored message containing one is not a request the
+    gateway invents meaning for, and a tool result has ``is_error`` for the way a
+    tool says it failed.
+    """
+    for index, part in enumerate(parts):
+        if isinstance(part, RefusalPart):
+            raise ValueError(
+                f"{context} cannot carry a refusal part at index {index}; a refusal is the "
+                f"model's own decision to decline, so it belongs to an assistant message, "
+                f"replayed as history, and to a model's output, and nowhere else"
+            )
