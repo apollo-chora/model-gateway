@@ -11,15 +11,20 @@ provider's answer comes back stamped with the gateway's own facts.
 They are also the reliability loop's tests (PRD 11.3 and 15): one deadline per
 invocation that every attempt draws its budget from, retries on the same route
 bounded by the configured count and gated on the gateway's own retryability
-classification, a fallback walked only when a route's attempts are used up, the
-last attempt's failure reported when no route could serve, a concurrency slot
-held for an attempt and released before a backoff wait, and cancellation that
-propagates instead of turning into an upstream failure.
+classification, a fallback walked only when a failure says another route is
+worth trying — a deterministic request failure ends the invocation instead of
+being sent to another provider — the last attempt's failure reported when no
+route could serve, a backoff that grows with the route's own retries, a
+concurrency slot whose wait is bounded by what is left of the deadline and whose
+acquisition is charged to the attempt that follows it, and cancellation that
+propagates instead of turning into an upstream failure — including the inference
+library's own internal retry, which the gateway cannot switch off.
 """
 
 import asyncio
 from contextlib import asynccontextmanager
 
+import httpx
 import pytest
 
 import model_gateway.inference as inference_module
@@ -45,12 +50,18 @@ from model_gateway.errors import (
     CapabilityError,
     DeadlineExceededError,
     ErrorReason,
+    FailedPreconditionError,
+    InternalError,
     InvalidArgumentError,
     ModelNotFoundError,
+    PermissionDeniedError,
+    ResourceExhaustedError,
+    UnauthenticatedError,
     UnavailableError,
 )
 from model_gateway.inference import InferenceService, InvocationState, _select_routes
 from model_gateway.providers.base import AttemptContext
+from model_gateway.providers.litellm_provider import LiteLLMProvider
 from model_gateway.providers.mock import MockProvider, MockSpec
 from model_gateway.registry import ModelRegistry
 from model_gateway.reliability import ConcurrencyLimiter
@@ -874,8 +885,9 @@ async def test_no_wait_happens_after_the_last_attempt_a_route_may_make(monkeypat
     """A backoff is only waited when a retry will actually follow it."""
     waits: list[int] = []
 
-    async def recording_back_off(attempt: int, base_ms: float, deadline) -> None:
+    async def recording_back_off(attempt: int, base_ms: float, deadline) -> bool:
         waits.append(attempt)
+        return True
 
     monkeypatch.setattr(inference_module, "_back_off", recording_back_off)
     provider = MockProvider(MockSpec(error=UnavailableError("still down")))
@@ -932,6 +944,68 @@ async def test_a_retry_waits_the_configured_backoff_before_the_next_attempt():
     assert elapsed >= 0.15
 
 
+async def test_a_fallbacks_first_retry_backs_off_one_base_not_the_invocations_count(monkeypatch):
+    """The backoff grows with the route's own retries, not with the invocation's attempts.
+
+    Two routes, one retry each: the invocation's fourth attempt is the fallback's
+    first retry, and it waits the base delay — one step of the schedule. A
+    schedule driven by the global attempt count would hand it the third step, four
+    times the base, growing exponentially with failures the fallback never made.
+    """
+    waits: list[int] = []
+
+    async def recording_back_off(attempt: int, base_ms: float, deadline) -> bool:
+        waits.append(attempt)
+        return True
+
+    monkeypatch.setattr(inference_module, "_back_off", recording_back_off)
+    provider = MockProvider(MockSpec(error=UnavailableError("still down")))
+    inference = InferenceService(
+        ModelRegistry((route("primary"), route("fallback"))),
+        provider,
+        retry_count=1,
+        retry_backoff_ms=500,
+    )
+
+    with pytest.raises(UnavailableError):
+        await inference.invoke(request())
+
+    assert [call[0].model_id for call in provider.calls] == [
+        "primary",
+        "primary",
+        "fallback",
+        "fallback",
+    ]
+    assert waits == [1, 1]
+
+
+async def test_a_backoff_that_cannot_fit_the_deadline_ends_the_route_not_the_invocation():
+    """A wait that would outlive the deadline is refused, so the route is used up.
+
+    The invocation still has budget; what it does not have is enough of it to
+    sleep through a backoff and then make the retry. The retry is therefore not
+    made, and the invocation goes on to the route that can still be tried inside
+    the time left, rather than sleeping until the deadline expired and failing
+    there anyway.
+    """
+    provider = MockProvider(MockSpec(error=UnavailableError("the provider is down")))
+    inference = InferenceService(
+        ModelRegistry((route("primary"), route("fallback"))),
+        provider,
+        attempt_timeout=1.0,
+        retry_count=2,
+        retry_backoff_ms=5000,
+    )
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(UnavailableError):
+        await inference.invoke(request())
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert [call[0].model_id for call in provider.calls] == ["primary", "fallback"]
+    assert elapsed < 2.0
+
+
 async def test_no_retry_is_made_when_none_is_configured():
     """A service built without a retry policy makes one attempt per route."""
     provider = MockProvider(
@@ -985,10 +1059,19 @@ async def test_a_route_is_retried_before_a_fallback_is_tried():
     assert result.fallback_used is False
 
 
-async def test_a_non_retryable_failure_moves_on_to_the_next_route():
+async def test_a_deterministic_failure_terminates_the_invocation_at_that_route():
+    """A request the upstream rejected as invalid is not sent to another provider.
+
+    Repeating the call cannot change the answer, and neither can changing the
+    provider: the answer is a property of the request. Walking the rest of the
+    fallbacks would spend their capacity on a request that cannot succeed, and
+    would make the caller's answer depend on which providers happen to be
+    configured. So the invocation ends where it happened, with that failure.
+    """
+    failure = InvalidArgumentError("the primary rejected the request")
     provider = MockProvider(
         (
-            MockSpec(error=InvalidArgumentError("the primary rejected the request")),
+            MockSpec(error=failure),
             MockSpec(text="the fallback answered"),
         )
     )
@@ -999,10 +1082,82 @@ async def test_a_non_retryable_failure_moves_on_to_the_next_route():
         retry_backoff_ms=0,
     )
 
+    with pytest.raises(InvalidArgumentError) as error:
+        await inference.invoke(request())
+
+    assert error.value is failure
+    assert [call[0].model_id for call in provider.calls] == ["primary"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        InvalidArgumentError("the upstream rejected the request"),
+        UnauthenticatedError("the upstream refused the route's credentials"),
+        PermissionDeniedError("the upstream denied the request"),
+        CapabilityError("the upstream cannot honour the request"),
+        FailedPreconditionError("the upstream is not in a state to serve this"),
+        InternalError("the gateway could not complete the request"),
+    ],
+)
+async def test_every_deterministic_category_terminates_rather_than_falling_back(failure):
+    """The whole deterministic group, not just invalid arguments."""
+    provider = MockProvider((MockSpec(error=failure), MockSpec(text="the fallback answered")))
+    inference = InferenceService(
+        ModelRegistry((route("primary"), route("fallback"))),
+        provider,
+        retry_count=2,
+        retry_backoff_ms=0,
+    )
+
+    with pytest.raises(type(failure)):
+        await inference.invoke(request())
+
+    assert [call[0].model_id for call in provider.calls] == ["primary"]
+
+
+async def test_a_route_local_failure_falls_back_without_being_retried_on_that_route():
+    """An upstream rate limit is worth another route but not another attempt here.
+
+    This is the case the two questions exist to separate: the failure is not
+    retryable on the route that answered, and it is still fallback-eligible, so
+    the invocation moves on rather than repeating the call or giving up.
+    """
+    refusal = ResourceExhaustedError(
+        "the upstream is rate limiting this route", reason=ErrorReason.RATE_LIMITED
+    )
+    provider = MockProvider((MockSpec(error=refusal), MockSpec(text="the fallback answered")))
+    inference = InferenceService(
+        ModelRegistry((route("primary"), route("fallback"))),
+        provider,
+        retry_count=3,
+        retry_backoff_ms=0,
+    )
+
     result = await inference.invoke(request())
 
     assert [call[0].model_id for call in provider.calls] == ["primary", "fallback"]
+    assert result.upstream_model == "fallback"
     assert result.fallback_used is True
+    assert result.attempt_count == 2
+
+
+async def test_the_gateways_own_concurrency_refusal_terminates_the_invocation():
+    """Every route shares the gateway's limiter, so another route is refused identically."""
+    refusal = ResourceExhaustedError(
+        "the gateway's upstream concurrency limit is saturated",
+        reason=ErrorReason.CONCURRENCY_LIMIT_EXCEEDED,
+    )
+    provider = MockProvider((MockSpec(error=refusal), MockSpec(text="the fallback answered")))
+    inference = InferenceService(
+        ModelRegistry((route("primary"), route("fallback"))), provider, retry_count=3
+    )
+
+    with pytest.raises(ResourceExhaustedError) as error:
+        await inference.invoke(request())
+
+    assert error.value.reason is ErrorReason.CONCURRENCY_LIMIT_EXCEEDED
+    assert [call[0].model_id for call in provider.calls] == ["primary"]
 
 
 async def test_the_last_attempts_failure_is_the_one_reported():
@@ -1048,14 +1203,16 @@ class _ConcurrencyProbe:
 
 
 class _RecordingLimiter:
-    """A stub limiter that records when a slot is taken and given back."""
+    """A stub limiter that records when a slot is taken, given back, and with what bound."""
 
     def __init__(self) -> None:
         self.events: list[str] = []
+        self.timeouts: list[float | None] = []
 
     @asynccontextmanager
-    async def slot(self):
+    async def slot(self, timeout: float | None = None):
         self.events.append("enter")
+        self.timeouts.append(timeout)
         try:
             yield
         finally:
@@ -1088,8 +1245,9 @@ async def test_the_concurrency_slot_is_released_before_the_backoff_wait(monkeypa
     """A caller waiting to retry holds no slot another caller could be using."""
     limiter = _RecordingLimiter()
 
-    async def recording_back_off(attempt: int, base_ms: float, deadline) -> None:
+    async def recording_back_off(attempt: int, base_ms: float, deadline) -> bool:
         limiter.events.append("wait")
+        return True
 
     monkeypatch.setattr(inference_module, "_back_off", recording_back_off)
     provider = MockProvider(
@@ -1106,6 +1264,80 @@ async def test_the_concurrency_slot_is_released_before_the_backoff_wait(monkeypa
     await inference.invoke(request())
 
     assert limiter.events == ["enter", "exit", "wait", "enter", "exit"]
+
+
+async def test_the_limiter_is_given_the_remaining_deadline_to_bound_the_wait():
+    """The slot wait is bounded by the invocation's deadline, not by the slot's holder."""
+    limiter = _RecordingLimiter()
+    inference = InferenceService(
+        ModelRegistry((route(),)), MockProvider(), attempt_timeout=10.0, limiter=limiter
+    )
+
+    await inference.invoke(request())
+
+    (timeout,) = limiter.timeouts
+    assert timeout is not None
+    assert 0.0 < timeout <= 10.0
+
+
+async def test_an_invocation_with_no_deadline_asks_the_limiter_for_no_bound():
+    limiter = _RecordingLimiter()
+    inference = InferenceService(ModelRegistry((route(),)), MockProvider(), limiter=limiter)
+
+    await inference.invoke(request())
+
+    assert limiter.timeouts == [None]
+
+
+async def test_an_invocation_that_cannot_get_a_slot_in_time_fails_promptly():
+    """A caller queued behind a held slot gives up when its own deadline passes.
+
+    Without the bound this invocation would wait for the holder, however long
+    that took, and only then discover that its own deadline had been spent. The
+    wait here is wrapped in a timeout of its own so a regression fails the test
+    instead of hanging it.
+    """
+    limiter = ConcurrencyLimiter(1)
+    provider = MockProvider()
+    inference = InferenceService(
+        ModelRegistry((route(),)), provider, attempt_timeout=0.2, limiter=limiter
+    )
+
+    async with limiter.slot():
+        with pytest.raises(DeadlineExceededError):
+            await asyncio.wait_for(inference.invoke(request()), timeout=5.0)
+
+    assert provider.calls == []
+
+
+class _ClockAdvancingLimiter:
+    """A stub limiter that spends invocation budget while a caller waits for a slot."""
+
+    def __init__(self, clock: _ControllableClock, spend: float) -> None:
+        self._clock = clock
+        self._spend = spend
+
+    @asynccontextmanager
+    async def slot(self, timeout: float | None = None):
+        self._clock.advance(self._spend)
+        yield
+
+
+async def test_the_attempt_budget_is_recomputed_after_the_slot_is_acquired(monkeypatch):
+    """Waiting for a slot consumes invocation budget, so the attempt gets what is left."""
+    clock = _ControllableClock()
+    monkeypatch.setattr(reliability, "monotonic", clock)
+    provider = MockProvider()
+    inference = InferenceService(
+        ModelRegistry((route(),)),
+        provider,
+        attempt_timeout=10.0,
+        limiter=_ClockAdvancingLimiter(clock, spend=4.0),
+    )
+
+    await inference.invoke(request())
+
+    assert provider.calls[0][2].timeout == pytest.approx(6.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1167,6 +1399,115 @@ async def test_cancellation_is_never_turned_into_an_upstream_failure():
 
     with pytest.raises(asyncio.CancelledError):
         await inference.invoke(request())
+
+
+# The inference library has internal retry paths no supported knob disables (PRD
+# section 11.3), so "the gateway made no further attempt" is not the same claim
+# as "no further wire request was made". These two tests are about the second
+# claim, and they are driven through the real binding and the real library over a
+# fake wire: the transport below is injected as the binding's inner transport, so
+# every request is recorded and no socket is ever opened.
+#
+# What they prove, and what they do not. They prove that on the pinned library,
+# for the ``anthropic`` dialect — whose HTTP path retries a connection error
+# inside the library, which is the internal retry these tests are about — a
+# cancellation delivered while a wire request is in flight is not swallowed by
+# that retry, and no further wire request follows it. They do not exercise the
+# library's other internal retry path, the message-reformat loop that resends on
+# a malformed-request response, because that one is triggered by a response body
+# rather than by a connection error; and they do not exercise a real socket. Both
+# omissions are covered by the same mechanism rather than by a different one: the
+# retry loops catch the library's own exception hierarchy, and cancellation
+# arrives as :exc:`asyncio.CancelledError`, a :exc:`BaseException` those loops do
+# not name.
+
+_UPSTREAM_ADDRESS = "93.184.216.34"
+
+
+def _stub_resolver(host: str) -> tuple[str, ...]:
+    """Resolve every hostname to one public address, so no test touches DNS."""
+    return (_UPSTREAM_ADDRESS,)
+
+
+class _FailingWireTransport(httpx.AsyncBaseTransport):
+    """A wire that refuses every connection, recording each request it was asked to send."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        raise httpx.ConnectError("this wire refuses every connection", request=request)
+
+
+class _BlockingWireTransport(httpx.AsyncBaseTransport):
+    """A wire that records every request and holds each one open until it is released."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        self.started.set()
+        await self.release.wait()
+        raise httpx.ConnectError("this wire refuses every connection", request=request)
+
+
+def _gateway_over(transport: httpx.AsyncBaseTransport, **overrides) -> InferenceService:
+    """A gateway invocation that reaches the real inference library and a fake wire.
+
+    The route's dialect is ``anthropic`` because that is the HTTP path the pinned
+    library retries a connection error on by itself.
+    """
+    binding = LiteLLMProvider(resolver=_stub_resolver, inner_factory=lambda: transport)
+    return InferenceService(
+        ModelRegistry((route(format="anthropic"),)), binding, **overrides
+    )
+
+
+async def test_the_librarys_internal_retry_does_reach_the_wire_when_nothing_cancels():
+    """The control for the cancellation test below.
+
+    Without this, "no second wire request after cancellation" would prove
+    nothing: it could equally be a failure the library never retries at all.
+    This pins that the connection error used below is one the library retries on
+    its own, so exactly one wire request is the gateway's and the second is the
+    library's.
+    """
+    wire = _FailingWireTransport()
+
+    with pytest.raises(UnavailableError):
+        await _gateway_over(wire).invoke(request())
+
+    assert len(wire.requests) == 2
+
+
+async def test_cancelling_the_invocation_stops_the_librarys_internal_retry():
+    """A cancelled invocation makes no further wire request, retry paths included.
+
+    The gateway's own retry loop is already covered above; this is the second
+    loop, the one inside the inference library that the gateway cannot switch
+    off. The invocation is cancelled with a wire request in flight, which is the
+    state the library's connection-error retry would resume from.
+    """
+    wire = _BlockingWireTransport()
+    gateway = _gateway_over(wire, retry_count=3, retry_backoff_ms=0)
+
+    invocation = asyncio.create_task(gateway.invoke(request()))
+    await asyncio.wait_for(wire.started.wait(), timeout=5.0)
+    assert len(wire.requests) == 1
+
+    invocation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+    wire.release.set()
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+    assert len(wire.requests) == 1
 
 
 # ---------------------------------------------------------------------------
