@@ -46,8 +46,8 @@ every configured key's precomputed digest with :func:`hmac.compare_digest`, and
 the scan runs to the last key whether or not an earlier one matched. Because the
 scan never returns early, the number of comparisons does not depend on which key
 matched: the match position is not revealed. Every comparison is between two
-256-bit digests, so a comparison takes the same time whatever the length of the
-presented key.
+256-bit digests, so the work a comparison does does not depend on the length
+of the presented key or on ordinary content equality between the digests.
 
 What the scan does NOT hide is the number of configured credentials. Total work
 is proportional to that number, so the time an attempt takes still correlates

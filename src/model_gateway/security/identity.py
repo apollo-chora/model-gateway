@@ -36,8 +36,12 @@ class Identity:
     ``authenticated``
         ``True`` only after a presented key matched a configured one. The
         anonymous identity — assigned when authentication is disabled — is the
-        only ``authenticated=False`` identity, and it carries no tenant and no
-        credential identifier.
+        only ``authenticated=False`` identity, and it carries no tenant, no
+        credential identifier and no key label. ``__post_init__`` enforces
+        both directions of this: an authenticated identity must carry a
+        credential identifier and a key label, and an anonymous one must carry
+        none of the three, so no transport can construct a contradictory
+        form.
 
     ``tenant``
         The tenant the caller's credential is bound to, or ``None`` when the
@@ -51,8 +55,19 @@ class Identity:
         full-length digest of the configured key — for the gateway's own use.
         Downstream policy (rate limiting, concurrency, idempotency, accounting)
         uses it as the principal that names the credential, so it must never be
-        a truncated display value. It is never a credential and never leaves the
-        process boundary. ``None`` for the anonymous identity.
+        a truncated display value. It is internal gateway identity: never
+        exposed in public API responses or ordinary logs, while trusted
+        internal persistence and policy components may store and use it —
+        durable accounting may write it to a database, distributed rate
+        limiting may carry it through a shared store, and tracing or audit
+        records may include it. It is an unsalted deterministic digest, not a
+        credential: it is never accepted as authentication material, but
+        possessing it permits offline candidate testing of the same kind the
+        short label allows, with definitive verification rather than prefix
+        matching. It is therefore sensitive internal data. A keyed derivation
+        would avoid that exposure, at the cost of key-management and rotation
+        obligations that are not warranted now. ``None`` for the anonymous
+        identity.
 
     ``key_label``
         A short, non-secret label for the presented key, for logs and display
@@ -66,3 +81,30 @@ class Identity:
     tenant: str | None
     credential_id: str | None
     key_label: str | None
+
+    def __post_init__(self) -> None:
+        """Reject the two identity states that contradict what the fields mean.
+
+        An authenticated identity is derived from a matched credential, so it
+        must carry that credential's identifier and label; an anonymous
+        identity is derived from nothing, so it must carry no tenant, no
+        credential identifier and no key label. Both forms are refused here so
+        that no transport — HTTP or gRPC — can construct one.
+        """
+        if self.authenticated:
+            if self.credential_id is None or self.key_label is None:
+                raise ValueError(
+                    "an authenticated identity must carry the credential identifier and key "
+                    "label of the matched credential; an authenticated caller with no "
+                    "credential is not a state the gateway can represent"
+                )
+        elif (
+            self.tenant is not None
+            or self.credential_id is not None
+            or self.key_label is not None
+        ):
+            raise ValueError(
+                "an anonymous identity carries no tenant, no credential identifier and no "
+                "key label; an unauthenticated caller with a credential is not a state "
+                "the gateway can represent"
+            )
