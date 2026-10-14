@@ -21,15 +21,18 @@ import os
 import ssl
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
 import litellm
 import openai
 import pytest
+from litellm.litellm_core_utils.litellm_logging import Logging
 from litellm.litellm_core_utils.llm_response_utils.convert_dict_to_response import (
     convert_to_model_response_object,
 )
+from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.types.utils import (
     ChatCompletionDeltaToolCall,
@@ -39,6 +42,7 @@ from litellm.types.utils import (
     ModelResponseStream,
     StreamingChoices,
 )
+from litellm.types.utils import Usage as LiteLLMUsage
 
 from model_gateway.capabilities import Capability
 from model_gateway.config.routes import Operation, Route
@@ -53,7 +57,7 @@ from model_gateway.domain import (
     ToolCall,
     Usage,
 )
-from model_gateway.domain.streaming import StreamEventKind
+from model_gateway.domain.streaming import StreamEvent, StreamEventKind
 from model_gateway.errors import (
     CapabilityError,
     DeadlineExceededError,
@@ -240,12 +244,19 @@ class RecordingStream:
         return self._outcome
 
 
-def stream_of(*chunks: ModelResponseStream):
-    """An async iterable of chunks, the shape ``litellm.acompletion`` returns for a stream."""
+def stream_of(*chunks: ModelResponseStream, error: BaseException | None = None):
+    """An async iterable of chunks, the shape ``litellm.acompletion`` returns for a stream.
+
+    ``error``, when given, is raised after the last chunk — the upstream that
+    produced output and then failed before terminating, which is the case the
+    provider's terminal-event rule has to survive.
+    """
 
     async def generate():
         for chunk in chunks:
             yield chunk
+        if error is not None:
+            raise error
 
     return generate()
 
@@ -261,6 +272,36 @@ def finish_chunk(finish_reason: str) -> ModelResponseStream:
     """A chunk carrying a finish reason."""
     return ModelResponseStream(
         choices=[StreamingChoices(index=0, finish_reason=finish_reason)]
+    )
+
+
+def usage_chunk(
+    prompt_tokens: int, completion_tokens: int, total_tokens: int
+) -> ModelResponseStream:
+    """A trailing usage chunk, the shape the pinned library emits after a finish reason.
+
+    It carries a choice with no delta and no finish reason, which is exactly what
+    ``CustomStreamWrapper`` produces at end of stream when usage reporting is on;
+    :class:`TestTheLibrariesOwnChunkOrdering` pins that against the library
+    itself. ``total_tokens`` is passed as well, because that is what the
+    upstream reports beside the two parts.
+    """
+    return ModelResponseStream(
+        choices=[StreamingChoices(index=0, delta=Delta())],
+        usage=LiteLLMUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        ),
+    )
+
+
+def upstream_failure() -> litellm.APIConnectionError:
+    """The upstream failing mid-stream, as the library reports it."""
+    return litellm.APIConnectionError(
+        message="the upstream connection failed",
+        llm_provider="openai",
+        model=UPSTREAM_MODEL,
     )
 
 
@@ -639,6 +680,175 @@ class TestTheStream:
         assert [event.kind for event in events] == [StreamEventKind.CONTENT, StreamEventKind.FINISH]
         assert [event.sequence for event in events] == [0, 1]
 
+    async def test_usage_arriving_after_the_finish_reason_precedes_the_finish(
+        self, wire_stream
+    ) -> None:
+        """The trailing usage report belongs to the answer, so the finish still comes last.
+
+        This is the order the pinned library produces for the OpenAI dialect when
+        usage reporting is on, and the finish reason is buffered so the usage is
+        not stranded behind a terminal event that was already emitted.
+        """
+        provider, _ = wire_stream(
+            stream_of(content_chunk("Hello"), finish_chunk("stop"), usage_chunk(25, 42, 67))
+        )
+
+        events = await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        assert [event.kind for event in events] == [
+            StreamEventKind.CONTENT,
+            StreamEventKind.USAGE,
+            StreamEventKind.FINISH,
+        ]
+        assert events[1].usage == Usage(input_tokens=25, output_tokens=42, total_tokens=67)
+        assert events[-1].finish_reason is FinishReason.STOP
+
+    async def test_the_buffered_finish_is_renumbered_so_the_sequence_stays_consecutive(
+        self, wire_stream
+    ) -> None:
+        """The usage chunk takes the number the finish would have had, and the finish follows."""
+        provider, _ = wire_stream(
+            stream_of(
+                content_chunk("Hello"),
+                finish_chunk("stop"),
+                usage_chunk(25, 42, 67),
+                usage_chunk(25, 42, 67),
+            )
+        )
+
+        events = await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        assert [event.kind for event in events] == [
+            StreamEventKind.CONTENT,
+            StreamEventKind.USAGE,
+            StreamEventKind.USAGE,
+            StreamEventKind.FINISH,
+        ]
+        assert [event.sequence for event in events] == [0, 1, 2, 3]
+
+    async def test_a_stream_that_never_reports_a_finish_reason_has_no_terminal_event(
+        self, wire_stream
+    ) -> None:
+        """A clean end is not a completion: only a reported reason ends the stream.
+
+        A clean TCP close and a deliberate completion look alike from here, so
+        the finish reason is what tells them apart. Without one the stream is
+        truncated, which the contract says ends without a terminal event rather
+        than with one claiming a completion that never happened.
+        """
+        provider, _ = wire_stream(
+            stream_of(content_chunk("Hello"), content_chunk(" world"), usage_chunk(25, 42, 67))
+        )
+
+        events = await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        assert [event.kind for event in events] == [
+            StreamEventKind.CONTENT,
+            StreamEventKind.CONTENT,
+            StreamEventKind.USAGE,
+        ]
+
+    async def test_a_failure_after_the_finish_reason_emits_no_terminal_event(
+        self, wire_stream
+    ) -> None:
+        """The stream did not complete, so the buffered finish is discarded, not emitted.
+
+        A finish reason the upstream reported and then failed to terminate is not
+        a completed answer. Emitting the finish would say it was one; emitting it
+        and then an error would put two terminal events in one stream. The
+        attempt fails, and the gateway core reports that failure as the stream's
+        single terminal ``ERROR`` event.
+        """
+        provider, _ = wire_stream(
+            stream_of(content_chunk("Hello"), finish_chunk("stop"), error=upstream_failure())
+        )
+
+        events: list[StreamEvent] = []
+        with pytest.raises(UnavailableError):
+            async for event in provider.stream(make_route(), make_request(), make_context()):
+                events.append(event)
+
+        assert [event.kind for event in events] == [StreamEventKind.CONTENT]
+
+    async def test_a_failure_before_any_finish_reason_emits_no_terminal_event(
+        self, wire_stream
+    ) -> None:
+        provider, _ = wire_stream(stream_of(content_chunk("Hello"), error=upstream_failure()))
+
+        events: list[StreamEvent] = []
+        with pytest.raises(UnavailableError):
+            async for event in provider.stream(make_route(), make_request(), make_context()):
+                events.append(event)
+
+        assert [event.kind for event in events] == [StreamEventKind.CONTENT]
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            pytest.param(
+                lambda: stream_of(content_chunk("Hello"), finish_chunk("stop")),
+                id="completed",
+            ),
+            pytest.param(
+                lambda: stream_of(
+                    content_chunk("Hello"), finish_chunk("stop"), usage_chunk(25, 42, 67)
+                ),
+                id="usage-after-finish",
+            ),
+            pytest.param(
+                lambda: stream_of(content_chunk("Hello")),
+                id="ended-without-a-finish-reason",
+            ),
+            pytest.param(
+                lambda: stream_of(
+                    content_chunk("Hello"), finish_chunk("stop"), error=upstream_failure()
+                ),
+                id="failed-after-the-finish-reason",
+            ),
+            pytest.param(
+                lambda: stream_of(content_chunk("Hello"), error=upstream_failure()),
+                id="failed-mid-answer",
+            ),
+            pytest.param(lambda: upstream_failure(), id="failed-before-any-event"),
+            pytest.param(
+                lambda: stream_of(
+                    content_chunk("Hello"),
+                    finish_chunk("stop"),
+                    usage_chunk(25, 42, 67),
+                    error=upstream_failure(),
+                ),
+                id="failed-after-the-trailing-usage",
+            ),
+        ],
+    )
+    async def test_no_path_emits_more_than_one_terminal_event(
+        self, wire_stream, outcome
+    ) -> None:
+        """The whole point of the buffering: a terminal event is terminal in fact.
+
+        Every path is drained — completion, trailing usage, an upstream that
+        stops without a reason, and a failure at each of those points — and none
+        of them may put more than one ``FINISH`` or ``ERROR`` into the stream, or
+        put anything after one.
+        """
+        provider, _ = wire_stream(outcome())
+
+        events: list[StreamEvent] = []
+        try:
+            async for event in provider.stream(make_route(), make_request(), make_context()):
+                events.append(event)
+        except Exception:
+            pass
+
+        terminal = [
+            event
+            for event in events
+            if event.kind in (StreamEventKind.FINISH, StreamEventKind.ERROR)
+        ]
+        assert len(terminal) <= 1
+        if terminal:
+            assert events[-1] is terminal[0]
+
     async def test_a_failure_is_mapped_onto_the_taxonomy(self, wire_stream) -> None:
         provider, _ = wire_stream(
             litellm.APIConnectionError(
@@ -691,6 +901,115 @@ class TestTheStream:
             "request",
             "context",
         ]
+
+
+# ---------------------------------------------------------------------------
+# The library's own stream ordering
+# ---------------------------------------------------------------------------
+
+
+def _library_kind(chunk: ModelResponseStream) -> str:
+    """What one chunk the library produced reports, ignoring everything it says."""
+    choices = chunk.choices
+    if not choices:
+        return "usage"
+    choice = choices[0]
+    if getattr(choice, "finish_reason", None) is not None:
+        return "finish"
+    if getattr(getattr(choice, "delta", None), "content", None):
+        return "content"
+    return "usage"
+
+
+async def _library_chunks(
+    chunks: list[ModelResponseStream], *, stream_options: dict[str, object] | None = None
+) -> list[ModelResponseStream]:
+    """Drain ``CustomStreamWrapper``, the object ``acompletion(stream=True)`` hands back.
+
+    The wrapper is driven with the library's own chunk records over a local async
+    generator, so what runs is the installed library's end-of-stream logic rather
+    than a stand-in for it — and no request is made.
+    """
+
+    async def generate():
+        for chunk in chunks:
+            yield chunk
+
+    wrapper = CustomStreamWrapper(
+        completion_stream=generate(),
+        model=f"openai/{UPSTREAM_MODEL}",
+        logging_obj=Logging(
+            model=UPSTREAM_MODEL,
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+            call_type="acompletion",
+            start_time=time.time(),
+            litellm_call_id="contract-probe",
+            function_id="contract-probe",
+        ),
+        custom_llm_provider="openai",
+        stream_options=stream_options,
+    )
+    seen: list[ModelResponseStream] = []
+    while True:
+        try:
+            seen.append(await wrapper.__anext__())
+        except StopAsyncIteration:
+            return seen
+
+
+class TestTheLibrariesOwnChunkOrdering:
+    """The chunk order the pinned library produces, which the buffering above rests on.
+
+    This is a contract probe rather than a test of the binding: it drives
+    ``litellm.litellm_core_utils.streaming_handler.CustomStreamWrapper`` with a
+    scripted chunk sequence and pins the order it emits. No network is involved.
+
+    It exists because the buffering in
+    :meth:`~model_gateway.providers.litellm_provider.LiteLLMProvider.stream` is a
+    response to an observed property of the installed library, and that property
+    is exactly what an upgrade would change. A docstring describing the
+    assumption can be right and still go stale; this test cannot.
+    """
+
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    async def test_a_trailing_usage_chunk_follows_the_finish_reason(self) -> None:
+        """Usage reporting puts the usage report after the reason generation stopped."""
+        chunks = await _library_chunks(
+            [content_chunk("hi"), finish_chunk("stop"), usage_chunk(25, 42, 67)],
+            stream_options={"include_usage": True},
+        )
+        assert [_library_kind(chunk) for chunk in chunks] == ["content", "finish", "usage"]
+
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    async def test_the_trailing_chunk_carries_no_finish_reason(self) -> None:
+        """It is a usage report, not a second terminal: nothing follows it."""
+        chunks = await _library_chunks(
+            [content_chunk("hi"), finish_chunk("stop"), usage_chunk(25, 42, 67)],
+            stream_options={"include_usage": True},
+        )
+        assert [getattr(chunk.choices[0], "finish_reason", None) for chunk in chunks] == [
+            None,
+            "stop",
+            None,
+        ]
+
+    async def test_without_usage_reporting_no_trailing_chunk_is_added(self) -> None:
+        """The gateway asks for nothing beyond ``stream``, and gets none back."""
+        chunks = await _library_chunks([content_chunk("hi"), finish_chunk("stop")])
+        assert [_library_kind(chunk) for chunk in chunks] == ["content", "finish"]
+
+    async def test_a_stream_the_upstream_never_finished_is_given_a_finish_reason(self) -> None:
+        """The library synthesises ``stop`` — the limit the provider documents.
+
+        The wrapper finishes a stream it never saw finish, so through it a
+        truncated upstream is presented as a completed one and the two cannot be
+        told apart from the chunks alone. Pinned here so the limit recorded in
+        the provider's docstring is a tested fact rather than a hope.
+        """
+        chunks = await _library_chunks([content_chunk("hi")])
+        assert [_library_kind(chunk) for chunk in chunks] == ["content", "finish"]
+        assert getattr(chunks[-1].choices[0], "finish_reason", None) == "stop"
 
 
 # ---------------------------------------------------------------------------
