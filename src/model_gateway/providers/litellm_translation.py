@@ -38,6 +38,18 @@ boundary, and each is enforced rather than assumed:
   - an unknown provider-specific field is still refused until it is
     classified, so a new provider annotation cannot pass unexamined.
 
+  The one usage detail that is not refused is the pinned library's own
+  placeholder population: the exact synthetic shape ``stream_chunk_builder``
+  assembles for a trailing usage report — ``reasoning_tokens=0`` with its
+  derived ``text_tokens`` — is the library's schema satisfaction rather than
+  a provider fact, and is recognised as a whole shape rather than by value.
+  Recognising it couples the translation to the pinned library's measured
+  behaviour, which is acceptable because the dependency is pinned exactly and
+  the compatibility test fails loudly if an upgrade changes the shape;
+  weakening the ``None`` (not reported) versus ``0`` (reported as zero)
+  invariant globally is the alternative, and it loses information in exactly
+  the way the refusal exists to prevent.
+
   The gateway's own identity is stamped on the response — ``model`` is the
   public ID the caller asked for, ``upstream_model`` is the route's model ID
   and ``invocation_id`` is the gateway's own — never a value the upstream
@@ -703,11 +715,13 @@ def _reject_unrepresentable_usage(usage: LiteLLMUsage) -> None:
     ignoring it would hide a difference the caller was never told about.
 
     The one exception is the library's own placeholder population, which
-    :func:`_reject_extra_detail_fields` ignores by value rather than by field:
-    a detail field the library fills to satisfy its usage schema carries no
-    provider fact, while any other value does. The distinction is drawn on
-    the value because the library and a provider write the same fields — only
-    the value tells a reported count from the library's schema satisfaction.
+    :func:`_reject_extra_detail_fields` ignores by recognising the exact
+    synthetic shape the pinned library generates rather than by the value a
+    field carries: the library's schema satisfaction writes a whole shape a
+    provider never writes, and only that shape is ignored. The distinction is
+    drawn on the shape because the library and a provider write the same
+    fields — only the combination tells a reported count from the library's
+    schema satisfaction.
     """
     prompt_details = usage.prompt_tokens_details
     if prompt_details is not None:
@@ -739,47 +753,81 @@ def _reject_extra_detail_fields(
     """Refuse a usage-detail field with no canonical target, naming the first one found.
 
     The line between a provider fact and the library's own schema
-    satisfaction is drawn on the value the field carries:
+    satisfaction is drawn by recognising the exact shape the pinned library
+    synthesises, never by a field's value alone:
 
-    * ``None`` — the field is absent; there is nothing to classify.
-    * ``0`` — a placeholder. LiteLLM's streaming chunk builder fills
-      ``reasoning_tokens`` with a hard-coded zero when it assembles the
-      trailing usage report, and a provider that reports a category at zero
-      states the same thing as omitting it: zero of a token category is no
-      fact about the answer, so it must not fail the response.
-    * ``text_tokens`` equal to ``completion_tokens - reasoning_tokens`` —
-      LiteLLM's own arithmetic on the completion side, not a provider field
-      (OpenAI's completion details carry no ``text_tokens``; the library
-      derives it). The value restates a count the canonical model already
-      carries as ``output_tokens``, so ignoring it drops nothing.
-    * any other value — a provider-reported count the canonical usage model
-      cannot carry: a reasoning-token breakdown, an audio-token count, a
-      prediction-token count, a cache-write count, a modality count. Refused,
-      because the caller must not be told the usage was honoured when part of
-      the report was dropped.
+    * the completion side carries the library's placeholder population, and
+      only as one exact shape: ``stream_chunk_builder`` passes a hard-coded
+      ``reasoning_tokens=0`` for a simple text stream, and
+      ``calculate_usage`` turns that into a ``CompletionTokensDetailsWrapper``
+      whose only set fields are ``reasoning_tokens=0`` and
+      ``text_tokens=completion_tokens`` — the library's own arithmetic, not a
+      provider report. That whole shape, and only that shape, is ignored.
+    * anything else is a provider-reported count the canonical usage model
+      cannot carry, and is refused: an explicit zero — a provider that
+      reports ``reasoning_tokens=0`` without the library's derived
+      ``text_tokens`` stated a fact the canonical model cannot hold — a
+      non-zero count, a ``text_tokens`` that does not equal the library's
+      arithmetic, or any other category: a reasoning-token breakdown, an
+      audio-token count, a prediction-token count, a cache-write count, a
+      modality count. Refused, because the caller must not be told the usage
+      was honoured when part of the report was dropped.
 
-    The completion side is where the library's placeholder population lives,
-    so only that call passes ``completion_tokens``. The prompt side has no
-    derived field: the library passes prompt details through as the provider
-    sent them, so a prompt-detail value is always a provider fact.
+    The prompt side has no derived field: the library passes prompt details
+    through as the provider sent them, so every prompt-detail value is a
+    provider fact, zero included, and is refused when it has no canonical
+    target.
+
+    The trade-off, recorded rather than hidden: recognising the library's
+    synthetic shape couples this translation to the pinned library's measured
+    behaviour. That is acceptable because the dependency is pinned exactly and
+    the compatibility test fails loudly if an upgrade changes the shape —
+    which is preferable to weakening the invariant that ``None`` means *not
+    reported* while ``0`` means *reported as zero* globally.
     """
-    reasoning_tokens = getattr(details, "reasoning_tokens", None) or 0
+    if _is_library_synthetic_completion_details(details, completion_tokens):
+        return
     for name in type(details).model_fields:
         if name in allowed:
             continue
         value = getattr(details, name, None)
-        if value is None or value == 0:
-            continue
-        if (
-            name == "text_tokens"
-            and completion_tokens is not None
-            and value == completion_tokens - reasoning_tokens
-        ):
+        if value is None:
             continue
         raise InternalError(
             f"the upstream usage carries {where[:-1]} field {name!r}, which the canonical "
             f"usage representation cannot carry"
         )
+
+
+def _is_library_synthetic_completion_details(
+    details: Any, completion_tokens: int | None
+) -> bool:
+    """Whether the completion details are exactly the shape the pinned library synthesises.
+
+    The shape is measured, not assumed: driving the library's own
+    ``stream_chunk_builder`` with a scripted OpenAI-shaped stream produces a
+    ``CompletionTokensDetailsWrapper`` whose only set fields are
+    ``reasoning_tokens=0`` and ``text_tokens=completion_tokens``, because
+    ``stream_chunk_builder`` passes a hard-coded ``reasoning_tokens=0`` for a
+    simple text stream and ``calculate_usage`` derives ``text_tokens`` as
+    ``completion_tokens - reasoning_tokens``. Numeric equality of
+    ``text_tokens`` with that arithmetic is evidence of the library's
+    arithmetic, not proof of it, so the whole shape is recognised at once:
+    both fields set, the placeholder zero, the derived value, and nothing
+    else. A provider that reports the same zero without the derived field —
+    or any other category, at zero or not — is not this shape and is
+    refused.
+    """
+    if completion_tokens is None:
+        return False
+    set_fields = {
+        name for name in type(details).model_fields if getattr(details, name, None) is not None
+    }
+    return (
+        set_fields == {"reasoning_tokens", "text_tokens"}
+        and getattr(details, "reasoning_tokens", None) == 0
+        and getattr(details, "text_tokens", None) == completion_tokens
+    )
 
 
 # Response fields classified as provider operational metadata rather than answer

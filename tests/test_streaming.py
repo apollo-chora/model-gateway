@@ -871,6 +871,90 @@ class TestFromLitellmChunkUsage:
         usage = next(event.usage for event in events if event.kind is StreamEventKind.USAGE)
         assert usage == TokenUsage(input_tokens=25, output_tokens=42, total_tokens=67)
 
+    def test_the_librarys_measured_shape_is_exactly_the_placeholder_pair(self) -> None:
+        """The measured synthetic shape is pinned, not approximated.
+
+        The fixture is the library's own output, so this asserts the exact
+        shape the translation recognises: only ``reasoning_tokens=0`` and
+        ``text_tokens=completion_tokens`` are set, and nothing else. If an
+        upgrade changes the shape, this test and the acceptance test fail
+        loudly together — the measurement and the recognition cannot drift
+        apart.
+        """
+        usage = library_trailing_usage(25, 42)
+        details = usage.completion_tokens_details
+        assert details is not None
+        set_fields = {
+            name
+            for name in type(details).model_fields
+            if getattr(details, name, None) is not None
+        }
+        assert set_fields == {"reasoning_tokens", "text_tokens"}
+        assert details.reasoning_tokens == 0
+        assert details.text_tokens == 42
+
+    def test_an_explicit_zero_valued_completion_detail_is_refused(self) -> None:
+        """An explicit provider-reported zero is a fact, not a placeholder.
+
+        The placeholder exception is drawn on the exact synthetic shape, not
+        on the value: a provider that reports ``reasoning_tokens=0`` without
+        the library's derived ``text_tokens`` stated a fact the canonical
+        usage model cannot carry, and dropping it would lose information in
+        exactly the way the refusal exists to prevent (PRD 9.1).
+        """
+        chunk = ModelResponseStream(
+            choices=[StreamingChoices(index=0, finish_reason="stop")],
+            usage=Usage(
+                prompt_tokens=25,
+                completion_tokens=42,
+                total_tokens=67,
+                completion_tokens_details={"reasoning_tokens": 0},
+            ),
+        )
+        with pytest.raises(InternalError, match="reasoning_tokens"):
+            from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
+
+    def test_an_explicit_zero_valued_category_is_refused(self) -> None:
+        """Zero of a category the canonical model cannot carry is still refused (PRD 9.1).
+
+        The placeholder exception is the library's exact synthetic shape, not
+        a general licence for zero-valued categories: an audio-token count
+        reported at zero is a provider fact with no canonical target, so the
+        chunk is refused rather than trimmed.
+        """
+        chunk = ModelResponseStream(
+            choices=[StreamingChoices(index=0, finish_reason="stop")],
+            usage=Usage(
+                prompt_tokens=25,
+                completion_tokens=42,
+                total_tokens=67,
+                completion_tokens_details={"audio_tokens": 0},
+            ),
+        )
+        with pytest.raises(InternalError, match="audio_tokens"):
+            from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
+
+    def test_a_text_tokens_numeric_coincidence_without_the_shape_is_refused(self) -> None:
+        """Numeric equality with the library's arithmetic is evidence, not proof (PRD 9.1).
+
+        ``text_tokens`` equal to ``completion_tokens - reasoning_tokens`` is
+        what the library derives, but a provider reporting that value on its
+        own — without the placeholder ``reasoning_tokens=0`` beside it — is
+        not the library's synthetic shape, and the coincidence alone does not
+        make the field the library's.
+        """
+        chunk = ModelResponseStream(
+            choices=[StreamingChoices(index=0, finish_reason="stop")],
+            usage=Usage(
+                prompt_tokens=25,
+                completion_tokens=42,
+                total_tokens=67,
+                completion_tokens_details={"text_tokens": 42},
+            ),
+        )
+        with pytest.raises(InternalError, match="text_tokens"):
+            from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
+
 
 class TestFromLitellmChunkFinish:
     """The terminal event carries the gateway's classification and the raw reason (PRD 5.3)."""

@@ -855,6 +855,157 @@ class TestFromLitellmResponse:
         result = from_litellm_response(make_route(), make_request(), response)
         assert result.usage == Usage(input_tokens=25, output_tokens=42, total_tokens=67)
 
+    def test_the_librarys_exact_synthetic_shape_is_accepted(self) -> None:
+        """The exact shape the pinned library synthesises is accepted, and only it.
+
+        The usage record is the one LiteLLM's own ``stream_chunk_builder``
+        assembles for a trailing usage report, driven here with a scripted
+        OpenAI-shaped stream so the fixture is the library's real output —
+        placeholder values included — rather than a handcrafted approximation
+        of it. The translation recognises that exact shape:
+        ``reasoning_tokens=0`` with its derived ``text_tokens`` and nothing
+        else set. This is the compatibility test that fails loudly if an
+        upgrade changes the shape.
+        """
+        response = litellm.stream_chunk_builder(
+            chunks=[
+                {
+                    "id": "chatcmpl-library",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "gpt-4o",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": "Recursion is a technique..."},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+                {
+                    "id": "chatcmpl-library",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "gpt-4o",
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 25,
+                        "completion_tokens": 42,
+                        "total_tokens": 67,
+                    },
+                },
+            ]
+        )
+        assert response is not None
+        details = response.usage.completion_tokens_details
+        assert details is not None
+        # The measured shape itself is pinned: exactly the placeholder pair.
+        set_fields = {
+            name
+            for name in type(details).model_fields
+            if getattr(details, name, None) is not None
+        }
+        assert set_fields == {"reasoning_tokens", "text_tokens"}
+        assert details.reasoning_tokens == 0
+        assert details.text_tokens == 42
+
+        result = from_litellm_response(make_route(), make_request(), response)
+        assert result.usage == Usage(input_tokens=25, output_tokens=42, total_tokens=67)
+
+    def test_an_explicit_zero_valued_completion_detail_is_refused(self) -> None:
+        """An explicit provider-reported zero is a fact, not a placeholder.
+
+        The placeholder exception is drawn on the exact synthetic shape, not
+        on the value: a provider that reports ``reasoning_tokens=0`` without
+        the library's derived ``text_tokens`` has stated a fact about the
+        answer — a reasoning category exists and is zero — and the canonical
+        usage model cannot carry it. Silently dropping it would lose
+        information in exactly the way the refusal exists to prevent (PRD
+        9.1).
+        """
+        response = response_from(
+            completion_payload(
+                usage={
+                    "prompt_tokens": 25,
+                    "completion_tokens": 42,
+                    "total_tokens": 67,
+                    "completion_tokens_details": {"reasoning_tokens": 0},
+                }
+            )
+        )
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(), make_request(), response)
+        assert "reasoning_tokens" in error.value.message
+
+    def test_an_explicit_zero_valued_category_is_refused(self) -> None:
+        """Zero of a category the canonical model cannot carry is still refused.
+
+        The placeholder exception is the library's exact synthetic shape, not
+        a general licence for zero-valued categories: an audio-token count
+        reported at zero is a provider fact with no canonical target, so the
+        response is rejected rather than trimmed (PRD 9.1).
+        """
+        response = response_from(
+            completion_payload(
+                usage={
+                    "prompt_tokens": 25,
+                    "completion_tokens": 42,
+                    "total_tokens": 67,
+                    "completion_tokens_details": {"audio_tokens": 0},
+                }
+            )
+        )
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(), make_request(), response)
+        assert "audio_tokens" in error.value.message
+
+    def test_an_explicit_zero_valued_prompt_detail_is_refused(self) -> None:
+        """The prompt side has no synthetic shape: every value is a provider fact.
+
+        The library passes prompt details through as the provider sent them,
+        so a prompt-detail value the canonical model cannot carry is refused
+        at zero as at any other value — the distinction between ``None`` (not
+        reported) and ``0`` (reported as zero) is the canonical usage model's
+        own and is not weakened globally (PRD 9.1 and 13).
+        """
+        response = response_from(
+            completion_payload(
+                usage={
+                    "prompt_tokens": 25,
+                    "completion_tokens": 42,
+                    "total_tokens": 67,
+                    "prompt_tokens_details": {"text_tokens": 0},
+                }
+            )
+        )
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(), make_request(), response)
+        assert "text_tokens" in error.value.message
+
+    def test_a_text_tokens_numeric_coincidence_without_the_shape_is_refused(self) -> None:
+        """Numeric equality with the library's arithmetic is evidence, not proof.
+
+        ``text_tokens`` equal to ``completion_tokens - reasoning_tokens`` is
+        what the library derives, but a provider reporting that value on its
+        own — without the placeholder ``reasoning_tokens=0`` beside it — is
+        not the library's synthetic shape. The whole shape is recognised at
+        once, so the coincidence alone does not make the field the library's
+        (PRD 9.1).
+        """
+        response = response_from(
+            completion_payload(
+                usage={
+                    "prompt_tokens": 25,
+                    "completion_tokens": 42,
+                    "total_tokens": 67,
+                    "completion_tokens_details": {"text_tokens": 42},
+                }
+            )
+        )
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(), make_request(), response)
+        assert "text_tokens" in error.value.message
+
     def test_usage_semantic_completion_detail_is_refused(self) -> None:
         """A provider-reported count with no canonical target is refused, not dropped.
 
