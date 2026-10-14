@@ -24,15 +24,17 @@ parsed JSON object, a raw string, or nothing — three distinct facts in the
 canonical record — and the mappers preserve the distinction rather than coercing
 one into another.
 
-``google.protobuf.Value`` numbers are doubles, so a JSON integer beyond 2^53 is
-not represented exactly and a small integer arrives as a float. That is a
-property of the well-known type rather than a choice this module makes; it is
-recorded here because it is the one place this boundary is not perfectly faithful.
+``google.protobuf.Struct`` numbers are doubles, so a small integer inside a
+metadata object arrives as a float and one beyond 2^53 is not represented
+exactly. That is a property of the well-known type rather than a choice this
+module makes. Tool-call arguments do not cross through it: they travel as JSON
+text, which carries every integer exactly.
 """
 
 from collections.abc import Mapping
 from enum import Enum
 
+import orjson
 from google.protobuf.struct_pb2 import Struct, Value
 
 from model_gateway.domain import (
@@ -57,7 +59,7 @@ from model_gateway.domain import (
     ToolDefinition,
     Usage,
 )
-from model_gateway.domain.json_value import JsonValue
+from model_gateway.domain.json_value import JsonValue, thaw_json
 from model_gateway.domain.streaming import StreamEvent, StreamEventKind, ToolCallDelta
 from model_gateway.errors import InvalidArgumentError
 from model_gateway.grpc import gateway_pb2 as pb
@@ -113,6 +115,18 @@ _TOOL_CHOICE_MODES: dict[int, ToolChoiceMode] = {
     pb.TOOL_CHOICE_MODE_SPECIFIC: ToolChoiceMode.SPECIFIC,
 }
 
+# The closed vocabulary of counts the gateway may have derived. The canonical
+# record names each count directly (``input_tokens``), the protobuf enum is
+# prefixed (``USAGE_FIELD_INPUT_TOKENS``), and the table between them is written
+# out for the same reason the other enums are: an explicit mapping makes the
+# vocabulary visible and makes an unlisted name impossible to map by accident.
+_USAGE_FIELDS: dict[str, int] = {
+    "input_tokens": pb.USAGE_FIELD_INPUT_TOKENS,
+    "output_tokens": pb.USAGE_FIELD_OUTPUT_TOKENS,
+    "total_tokens": pb.USAGE_FIELD_TOTAL_TOKENS,
+    "cached_tokens": pb.USAGE_FIELD_CACHED_TOKENS,
+}
+
 
 def _canonical_member(table: Mapping[int, Enum], where: str, value: int) -> Enum:
     """The canonical member a protobuf enum number selects, or a refusal.
@@ -138,8 +152,8 @@ def _value_to_json(value: Value) -> JsonValue:
     """A ``google.protobuf.Value`` as the JSON value it carries.
 
     ``null_value`` is ``None``, which is the same statement the canonical record
-    makes: the provider reported no arguments, rather than reporting an empty
-    object.
+    makes wherever a JSON null can arrive: nothing was said, rather than an
+    empty object or an empty list.
     """
     kind = value.WhichOneof("kind")
     if kind is None or kind == "null_value":
@@ -227,10 +241,24 @@ def content_part_from_proto(where: str, part: pb.ContentPart):
 
 
 def tool_call_from_proto(where: str, call: pb.ToolCall) -> ToolCall:
-    """A canonical tool call, recording what arrived rather than repairing it."""
-    if not call.HasField("arguments"):
+    """A canonical tool call, recording what arrived rather than repairing it.
+
+    ``arguments_json`` is the canonical JSON text, and :func:`orjson.loads`
+    reproduces the canonical rule exactly: a JSON string parses to a Python
+    ``str`` and stays one, an object becomes a mapping, and ``null`` parses to
+    ``None``. An absent field and a ``null`` payload are the same statement —
+    the caller said nothing about arguments — so both become ``None``. Any other
+    JSON value — a bare number, a boolean, an array — is not a state the
+    canonical record defines and is refused with :class:`InvalidArgumentError`
+    naming the field, rather than escaping as a ``ValueError`` the handler would
+    report as an internal error.
+    """
+    if not call.arguments_json:
         return ToolCall(id=call.id, name=call.name, arguments=None)
-    return ToolCall(id=call.id, name=call.name, arguments=_value_to_json(call.arguments))
+    try:
+        return ToolCall(id=call.id, name=call.name, arguments=orjson.loads(call.arguments_json))
+    except ValueError as error:
+        raise InvalidArgumentError(f"{where} 'arguments_json' is not valid: {error}") from error
 
 
 def tool_definition_from_proto(where: str, definition: pb.ToolDefinition) -> ToolDefinition:
@@ -249,12 +277,36 @@ def tool_definition_from_proto(where: str, definition: pb.ToolDefinition) -> Too
     )
 
 
+def _schema_from_value(where: str, schema: Value) -> Mapping[str, JsonValue] | bool:
+    """A JSON Schema carried by a ``google.protobuf.Value``, or a refusal.
+
+    A JSON Schema is an object or one of the two booleans the specification
+    permits. ``struct_value`` and ``bool_value`` are those two kinds; a string,
+    a number, an array or null is none of them, and is refused rather than
+    coerced, exactly as the canonical type refuses it.
+    """
+    kind = schema.WhichOneof("kind")
+    if kind == "struct_value":
+        return _struct_to_json(schema.struct_value)
+    if kind == "bool_value":
+        return schema.bool_value
+    raise InvalidArgumentError(
+        f"{where} must be a JSON object or a boolean, got {kind or 'null_value'!r}"
+    )
+
+
 def response_format_from_proto(where: str, response_format: pb.ResponseFormat) -> ResponseFormat:
-    """A canonical structured-output requirement."""
+    """A canonical structured-output requirement.
+
+    ``schema`` is read through :func:`_schema_from_value`: a JSON Schema may be
+    an object or a boolean, and ``google.protobuf.Value`` is the one well-known
+    type that carries both, so a boolean schema crosses the boundary as itself
+    instead of being coerced into an object.
+    """
     mode = _canonical_member(_RESPONSE_FORMAT_MODES, f"{where} 'mode'", response_format.mode)
     schema: Mapping[str, JsonValue] | bool | None = None
     if response_format.HasField("schema"):
-        schema = _struct_to_json(response_format.schema)
+        schema = _schema_from_value(f"{where} 'schema'", response_format.schema)
     return ResponseFormat(
         mode=mode,
         schema=schema,
@@ -320,42 +372,52 @@ def invocation_request_from_proto(request: pb.InvokeRequest, *, identity) -> Inv
     read from the request: the tenant the invocation acts under is the
     credential's, and a claimed ``tenant_id`` has already been reconciled against
     it by the caller (PRD section 5.1).
+
+    Every canonical constructor this mapping reaches — each message, the tool
+    declarations, the generation config and its response format, the tool choice
+    and the invocation itself — validates what it is given, and a failure there
+    is a request the gateway cannot honour rather than a gateway bug, so a
+    ``ValueError`` from one becomes :class:`InvalidArgumentError` naming the
+    rule. The HTTP request DTOs apply the same rule the same way.
     """
-    return InvocationRequest(
-        model=request.model,
-        messages=tuple(
-            message_from_proto(f"messages[{index}]", message)
-            for index, message in enumerate(request.messages)
-        ),
-        invocation_id=request.invocation_id or None,
-        tenant_id=identity.tenant,
-        actor_id=request.actor_id or None,
-        agent_id=request.agent_id or None,
-        system_instruction=request.system_prompt or None,
-        generation_config=generation_config_from_proto(
-            "generation_config", request.generation_config
-        ),
-        tools=tuple(
-            tool_definition_from_proto(f"tools[{index}]", definition)
-            for index, definition in enumerate(request.tools)
-        ),
-        tool_choice=(
-            ToolChoice(
-                mode=_canonical_member(
-                    _TOOL_CHOICE_MODES, "tool_choice 'mode'", request.tool_choice.mode
-                ),
-                name=request.tool_choice.name or None,
-            )
-            if request.HasField("tool_choice")
-            else None
-        ),
-        response_modality=_canonical_member(
-            _RESPONSE_MODALITIES, "response_modality", request.response_modality
-        ),
-        fallback_models=tuple(request.fallback_models),
-        idempotency_key=request.idempotency_key or None,
-        metadata=_struct_to_json(_mapping_to_struct(dict(request.metadata))),
-    )
+    try:
+        return InvocationRequest(
+            model=request.model,
+            messages=tuple(
+                message_from_proto(f"messages[{index}]", message)
+                for index, message in enumerate(request.messages)
+            ),
+            invocation_id=request.invocation_id or None,
+            tenant_id=identity.tenant,
+            actor_id=request.actor_id or None,
+            agent_id=request.agent_id or None,
+            system_instruction=request.system_instruction or None,
+            generation_config=generation_config_from_proto(
+                "generation_config", request.generation_config
+            ),
+            tools=tuple(
+                tool_definition_from_proto(f"tools[{index}]", definition)
+                for index, definition in enumerate(request.tools)
+            ),
+            tool_choice=(
+                ToolChoice(
+                    mode=_canonical_member(
+                        _TOOL_CHOICE_MODES, "tool_choice 'mode'", request.tool_choice.mode
+                    ),
+                    name=request.tool_choice.name or None,
+                )
+                if request.HasField("tool_choice")
+                else None
+            ),
+            response_modality=_canonical_member(
+                _RESPONSE_MODALITIES, "response_modality", request.response_modality
+            ),
+            fallback_models=tuple(request.fallback_models),
+            idempotency_key=request.idempotency_key or None,
+            metadata=_struct_to_json(request.metadata),
+        )
+    except ValueError as error:
+        raise InvalidArgumentError(f"the invocation request is not valid: {error}") from error
 
 
 def embed_request_from_proto(request: pb.EmbedRequest) -> EmbeddingRequest:
@@ -374,7 +436,9 @@ def embed_request_from_proto(request: pb.EmbedRequest) -> EmbeddingRequest:
             dimensions=request.dimensions if request.HasField("dimensions") else None,
             encoding_format=request.encoding_format or None,
             user=request.user or None,
-            metadata=_struct_to_json(_mapping_to_struct(dict(request.metadata))),
+            metadata=(
+                _struct_to_json(request.metadata) if request.HasField("metadata") else None
+            ),
         )
     except ValueError as error:
         raise InvalidArgumentError(f"the embeddings request is not valid: {error}") from error
@@ -386,7 +450,13 @@ def embed_request_from_proto(request: pb.EmbedRequest) -> EmbeddingRequest:
 
 
 def _usage_to_proto(usage: Usage) -> pb.Usage:
-    """The protobuf usage object, carrying only the counts that are known."""
+    """The protobuf usage object, carrying only the counts that are known.
+
+    A count the gateway derived is named in ``estimated_fields`` through the
+    closed vocabulary of :data:`_USAGE_FIELDS`, so a consumer can tell a reported
+    fact from the gateway's own arithmetic; the names are written in sorted
+    order so the same record always serialises the same way.
+    """
     result = pb.Usage()
     if usage.input_tokens is not None:
         result.input_tokens = usage.input_tokens
@@ -396,6 +466,7 @@ def _usage_to_proto(usage: Usage) -> pb.Usage:
         result.total_tokens = usage.total_tokens
     if usage.cached_tokens is not None:
         result.cached_tokens = usage.cached_tokens
+    result.estimated_fields.extend(_USAGE_FIELDS[name] for name in sorted(usage.estimated_fields))
     return result
 
 
@@ -425,17 +496,38 @@ def _content_part_to_proto(part) -> pb.ContentPart:
     return result
 
 
+def _response_format_to_proto(response_format) -> pb.ResponseFormat:
+    """The protobuf structured-output requirement.
+
+    A schema that is an object or a boolean is written as the
+    ``google.protobuf.Value`` of the same kind, so a boolean JSON Schema crosses
+    the boundary as itself; no schema leaves the field unset, which the canonical
+    record reads as the caller requiring no particular shape.
+    """
+    result = pb.ResponseFormat(
+        mode=getattr(pb, f"RESPONSE_FORMAT_MODE_{response_format.mode.name}"),
+        name=response_format.name or "",
+        strict=response_format.strict,
+    )
+    if response_format.schema is not None:
+        result.schema.CopyFrom(_json_to_value(response_format.schema))
+    return result
+
+
 def _tool_call_to_proto(call: ToolCall) -> pb.ToolCall:
     """One protobuf tool call.
 
-    A parsed JSON object, a raw string, and nothing are three distinct facts. An
-    object or a string is wrapped in the well-known value; nothing leaves the
-    field unset, which the canonical record reads as the provider having reported
-    no arguments at all rather than an empty object.
+    A parsed JSON object, a raw string, and nothing are three distinct facts.
+    :func:`orjson.dumps` serialises an object or a string as the JSON text of
+    the same kind — a JSON string is quoted, so it decodes back to a string —
+    and nothing leaves ``arguments_json`` empty, which the canonical record reads
+    as the provider having reported no arguments at all rather than an empty
+    object. ``bytes`` rather than the well-known value is what keeps a JSON
+    integer exact: ``google.protobuf.Value`` types every number as a double.
     """
     result = pb.ToolCall(id=call.id, name=call.name)
     if call.arguments is not None:
-        result.arguments.CopyFrom(_json_to_value(call.arguments))
+        result.arguments_json = orjson.dumps(thaw_json(call.arguments))
     return result
 
 
@@ -450,17 +542,24 @@ def _output_item_to_proto(item: OutputItem) -> pb.OutputItem:
 
 
 def invoke_response_to_proto(response) -> pb.InvokeResponse:
-    """The protobuf answer to one Invoke."""
+    """The protobuf answer to one Invoke.
+
+    ``raw_finish_reason`` is written only when the canonical record carries one:
+    the field is optional, and the canonical record distinguishes "the provider
+    reported no reason" (``None``) from "the provider supplied an empty one"
+    (``""``), so writing ``""`` unconditionally would collapse the two.
+    """
     result = pb.InvokeResponse(
         invocation_id=response.invocation_id or "",
         model=response.model,
         upstream_model=response.upstream_model,
         finish_reason=_finish_reason_to_proto(response.finish_reason),
-        raw_finish_reason=response.raw_finish_reason or "",
         attempt_count=response.attempt_count,
         fallback_used=response.fallback_used,
         idempotency_status=_idempotency_status_to_proto(response.idempotency_status),
     )
+    if response.raw_finish_reason is not None:
+        result.raw_finish_reason = response.raw_finish_reason
     result.output.extend(_output_item_to_proto(item) for item in response.content)
     result.usage.CopyFrom(_usage_to_proto(response.usage))
     if response.estimated_cost is not None:
@@ -504,7 +603,11 @@ def chunk_from_event(event: StreamEvent) -> pb.InvokeChunk:
         result.usage.CopyFrom(_usage_to_proto(event.usage))
     elif event.kind == StreamEventKind.FINISH:
         result.finish.finish_reason = _finish_reason_to_proto(event.finish_reason)
-        result.finish.raw_finish_reason = event.raw_finish_reason or ""
+        # Optional, so an absent reason stays absent: the canonical record
+        # distinguishes "the provider reported no reason" from "the provider
+        # supplied an empty one", and the two must not collapse on the wire.
+        if event.raw_finish_reason is not None:
+            result.finish.raw_finish_reason = event.raw_finish_reason
     else:
         result.error.reason = event.error_reason or "unknown"
         result.error.message = event.error_message or ""

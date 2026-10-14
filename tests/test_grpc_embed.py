@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 
 import grpc
 import pytest
+from google.protobuf.struct_pb2 import Struct
 
 from model_gateway.capabilities import Capability
 from model_gateway.config import Settings
@@ -203,6 +204,10 @@ async def test_embed_hands_the_provider_the_canonical_request():
     # A route that accepts a caller-selectable dimensionality, because a stated
     # dimension is refused by the gateway core on a route that does not declare one.
     provider = FakeEmbeddingProvider()
+    metadata = Struct()
+    # The struct carries the JSON values the canonical record holds, an integer
+    # beside a string, where a map of strings could carry only strings.
+    metadata.update({"trace": "abc", "attempt": 2})
     async with served(service(provider, supports_dimensions_param=True), authenticator()) as stub:
         await call(
             stub,
@@ -211,7 +216,7 @@ async def test_embed_hands_the_provider_the_canonical_request():
                 input=["first", "second"],
                 dimensions=3,
                 user="caller-7",
-                metadata={"trace": "abc"},
+                metadata=metadata,
             ),
         )
 
@@ -222,7 +227,7 @@ async def test_embed_hands_the_provider_the_canonical_request():
         input=("first", "second"),
         dimensions=3,
         user="caller-7",
-        metadata={"trace": "abc"},
+        metadata={"trace": "abc", "attempt": 2},
     )
 
 
@@ -251,6 +256,20 @@ async def test_embed_reports_only_the_usage_counts_the_provider_stated():
     assert not response.usage.HasField("total_tokens")
     assert not response.usage.HasField("output_tokens")
     assert not response.usage.HasField("cached_tokens")
+
+
+async def test_embed_names_the_counts_the_gateway_derived():
+    # The provider reported the input count and left the total to the gateway,
+    # so the total is an estimate and the answer names it as one — the only
+    # way a consumer can tell a reported count from a derived one.
+    provider = FakeEmbeddingProvider(
+        usage=Usage(input_tokens=7, total_tokens=7, estimated_fields=frozenset({"total_tokens"}))
+    )
+    async with served(service(provider), authenticator()) as stub:
+        response = await call(stub, pb.EmbedRequest(model=PUBLIC_MODEL, input=["a"]))
+
+    assert response.usage.total_tokens == 7
+    assert response.usage.estimated_fields == [pb.USAGE_FIELD_TOTAL_TOKENS]
 
 
 async def test_embed_refuses_a_base64_encoding_and_names_it():

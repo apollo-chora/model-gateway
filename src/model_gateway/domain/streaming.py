@@ -75,6 +75,7 @@ from model_gateway.domain.serialization import (
     as_object,
     as_optional_text,
     as_required_text,
+    as_text,
     describe,
     reject_unknown_keys,
 )
@@ -246,6 +247,12 @@ class StreamEvent:
     deleted what upstream said (PRD sections 5.2 and 9.1). Both belong to a
     ``finish`` event alone.
 
+    An absent raw reason and an empty one are different facts, and the event
+    keeps the difference: ``None`` means the provider reported no reason at all,
+    ``""`` means it reported one that was empty. The canonical response draws the
+    same distinction, so an HTTP and a gRPC caller reading the same answer agree
+    about whether the provider said anything.
+
     ``error_reason`` and ``error_message`` belong to an ``error`` event alone,
     and they are the failure's own vocabulary rather than a finish reason's
     (PRD sections 5.4 and 16). ``error_reason`` is the gateway's stable
@@ -287,8 +294,10 @@ class StreamEvent:
         tool_call = _as_tool_call_delta("stream event 'tool_call'", self.tool_call)
         usage = _as_usage("stream event 'usage'", self.usage)
         finish_reason = _as_finish_reason("stream event 'finish_reason'", self.finish_reason)
-        raw_finish_reason = as_optional_text(
-            "stream event 'raw_finish_reason'", self.raw_finish_reason
+        raw_finish_reason = (
+            None
+            if self.raw_finish_reason is None
+            else as_text("stream event 'raw_finish_reason'", self.raw_finish_reason)
         )
         error_reason = as_optional_text("stream event 'error_reason'", self.error_reason)
         error_message = as_optional_text("stream event 'error_message'", self.error_message)
@@ -344,8 +353,12 @@ class StreamEvent:
             tool_call=_optional_tool_call_delta(payload.get("tool_call")),
             usage=_optional_usage(payload.get("usage")),
             finish_reason=_optional_finish_reason(raw_finish_reason),
-            raw_finish_reason=as_optional_text(
-                f"{where} 'raw_finish_reason'", payload.get("raw_finish_reason")
+            raw_finish_reason=(
+                None
+                if payload.get("raw_finish_reason") is None
+                else as_text(
+                    f"{where} 'raw_finish_reason'", payload.get("raw_finish_reason")
+                )
             ),
             error_reason=as_optional_text(f"{where} 'error_reason'", payload.get("error_reason")),
             error_message=as_optional_text(

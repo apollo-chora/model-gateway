@@ -53,7 +53,8 @@ message InvokeRequest {
   // The conversation, in order.
   repeated Message messages = 6;
   // The invocation-level instruction. Not interchangeable with a system message.
-  string system_prompt = 7;
+  // Named for the canonical field.
+  string system_instruction = 7;
   // Model parameters. An unset field means "not specified".
   GenerationConfig generation_config = 8;
   // Tool declarations the model may call.
@@ -67,8 +68,10 @@ message InvokeRequest {
   repeated string fallback_models = 12;
   // Caller-supplied deduplication key.
   string idempotency_key = 13;
-  // Caller bookkeeping. Never forwarded to the model or a provider.
-  map<string, string> metadata = 14;
+  // Caller bookkeeping as a JSON object. Never forwarded to the model or a
+  // provider. google.protobuf.Struct is chosen because canonical metadata is
+  // Mapping[str, JsonValue] and a string map cannot carry it.
+  google.protobuf.Struct metadata = 14;
 }
 
 // ToolChoice is the caller's tool-choice policy (PRD section 9.3).
@@ -140,12 +143,14 @@ message RefusalPart {
 
 // ToolCall is one proposed call.
 //
-// arguments is the upstream's JSON object, a raw JSON string, or absent: three
-// distinct facts, which google.protobuf.Value preserves.
+// arguments_json is the canonical JSON text: a JSON object, a JSON string, and
+// an absent field are the three canonical states. bytes is chosen because
+// google.protobuf.Value types numbers as doubles and so cannot carry a JSON
+// integer faithfully.
 message ToolCall {
   string id = 1;
   string name = 2;
-  google.protobuf.Value arguments = 3;
+  bytes arguments_json = 3;
 }
 
 // ToolDefinition declares a tool the model may call.
@@ -174,8 +179,10 @@ message GenerationConfig {
 
 message ResponseFormat {
   ResponseFormatMode mode = 1;
-  // The schema a json_schema mode requires.
-  google.protobuf.Struct schema = 2;
+  // The schema a json_schema mode requires. A JSON Schema may be an object or a
+  // boolean; Value is chosen so the mapper accepts struct_value and bool_value
+  // and rejects every other kind.
+  google.protobuf.Value schema = 2;
   string name = 3;
   bool strict = 4;
 }
@@ -206,8 +213,10 @@ message InvokeResponse {
   repeated OutputItem output = 4;
   // Why generation stopped.
   FinishReason finish_reason = 5;
-  // The provider's own reason, when the gateway could not classify it.
-  string raw_finish_reason = 6;
+  // The provider's own reason, when the gateway could not classify it. Optional:
+  // absent means the provider reported no reason at all, which is not the same
+  // fact as an empty one.
+  optional string raw_finish_reason = 6;
   Usage usage = 7;
   optional double estimated_cost = 8;
   // An ISO 4217 code, present only with estimated_cost.
@@ -238,12 +247,29 @@ enum FinishReason {
 // Usage counts the tokens of one invocation.
 //
 // A field is present only when it is known: an absent count is a count the
-// provider never reported, not a count of zero.
+// provider never reported, not a count of zero. The same rule holds for a count
+// the gateway derived: an estimate is a value, so a count that was never
+// reported cannot be an estimate of one.
 message Usage {
   optional int32 input_tokens = 1;
   optional int32 output_tokens = 2;
   optional int32 total_tokens = 3;
   optional int32 cached_tokens = 4;
+  // Which of the recorded counts the gateway derived rather than the provider
+  // reporting them. Empty means every recorded count was reported.
+  repeated UsageField estimated_fields = 5;
+}
+
+// UsageField names one token count, for the gateway to record that it derived
+// that count rather than the provider reporting it. The vocabulary is closed:
+// the canonical Usage record defines a fixed set of counts, and a name outside
+// it is refused rather than carried.
+enum UsageField {
+  USAGE_FIELD_UNSPECIFIED = 0;
+  USAGE_FIELD_INPUT_TOKENS = 1;
+  USAGE_FIELD_OUTPUT_TOKENS = 2;
+  USAGE_FIELD_TOTAL_TOKENS = 3;
+  USAGE_FIELD_CACHED_TOKENS = 4;
 }
 
 enum IdempotencyStatus {
@@ -282,7 +308,9 @@ message ToolCallDelta {
 
 message FinishEvent {
   FinishReason finish_reason = 1;
-  string raw_finish_reason = 2;
+  // Optional: absent means the provider reported no reason at all, which is not
+  // the same fact as an empty one.
+  optional string raw_finish_reason = 2;
 }
 
 // ErrorEvent carries the gateway's own stable reason and its sanitized message.
@@ -299,7 +327,10 @@ message EmbedRequest {
   // "float" or "base64". The gateway answers floats only.
   string encoding_format = 4;
   string user = 5;
-  map<string, string> metadata = 6;
+  // Caller bookkeeping as a JSON object. Never forwarded to the model or a
+  // provider. google.protobuf.Struct is chosen because canonical metadata is
+  // Mapping[str, JsonValue] and a string map cannot carry it.
+  google.protobuf.Struct metadata = 6;
 }
 
 message EmbedResponse {
