@@ -130,7 +130,7 @@ directly, is :file:`tests/conftest.py`.
 """
 
 import ssl
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Final
 
@@ -138,13 +138,16 @@ import httpx
 
 from model_gateway.config.routes import Route
 from model_gateway.domain import InvocationRequest, InvocationResponse
+from model_gateway.domain.streaming import StreamEvent
 from model_gateway.errors import FailedPreconditionError, GatewayError
 from model_gateway.providers._litellm import AsyncHTTPHandler, litellm, openai
 from model_gateway.providers.base import AttemptContext
 from model_gateway.providers.litellm_translation import (
+    from_litellm_chunk,
     from_litellm_response,
     map_litellm_error,
     to_litellm_params,
+    to_litellm_stream_params,
 )
 from model_gateway.security.transport import (
     attempt_timeout,
@@ -297,6 +300,13 @@ class LiteLLMProvider:
     the error mapping — is documented in the module docstring, where the
     reasons for each live.
 
+    The same boundary serves streaming through :meth:`stream`, which performs
+    the same single gateway attempt with ``stream=True`` and yields the
+    upstream's chunks as canonical stream events. The streaming capability is
+    separate from :meth:`complete` — a provider that cannot stream is refused
+    by the gateway core rather than asked to fake token-by-token output from a
+    whole answer (PRD sections 5.3, 16 and 9.5).
+
     What a caller may inject, and what it may not
     --------------------------------------------
     The per-dialect client construction is the security boundary, and it is not
@@ -388,6 +398,62 @@ class LiteLLMProvider:
         except Exception as exc:
             raise map_litellm_error(exc) from exc
         return from_litellm_response(route, request, response)
+
+    async def stream(
+        self,
+        route: Route,
+        request: InvocationRequest,
+        context: AttemptContext,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream the one gateway attempt for this route (PRD sections 9.6 and 16).
+
+        The streaming counterpart of :meth:`complete`, and the same single
+        gateway attempt under the same controls: the parameters are the
+        streaming translation of ``route`` and ``request``
+        (:func:`~model_gateway.providers.litellm_translation.to_litellm_stream_params`)
+        — which carries ``stream=True`` and everything the non-streaming call
+        carries, including ``num_retries=0`` — plus this attempt's own timeout
+        and the per-dialect client built for this attempt's budget, closed when
+        the attempt ends. The client construction is :meth:`_attempt_client`'s,
+        not duplicated here: the dialect check and the per-dialect wrapping are
+        the security boundary, and the streaming path reaches the wire through
+        exactly the same one.
+
+        Each chunk the upstream produces is normalised through
+        :func:`~model_gateway.providers.litellm_translation.from_litellm_chunk`
+        and the events are numbered consecutively from 0, so the sequence is
+        strictly increasing across the whole stream. A chunk carrying nothing
+        reportable produces no event, and the counter advances only by the
+        events actually emitted.
+
+        Errors are mapped exactly as :meth:`complete` maps them: a
+        :class:`~model_gateway.errors.GatewayError` — a dialect refusal, or a
+        semantic the canonical stream cannot carry — propagates unchanged, and
+        anything the call raises is mapped by
+        :func:`~model_gateway.providers.litellm_translation.map_litellm_error` and
+        re-raised, so a caller never sees a provider-shaped error. Cancellation
+        propagates unmapped, because it is a :exc:`BaseException` the mapping
+        does not catch (PRD section 15).
+        """
+        params = to_litellm_stream_params(route, request)
+        params["timeout"] = context.timeout
+        sequence = 0
+        try:
+            async with self._attempt_client(route, context.timeout) as client:
+                stream = await litellm.acompletion(**params, client=client)
+                async for chunk in stream:
+                    events = from_litellm_chunk(
+                        chunk,
+                        invocation_id=context.invocation_id or "",
+                        sequence=sequence,
+                    )
+                    for event in events:
+                        yield event
+                    sequence += len(events)
+        except GatewayError:
+            raise
+        except Exception as exc:
+            raise map_litellm_error(exc) from exc
 
     def _attempt_client(
         self, route: Route, budget: float | None

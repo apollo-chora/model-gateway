@@ -31,7 +31,14 @@ from litellm.litellm_core_utils.llm_response_utils.convert_dict_to_response impo
     convert_to_model_response_object,
 )
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
-from litellm.types.utils import ModelResponse
+from litellm.types.utils import (
+    ChatCompletionDeltaToolCall,
+    Delta,
+    Function,
+    ModelResponse,
+    ModelResponseStream,
+    StreamingChoices,
+)
 
 from model_gateway.capabilities import Capability
 from model_gateway.config.routes import Operation, Route
@@ -46,9 +53,11 @@ from model_gateway.domain import (
     ToolCall,
     Usage,
 )
+from model_gateway.domain.streaming import StreamEventKind
 from model_gateway.errors import (
     CapabilityError,
     DeadlineExceededError,
+    ErrorReason,
     InternalError,
     NotFoundError,
     PermissionDeniedError,
@@ -180,6 +189,11 @@ def pinned_transport_of(client: object) -> PinnedAddressTransport:
     return transport
 
 
+async def collect(agen) -> list:
+    """Drain an async generator into a list."""
+    return [event async for event in agen]
+
+
 def recording_aclose(monkeypatch: pytest.MonkeyPatch) -> list[PinnedAddressTransport]:
     """Record every pinned transport closed while the test runs."""
     closed: list[PinnedAddressTransport] = []
@@ -207,6 +221,68 @@ class RecordingCompletion:
         return self._outcome
 
 
+class RecordingStream:
+    """A stand-in for ``litellm.acompletion`` that records each call and streams chunks.
+
+    The outcome is either an :exc:`BaseException``, raised as the call is made,
+    or an async iterable of :class:`~litellm.types.utils.ModelResponseStream`
+    chunks, which is what the real library returns for ``stream=True``.
+    """
+
+    def __init__(self, outcome: object) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._outcome = outcome
+
+    async def __call__(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+
+def stream_of(*chunks: ModelResponseStream):
+    """An async iterable of chunks, the shape ``litellm.acompletion`` returns for a stream."""
+
+    async def generate():
+        for chunk in chunks:
+            yield chunk
+
+    return generate()
+
+
+def content_chunk(text: str) -> ModelResponseStream:
+    """A chunk carrying a text delta and the role marker that opens the answer."""
+    return ModelResponseStream(
+        choices=[StreamingChoices(index=0, delta=Delta(content=text, role="assistant"))]
+    )
+
+
+def finish_chunk(finish_reason: str) -> ModelResponseStream:
+    """A chunk carrying a finish reason."""
+    return ModelResponseStream(
+        choices=[StreamingChoices(index=0, finish_reason=finish_reason)]
+    )
+
+
+def tool_call_chunk(
+    *,
+    index: int = 0,
+    identifier: str | None = None,
+    name: str | None = None,
+    arguments: str | None = None,
+) -> ModelResponseStream:
+    """A chunk carrying one tool-call delta, as OpenAI sends one across several."""
+    call = ChatCompletionDeltaToolCall(
+        index=index,
+        id=identifier,
+        type="function",
+        function=Function(arguments=arguments, name=name),
+    )
+    return ModelResponseStream(
+        choices=[StreamingChoices(index=0, delta=Delta(content=None, tool_calls=[call]))]
+    )
+
+
 @pytest.fixture
 def wire(monkeypatch: pytest.MonkeyPatch):
     """Wire a provider to a scripted completion; the real client is built, never connected."""
@@ -217,6 +293,20 @@ def wire(monkeypatch: pytest.MonkeyPatch):
         completion = RecordingCompletion(outcome)
         monkeypatch.setattr(litellm, "acompletion", completion)
         return LiteLLMProvider(), completion
+
+    return wire_outcome
+
+
+@pytest.fixture
+def wire_stream(monkeypatch: pytest.MonkeyPatch):
+    """Wire a provider to a scripted stream; the real client is built, never connected."""
+
+    def wire_outcome(
+        outcome: object,
+    ) -> tuple[LiteLLMProvider, RecordingStream]:
+        stream = RecordingStream(outcome)
+        monkeypatch.setattr(litellm, "acompletion", stream)
+        return LiteLLMProvider(), stream
 
     return wire_outcome
 
@@ -377,6 +467,230 @@ class TestTheCall:
             ToolCall(id="call_01", name="get_weather", arguments={"city": "Paris"}),
         )
         assert response.finish_reason is FinishReason.TOOL_CALLS
+
+
+# ---------------------------------------------------------------------------
+# The stream
+# ---------------------------------------------------------------------------
+
+
+class TestTheStream:
+    """The streaming path: one gateway attempt with ``stream=True`` (PRD 9.6, 16).
+
+    The stream is the same single attempt under the same controls as
+    :meth:`LiteLLMProvider.complete` — the per-dialect client, ``num_retries=0``,
+    the attempt timeout, the error mapping — and the chunks are translated by
+    the binding's own chunk translation. No test reaches the network: the real
+    client is built and closed around a transport that is never asked for a
+    request.
+    """
+
+    async def test_the_parameters_are_the_stream_translation_plus_the_attempts_own_controls(
+        self, wire_stream
+    ) -> None:
+        provider, stream = wire_stream(stream_of(content_chunk("Hello"), finish_chunk("stop")))
+
+        await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        (call,) = stream.calls
+        assert call["model"] == "openai/gpt-4o"
+        assert call["api_base"] == ENDPOINT
+        assert call["api_key"] == SECRET_KEY
+        assert call["num_retries"] == 0
+        assert call["stream"] is True
+        assert call["timeout"] == 30.0
+
+    async def test_the_injected_client_is_the_same_per_dialect_construction(
+        self, wire_stream
+    ) -> None:
+        """The stream reaches the wire through the same client as the non-streaming call."""
+        provider, stream = wire_stream(stream_of(content_chunk("Hello"), finish_chunk("stop")))
+
+        await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        (call,) = stream.calls
+        client = call["client"]
+        assert isinstance(client, openai.AsyncOpenAI)
+        assert client.api_key == SECRET_KEY
+        assert str(client.base_url).rstrip("/") == ENDPOINT
+        assert client.max_retries == 0
+        http_client = client._client  # pyright: ignore[reportPrivateUsage]
+        assert http_client.follow_redirects is False
+        assert isinstance(pinned_transport_of(client), PinnedAddressTransport)
+
+    async def test_the_client_is_closed_when_the_stream_ends(
+        self, wire_stream, monkeypatch
+    ) -> None:
+        closed = recording_aclose(monkeypatch)
+        provider, stream = wire_stream(stream_of(content_chunk("Hello"), finish_chunk("stop")))
+
+        await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        (call,) = stream.calls
+        assert closed == [pinned_transport_of(call["client"])]
+
+    async def test_each_attempt_gets_a_fresh_client_with_its_own_budget(
+        self, wire_stream, monkeypatch
+    ) -> None:
+        closed = recording_aclose(monkeypatch)
+        provider, stream = wire_stream(stream_of(content_chunk("Hello"), finish_chunk("stop")))
+
+        await collect(provider.stream(make_route(), make_request(), make_context(timeout=7.0)))
+        await collect(provider.stream(make_route(), make_request(), make_context(timeout=7.0)))
+
+        first, second = (call["client"] for call in stream.calls)
+        assert first is not second
+        assert closed == [pinned_transport_of(first), pinned_transport_of(second)]
+
+    async def test_the_attempt_budget_is_the_calls_timeout(self, wire_stream) -> None:
+        provider, stream = wire_stream(stream_of(content_chunk("Hello"), finish_chunk("stop")))
+
+        await collect(provider.stream(make_route(), make_request(), make_context(timeout=12.5)))
+
+        assert stream.calls[0]["timeout"] == 12.5
+
+    async def test_no_budget_is_passed_through_as_none(self, wire_stream) -> None:
+        provider, stream = wire_stream(stream_of(content_chunk("Hello"), finish_chunk("stop")))
+
+        await collect(provider.stream(make_route(), make_request(), make_context(timeout=None)))
+
+        assert stream.calls[0]["timeout"] is None
+
+    async def test_the_call_is_made_exactly_once_per_attempt(self, wire_stream) -> None:
+        provider, stream = wire_stream(stream_of(content_chunk("Hello"), finish_chunk("stop")))
+
+        await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        assert len(stream.calls) == 1
+
+    async def test_each_chunk_is_translated_into_a_canonical_event(self, wire_stream) -> None:
+        provider, _ = wire_stream(
+            stream_of(
+                content_chunk("Recursion"),
+                content_chunk(" is a technique"),
+                finish_chunk("stop"),
+            )
+        )
+
+        events = await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        assert [event.kind for event in events] == [
+            StreamEventKind.CONTENT,
+            StreamEventKind.CONTENT,
+            StreamEventKind.FINISH,
+        ]
+        assert [event.text for event in events if event.kind is StreamEventKind.CONTENT] == [
+            "Recursion",
+            " is a technique",
+        ]
+        assert events[-1].finish_reason is FinishReason.STOP
+
+    async def test_the_sequence_numbers_start_at_zero_and_increase(self, wire_stream) -> None:
+        provider, _ = wire_stream(
+            stream_of(content_chunk("Hello"), content_chunk(" world"), finish_chunk("stop"))
+        )
+
+        events = await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        assert [event.sequence for event in events] == [0, 1, 2]
+
+    async def test_every_event_carries_the_invocation_id(self, wire_stream) -> None:
+        provider, _ = wire_stream(stream_of(content_chunk("Hello"), finish_chunk("stop")))
+
+        events = await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        assert all(event.invocation_id == "inv-7f3c1a90" for event in events)
+
+    async def test_a_tool_call_delta_is_translated(self, wire_stream) -> None:
+        provider, _ = wire_stream(
+            stream_of(
+                tool_call_chunk(index=0, identifier="call_01", name="get_weather"),
+                tool_call_chunk(index=0, arguments='{"city":'),
+                tool_call_chunk(index=0, arguments=' "Paris"}'),
+                finish_chunk("tool_calls"),
+            )
+        )
+
+        events = await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        tool_events = [event for event in events if event.kind is StreamEventKind.TOOL_CALL]
+        assert [event.tool_call.id for event in tool_events] == ["call_01", None, None]
+        assert [event.tool_call.name for event in tool_events] == ["get_weather", None, None]
+        assert [event.tool_call.arguments_delta for event in tool_events] == [
+            None,
+            '{"city":',
+            ' "Paris"}',
+        ]
+        assert events[-1].finish_reason is FinishReason.TOOL_CALLS
+
+    async def test_a_chunk_carrying_nothing_reportable_produces_no_event(
+        self, wire_stream
+    ) -> None:
+        """A keep-alive chunk produces no event, and the counter does not advance."""
+        role_only = ModelResponseStream(
+            choices=[StreamingChoices(index=0, delta=Delta(role="assistant"))]
+        )
+        provider, _ = wire_stream(
+            stream_of(role_only, content_chunk("Hello"), finish_chunk("stop"))
+        )
+
+        events = await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        assert [event.kind for event in events] == [StreamEventKind.CONTENT, StreamEventKind.FINISH]
+        assert [event.sequence for event in events] == [0, 1]
+
+    async def test_a_failure_is_mapped_onto_the_taxonomy(self, wire_stream) -> None:
+        provider, _ = wire_stream(
+            litellm.APIConnectionError(
+                message="the upstream connection failed",
+                llm_provider="openai",
+                model=UPSTREAM_MODEL,
+            )
+        )
+
+        with pytest.raises(UnavailableError) as error:
+            await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        assert error.value.reason is ErrorReason.PROVIDER_UNAVAILABLE
+
+    async def test_a_gateway_error_from_the_translation_passes_through_unchanged(
+        self, wire_stream
+    ) -> None:
+        refusal = CapabilityError("the upstream chunk carries a semantic the stream cannot carry")
+        provider, _ = wire_stream(refusal)
+
+        with pytest.raises(CapabilityError) as error:
+            await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        assert error.value is refusal
+
+    async def test_cancellation_propagates_unmapped(self, wire_stream) -> None:
+        provider, _ = wire_stream(asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
+            await collect(provider.stream(make_route(), make_request(), make_context()))
+
+    async def test_the_client_is_closed_when_the_stream_is_cancelled(
+        self, wire_stream, monkeypatch
+    ) -> None:
+        closed = recording_aclose(monkeypatch)
+        provider, stream = wire_stream(asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
+            await collect(provider.stream(make_route(), make_request(), make_context()))
+
+        (call,) = stream.calls
+        assert closed == [pinned_transport_of(call["client"])]
+
+    async def test_the_provider_satisfies_the_streaming_protocol(self) -> None:
+        provider = LiteLLMProvider()
+
+        assert inspect.iscoroutinefunction(provider.stream) is False  # it is an async generator
+        assert list(inspect.signature(provider.stream).parameters) == [
+            "route",
+            "request",
+            "context",
+        ]
 
 
 # ---------------------------------------------------------------------------

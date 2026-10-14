@@ -35,16 +35,23 @@ What a provider must not own (PRD section 9.2):
   caller will read.
 * **The public contract.** A provider returns canonical types and knows nothing
   about HTTP status codes, gRPC names or the OpenAI wire shape.
+
+Streaming is a separate capability (:class:`StreamingTextProvider`), not a mode
+of :class:`TextProvider`: a provider that cannot stream is refused rather than
+asked to fake token-by-token output from a whole answer (PRD sections 5.3, 16
+and 9.5).
 """
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from math import isfinite
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from model_gateway.config.routes import Route
 from model_gateway.domain import InvocationRequest, InvocationResponse
+from model_gateway.domain.streaming import StreamEvent
 
-__all__ = ["AttemptContext", "TextProvider"]
+__all__ = ["AttemptContext", "StreamingTextProvider", "TextProvider"]
 
 
 @dataclass(frozen=True)
@@ -128,6 +135,57 @@ class TextProvider(Protocol):
         may reach a library that retries internally without the gateway's
         knowledge, so the wire-request count can exceed the attempt count and
         must never be reported as it.
+        """
+        ...
+
+
+@runtime_checkable
+class StreamingTextProvider(Protocol):
+    """A text provider that can also stream its answer (PRD sections 5.3 and 16).
+
+    Streaming is a separate capability from :class:`TextProvider`, not a mode of
+    it, because a provider that cannot stream must be *refused* rather than
+    faked: answering a ``stream: true`` request with a complete, non-streamed
+    body would tell the caller it received tokens as they were produced when it
+    did not (PRD sections 16 and 9.5). A provider either produces a real
+    upstream stream or the gateway rejects the request with a capability error
+    naming ``streaming``; there is no third option.
+
+    The protocol is structural and runtime-checkable, so the gateway core can
+    ask ``isinstance(provider, StreamingTextProvider)`` before it promises a
+    caller a stream and raise the refusal naming the operation when the answer
+    is no. A provider that implements :meth:`stream` satisfies it; one that does
+    not is simply not a streaming provider, and no attribute is faked onto it.
+
+    ``route``, ``request`` and ``context`` carry the same facts
+    :class:`TextProvider` is handed — the resolved route, the canonical request
+    and this attempt's own execution facts (:class:`AttemptContext`). The result
+    is an async iterator of canonical :class:`~model_gateway.domain.streaming.StreamEvent`
+    objects: the provider translates each upstream chunk and numbers the events
+    it emits, 0-based and strictly increasing within the invocation, and the
+    gateway core applies its own policy — capability enforcement, the one
+    deadline, the concurrency limiter, the no-fallback-after-first-output rule —
+    around the iteration.
+    """
+
+    def stream(
+        self,
+        route: Route,
+        request: InvocationRequest,
+        context: AttemptContext,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream the upstream named by ``route`` as canonical stream events.
+
+        Performs one gateway attempt for exactly one route, under the same
+        policy as :meth:`TextProvider.complete`: it does not retry, does not
+        fall back to another route, and does not choose between routes (PRD
+        sections 9.2 and 11.3). It applies the budget on ``context`` to the
+        call it makes and translates each chunk the upstream produces into
+        canonical events, numbering them from 0 in the order the answer reads.
+
+        A provider that cannot stream does not implement this method at all;
+        the capability refusal is the gateway core's, raised before the first
+        event is promised to a caller.
         """
         ...
 
