@@ -98,6 +98,36 @@ carry more than one wire request and this count may understate what the upstream
 saw. It must never be documented, reported or recorded as a wire-request count.
 The embeddings path makes the same claim and no stronger one: it does not offer
 exactly-once upstream execution either.
+
+**Images are served under the same policy.** :meth:`InferenceService.generate`
+is the image operation's entry point, and it is the same walk: the public model
+is resolved to the routes configured for the image operation, the provider's
+capability is asked before anything is attempted, the primary route's
+capability contract is enforced — which for this operation means the
+``generation`` capability, and only that — and one deadline covers the
+invocation, with every attempt made inside a concurrency slot whose wait is
+bounded by what is left of that deadline (PRD sections 4.6, 6.2, 9.6, 11.2,
+11.3 and 15). The answer is checked against the request before it is returned:
+a caller that stated ``n`` is answered with exactly that many images, and an
+upstream that returned another number has not answered the request, so the
+invocation is refused rather than answered with the wrong number of images —
+a :class:`~model_gateway.errors.MalformedResponseError`, refused on the route
+that answered wrongly and walked to an eligible fallback. The image path makes
+the same no-exactly-once claim as the others: the gateway counts its own
+attempts, and the inference library's internal retry paths mean one of those
+calls can carry more than one upstream request (PRD sections 11.3 and 12).
+
+**Editing is enforced from the route's declared capabilities.** An edit request
+is an image invocation whose route must declare ``editing`` beside
+``generation``, the second being the operator's own statement
+(``IMAGE_GEN_CAPABILITIES``; PRD section 6.2). A route that declares
+``generation`` alone is refused with a capability error naming ``editing``
+rather than handed the request, and no later route can expand the advertised
+contract. The refusal does not stop there, because the gateway owns a second
+reason: the canonical image request carries no field for an image input, so
+the caller's image cannot be forwarded to any route however its capabilities
+read. An edit answered without it would report an image edited that never
+left the gateway, which PRD section 9.5 forbids.
 """
 
 import asyncio
@@ -120,6 +150,7 @@ from model_gateway.domain.embeddings import (
     EmbeddingRequest,
     EmbeddingResponse,
 )
+from model_gateway.domain.images import ImageRequest, ImageResponse
 from model_gateway.domain.streaming import StreamEvent, StreamEventKind
 from model_gateway.errors import (
     CapabilityError,
@@ -131,6 +162,7 @@ from model_gateway.errors import (
 from model_gateway.providers.base import (
     AttemptContext,
     EmbeddingProvider,
+    ImageProvider,
     StreamingTextProvider,
     TextProvider,
     _is_usable_budget,
@@ -169,6 +201,24 @@ The gateway's embeddings response is the float form, so any other encoding a
 canonical request can still carry is a behaviour this gateway does not have;
 naming it keeps the refusal in the same vocabulary the chat endpoint's feature
 refusals use (PRD section 9.5).
+"""
+
+_IMAGE_CAPABILITY = Capability.GENERATION.value
+"""The capability an image invocation asks of the route that serves it.
+
+Image generation is the image operation's own capability, the default every
+image route declares; the refusal names it so a caller learns which operation
+is missing rather than receiving a generic failure (PRD sections 6.2 and
+9.5).
+"""
+
+_EDITING_CAPABILITY = Capability.EDITING.value
+"""The capability an edit asks of the route, beside ``generation`` (PRD 6.2).
+
+Editing is the operator's own statement about a route — ``IMAGE_GEN_CAPABILITIES``
+carries it only when the operator declared it — so a route that declares
+``generation`` alone must be refused an edit rather than handed one (PRD
+section 4.6).
 """
 
 _Result = TypeVar("_Result")
@@ -285,11 +335,12 @@ class InferenceService:
 
     The service is built once per process and serves every operation the
     gateway exposes: :meth:`invoke` for a text answer, :meth:`invoke_stream`
-    for a streamed one, and :meth:`embed` for vectors. The operations differ in
-    what the provider is asked for and what comes back, not in how the gateway
-    chooses a route, budgets the invocation, bounds concurrency or decides
-    whether a failure is worth another attempt — that policy is written once,
-    in :meth:`_walk`, and every operation runs through it.
+    for a streamed one, :meth:`embed` for vectors, and :meth:`generate` and
+    :meth:`edit` for images. The operations differ in what the provider is
+    asked for and what comes back, not in how the gateway chooses a route,
+    budgets the invocation, bounds concurrency or decides whether a failure
+    is worth another attempt — that policy is written once, in :meth:`_walk`,
+    and every operation runs through it.
     """
 
     def __init__(
@@ -348,7 +399,12 @@ class InferenceService:
         embed is a perfectly usable text provider, and refusing to construct the
         service would disable chat over an operation the deployment never asks
         for. The refusal belongs to the request that needs the missing
-        capability, and it names it (PRD sections 6 and 9.5).
+        capability, and it names it (PRD sections 6 and 9.5). Image generation
+        is asked the same way, through
+        :class:`~model_gateway.providers.base.ImageProvider`, when an image
+        request arrives: a provider that cannot generate is a usable text and
+        embeddings provider, and an image request it cannot serve is refused
+        rather than handed to it (PRD sections 4.6 and 9.5).
         """
         if attempt_timeout is not None and not _is_usable_budget(attempt_timeout):
             raise ValueError(
@@ -547,6 +603,130 @@ class InferenceService:
             return _normalise_embeddings(route, request, response, invocation_id=invocation_id)
 
         return await self._walk(request.model, plan, serve)
+
+    async def generate(self, request: ImageRequest) -> ImageResponse:
+        """Generate the images the prompt names through the public model's routes.
+
+        The image operation's counterpart of :meth:`invoke`, under the same
+        policy: the public model ID is resolved to the routes configured for
+        the image operation, the request is validated against the primary
+        route's capability contract — which for this operation means the
+        ``generation`` capability, and only that — and the invocation runs
+        under one deadline and one retry loop (PRD sections 4.6, 6.2, 9.6,
+        11.2, 11.3 and 15).
+
+        **The model is resolved before the provider's capability is asked.** A
+        request naming a model the gateway does not expose is a
+        :class:`~model_gateway.errors.ModelNotFoundError`, and it is refused
+        as that whatever the bound provider can do: the request addresses a
+        resource that does not exist, so whether some other operation could
+        have been served has no bearing on the answer (PRD section 10).
+
+        **A provider that cannot generate images is refused, never
+        improvised.** The gateway does not answer an image request with an
+        image it invented, and an empty result is not an answer either, so
+        the refusal is a :class:`~model_gateway.errors.CapabilityError` naming
+        ``generation`` (PRD sections 4.6 and 9.5).
+
+        **The answer is checked against the request before it is returned.** A
+        caller that stated ``n`` is answered with exactly that many images; an
+        upstream that returned another number has not answered the request,
+        and the invocation is refused rather than answered with the wrong
+        number of images (PRD section 4.6). A caller who stated no count is
+        checked against none: the upstream's own default applies, and the
+        gateway cannot know what number that was. A refusal of this kind is a
+        :class:`~model_gateway.errors.MalformedResponseError`: the fault lies
+        in that upstream's answer, so the invocation walks to another eligible
+        route rather than retrying the route that answered wrongly.
+
+        The response states the public model that was asked for, the upstream
+        model that actually served it, and the invocation identifier the
+        gateway minted for this call. It carries no attempt count or fallback
+        flag: the canonical image response has no field for them, and the
+        gateway does not publish a number the caller's contract does not
+        define (PRD sections 5.2 and 13).
+
+        Raises :class:`~model_gateway.errors.ModelNotFoundError` for an
+        unknown ID, :class:`~model_gateway.errors.CapabilityError` when the
+        primary route cannot serve image generation or the provider cannot
+        generate, and otherwise the failure of the last attempt — surfaced
+        exactly as :meth:`invoke` surfaces it, including the retry and fallback
+        decisions, which are made from the gateway's own taxonomy and never
+        from a library exception type.
+
+        ``attempt_count`` is not reported here, but the same limit applies:
+        it counts the calls the *gateway* makes, and the inference library's
+        internal retry paths mean one of those calls can carry more than one
+        upstream request (PRD section 11.3). The image path makes no
+        exactly-once claim.
+        """
+        routes = self._registry.routes_for(request.model)
+        _require_image_provider(self._provider)
+        plan = _select_routes_for(routes, request.model, (Capability.GENERATION,))
+        invocation_id = uuid4().hex
+
+        async def serve(
+            route: Route, state: InvocationState, deadline: Deadline
+        ) -> ImageResponse:
+            response = await self._image_attempt(
+                route, request, state, deadline, invocation_id
+            )
+            return _normalise_images(route, request, response, invocation_id=invocation_id)
+
+        return await self._walk(request.model, plan, serve)
+
+    async def edit(self, request: ImageRequest) -> ImageResponse:
+        """Refuse an edit unless the route's declared capabilities carry it.
+
+        The editing counterpart of :meth:`generate`, and the one image request
+        measured against two capabilities rather than one: the route that
+        serves it must declare ``generation`` — editing is an image operation,
+        so a route that cannot generate cannot edit — *and* ``editing``,
+        which the operator states separately (``IMAGE_GEN_CAPABILITIES``;
+        PRD section 6.2). A route that declares ``generation`` alone is
+        refused with a :class:`~model_gateway.errors.CapabilityError` naming
+        ``editing`` (PRD section 4.6), and no later route can expand the
+        advertised contract: a fallback that does not declare both is not a
+        candidate, exactly as for every other capability (PRD section 9.5).
+
+        The enforcement does not stop at the capability check, because the
+        gateway owns a second reason to refuse. The canonical image request
+        carries no field for an image input, so the caller's image cannot be
+        forwarded to any route however its capabilities read; answering an
+        edit without it would tell the caller its image was edited when it
+        never left the gateway, which PRD section 9.5 forbids. The invocation
+        is therefore refused with the same capability error, naming
+        ``editing``: the operation the gateway cannot honour is editing
+        itself, and serving it awaits a canonical image request that can carry
+        the image being edited.
+
+        The model is resolved before anything else, so an unknown ID is a
+        :class:`~model_gateway.errors.ModelNotFoundError` whatever the route
+        could do (PRD section 10); a provider that cannot generate images is
+        refused naming ``generation`` before the route's capabilities are
+        read.
+
+        Raises one of those refusals, and nothing else: an edit is never
+        served in this slice.
+        """
+        routes = self._registry.routes_for(request.model)
+        _require_image_provider(self._provider)
+        # Enforced before the gateway's own refusal below, so that a route
+        # without 'editing' is refused for the missing capability, naming it,
+        # rather than for the reason every route shares.
+        _select_routes_for(
+            routes,
+            request.model,
+            (Capability.GENERATION, Capability.EDITING),
+        )
+        raise CapabilityError(
+            f"model {request.model!r} cannot be handed an edit request: the gateway's canonical "
+            f"image request carries no field for an image input, so the 'editing' capability "
+            f"cannot be honoured — the caller's image cannot be forwarded to any route, and "
+            f"answering the edit without it would report an image edited that never left the "
+            f"gateway",
+            details={"capability": _EDITING_CAPABILITY},
+        )
 
     async def _invoke_on(
         self, request: InvocationRequest, routes: tuple[Route, ...]
@@ -748,6 +928,36 @@ class InferenceService:
             request.model, invocation_id, state, deadline
         ) as context:
             return await self._provider.embed(route, request, context)
+
+    async def _image_attempt(
+        self,
+        route: Route,
+        request: ImageRequest,
+        state: InvocationState,
+        deadline: Deadline,
+        invocation_id: str,
+    ) -> ImageResponse:
+        """One image call against one route, inside one concurrency slot.
+
+        The image counterpart of :meth:`_embed_attempt`, and the same single
+        attempt under the same controls: the slot is held for the duration of
+        the call and released when it ends — success, failure or cancellation —
+        and the budget handed to the provider is derived from the invocation's
+        one deadline after the slot is held, so waiting for a slot consumes
+        invocation budget too (PRD section 15).
+
+        The provider is handed the route, the request and an
+        :class:`~model_gateway.providers.base.AttemptContext` carrying the
+        attempt's own facts, exactly as :meth:`_embed_attempt` hands them to
+        :meth:`~model_gateway.providers.base.EmbeddingProvider.embed`. The
+        invocation identifier is the one the gateway minted for this
+        invocation, which the canonical image request does not carry and the
+        canonical response must state (PRD section 5.2).
+        """
+        async with self._attempt_context(
+            request.model, invocation_id, state, deadline
+        ) as context:
+            return await self._provider.generate(route, request, context)
 
     @asynccontextmanager
     async def _attempt_context(
@@ -1321,6 +1531,87 @@ def _reject_unsupported_dimension(request: EmbeddingRequest, primary: Route) -> 
         f"forwarded against the route's configuration or silently dropped",
         details={"capability": "dimensions", "parameter": "dimensions"},
     )
+
+
+def _require_image_provider(provider: TextProvider) -> None:
+    """Refuse an image invocation the bound provider cannot serve (PRD 9.5).
+
+    Image generation is a capability of its own, not a mode of
+    :class:`~model_gateway.providers.base.TextProvider`: it is a different
+    upstream operation with a different answer — images rather than words — so
+    a provider that cannot generate is refused rather than handed the request
+    and left to improvise. There is no honest degradation: a text provider
+    asked for an image could only invent one, and either would tell the caller
+    its request was served when it was not. The refusal names ``generation``
+    so a caller learns which operation is missing (PRD section 9.5).
+    """
+    if not isinstance(provider, ImageProvider):
+        raise CapabilityError(
+            "this provider cannot produce images for the 'generation' capability; the gateway "
+            "does not answer an image request with an image it fabricated, so the request is "
+            "refused",
+            details={"capability": _IMAGE_CAPABILITY},
+        )
+
+
+def _normalise_images(
+    route: Route,
+    request: ImageRequest,
+    response: ImageResponse,
+    *,
+    invocation_id: str,
+) -> ImageResponse:
+    """Stamp the gateway's own facts onto a provider's image answer.
+
+    A provider's image answer is upstream data, never forwarded unchanged
+    (PRD section 9), and the two facts a provider cannot state are the
+    gateway's own: which public model was asked for and which upstream model
+    answered, and which invocation this answer belongs to.
+
+    The answer is checked against the request before anything is stamped: a
+    caller that stated ``n`` asked for exactly that many images, and an
+    upstream that returned another number has not answered the request, so
+    the invocation is refused rather than answered with the wrong number of
+    images (PRD section 4.6). A caller who stated no count is checked against
+    none — the upstream's own default applies, and the gateway cannot know
+    what number that was, so an unstated count is never a refusal.
+
+    The refusal is a :class:`~model_gateway.errors.MalformedResponseError`.
+    It is a property of what *this upstream* returned, not of the caller's
+    request: the request was valid and the route was reachable, and the answer
+    it produced was wrong. That is precisely the shape of failure another
+    eligible route can fix, so the invocation walks to the next route while
+    the route that just answered wrongly is not worth retrying immediately
+    (PRD section 11.2).
+    """
+    _check_image_count(request, response)
+    return replace(
+        response,
+        model=request.model,
+        upstream_model=route.model_id,
+        invocation_id=invocation_id,
+    )
+
+
+def _check_image_count(request: ImageRequest, response: ImageResponse) -> None:
+    """Refuse an image answer that does not carry the number of images asked for.
+
+    ``ImageRequest.n`` is how many images the caller wants, and it is
+    forwarded to the upstream as stated; an answer carrying another number is
+    an answer to a different request, and returning it would tell the caller
+    it received ``n`` images when it did not (PRD section 4.6). An unstated
+    count means the upstream's own default applies, and no expected number
+    exists to check against.
+    """
+    if request.n is None:
+        return
+    returned = len(response.data)
+    if returned != request.n:
+        raise MalformedResponseError(
+            f"the upstream returned {returned} images where {request.n} were requested; an "
+            f"answer that does not carry the number of images asked for is refused rather "
+            f"than returned as the caller's answer"
+        )
 
 
 def _normalise_embeddings(
