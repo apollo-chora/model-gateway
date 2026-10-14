@@ -132,13 +132,14 @@ directly, is :file:`tests/conftest.py`.
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from typing import Any, Final
 
 import httpx
 
 from model_gateway.config.routes import Route
 from model_gateway.domain import InvocationRequest, InvocationResponse
-from model_gateway.domain.streaming import StreamEvent
+from model_gateway.domain.streaming import StreamEvent, StreamEventKind
 from model_gateway.errors import FailedPreconditionError, GatewayError
 from model_gateway.providers._litellm import AsyncHTTPHandler, litellm, openai
 from model_gateway.providers.base import AttemptContext
@@ -434,26 +435,95 @@ class LiteLLMProvider:
         re-raised, so a caller never sees a provider-shaped error. Cancellation
         propagates unmapped, because it is a :exc:`BaseException` the mapping
         does not catch (PRD section 15).
+
+        What this stream guarantees about its ending
+        --------------------------------------------
+        **A usage report may arrive after the finish reason, so the finish is
+        buffered.** That is not a hypothetical: it is standard OpenAI streaming
+        behaviour when usage reporting is requested, and the pinned
+        ``litellm-core`` 1.106.0rc1 does it for the ``openai`` dialect without
+        being asked. Driving that library's own
+        ``CustomStreamWrapper`` with a scripted chunk sequence shows the order it
+        produces: ``content``, then the chunk carrying the finish reason, then a
+        trailing chunk carrying the usage report and no finish reason. Emitting
+        the terminal event the moment a finish reason is seen would therefore put
+        the finish ahead of a usage report that belongs to the same answer, and
+        would make ``FINISH`` non-terminal in fact while claiming it was terminal
+        in name. So this method **remembers** the finish reason when the upstream
+        reports it, keeps consuming, emits any trailing usage, and emits the
+        single ``FINISH`` event only when the upstream stream actually ends. The
+        ordering guarantee that produces is: *every event the upstream produced
+        before it ended is emitted, and the ``FINISH`` event is the last of
+        them.* The buffered event is renumbered at emission time, so the sequence
+        numbers stay consecutive and strictly increasing across the whole stream.
+
+        **Exactly one terminal event, or none.** A stream carries at most one
+        ``FINISH`` and this method emits at most one, because the only event it
+        holds back is emitted once, when the upstream has ended. A failure is not
+        turned into a terminal event here at all: if the upstream raises — before
+        the finish reason or after it — the failure is mapped and raised, and the
+        buffered ``FINISH`` is discarded rather than emitted. Emitting it would
+        present a stream that failed as one that completed, and emitting it
+        *and* an ``ERROR`` would put two terminal events in one stream, which the
+        contract forbids. A finish reason the upstream reported and then failed
+        to terminate is therefore **not** a completed answer: the attempt failed,
+        and the gateway core — which owns the terminal ``ERROR`` event for a
+        failure after the first output — reports it as one
+        (:meth:`~model_gateway.inference.InferenceService.invoke_stream`). The
+        two decisions together are what make the terminal event genuinely last:
+        nothing this method emits can follow a ``FINISH``, and a failure after a
+        finish reason cannot produce one at all.
+
+        **A stream that never reports a finish reason is truncated, not
+        completed.** The upstream ending is not itself a completion: a clean TCP
+        close and a deliberate model completion look the same from here, and the
+        only thing that tells them apart is whether the upstream ever said why
+        generation stopped. So a finish reason is required before a ``FINISH`` is
+        emitted, and an upstream stream that ends without ever reporting one ends
+        this generator without a terminal event. That is the contract's
+        ``truncated`` state: the caller's stream stops, and it stops without a
+        terminal event rather than with a terminal event claiming a completion
+        that never happened. The gateway synthesises no finish reason of its own,
+        because a reason it invented would be a fact about the upstream that the
+        upstream never stated.
+
+        **One limit of this classification, recorded rather than hidden.** For
+        the dialects in :data:`SUPPORTED_DIALECTS` the pinned library's
+        ``CustomStreamWrapper`` synthesises a finish reason of ``stop`` at end of
+        stream when the upstream never sent one, so through that wrapper the two
+        cases above arrive looking alike and the truncated branch is not reached
+        by an ordinary upstream that simply stops talking. The classification is
+        still made on what the upstream reported — the library's synthesised
+        chunk is not distinguishable from a real one at this boundary, and
+        guessing from a library-internal marker would be reading the binding's
+        implementation rather than the provider's answer. Closing that gap needs
+        the upstream's own signal, and is not something this binding can do on
+        its own.
         """
         params = to_litellm_stream_params(route, request)
         params["timeout"] = context.timeout
+        invocation_id = context.invocation_id or ""
         sequence = 0
+        finish: StreamEvent | None = None
         try:
             async with self._attempt_client(route, context.timeout) as client:
                 stream = await litellm.acompletion(**params, client=client)
                 async for chunk in stream:
-                    events = from_litellm_chunk(
-                        chunk,
-                        invocation_id=context.invocation_id or "",
-                        sequence=sequence,
-                    )
-                    for event in events:
+                    for event in from_litellm_chunk(
+                        chunk, invocation_id=invocation_id, sequence=sequence
+                    ):
+                        if event.kind is StreamEventKind.FINISH:
+                            if finish is None:
+                                finish = event
+                            continue
                         yield event
-                    sequence += len(events)
+                        sequence += 1
         except GatewayError:
             raise
         except Exception as exc:
             raise map_litellm_error(exc) from exc
+        if finish is not None:
+            yield replace(finish, sequence=sequence)
 
     def _attempt_client(
         self, route: Route, budget: float | None

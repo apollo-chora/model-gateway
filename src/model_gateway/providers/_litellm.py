@@ -29,7 +29,10 @@ from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler  # noqa: E40
 from litellm.types.utils import (  # noqa: E402
     ChatCompletionMessageToolCall,
     Choices,
+    Delta,
     ModelResponse,
+    ModelResponseStream,
+    StreamingChoices,
 )
 from litellm.types.utils import Message as LiteLLMMessage  # noqa: E402
 from litellm.types.utils import Usage as LiteLLMUsage  # noqa: E402
@@ -38,9 +41,12 @@ __all__ = [
     "AsyncHTTPHandler",
     "ChatCompletionMessageToolCall",
     "Choices",
+    "Delta",
     "LiteLLMMessage",
     "LiteLLMUsage",
     "ModelResponse",
+    "ModelResponseStream",
+    "StreamingChoices",
     "litellm",
     "openai",
 ]

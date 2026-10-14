@@ -832,6 +832,52 @@ class TestFromLitellmResponse:
             from_litellm_response(make_route(), make_request(), response)
         assert "reasoning_tokens" in error.value.message
 
+    def test_usage_library_placeholder_detail_values_are_accepted(self) -> None:
+        """The library's placeholder detail values are not provider facts (PRD 9.1).
+
+        LiteLLM's streaming chunk builder assembles the trailing usage report
+        with ``completion_tokens_details`` carrying ``reasoning_tokens=0`` and
+        ``text_tokens=completion_tokens`` — its own schema satisfaction, not a
+        provider-reported breakdown. The non-streaming path shares the usage
+        mapping, so it accepts them too: refusing them would fail a response
+        over a report the provider never made, on either path.
+        """
+        response = response_from(
+            completion_payload(
+                usage={
+                    "prompt_tokens": 25,
+                    "completion_tokens": 42,
+                    "total_tokens": 67,
+                    "completion_tokens_details": {"reasoning_tokens": 0, "text_tokens": 42},
+                }
+            )
+        )
+        result = from_litellm_response(make_route(), make_request(), response)
+        assert result.usage == Usage(input_tokens=25, output_tokens=42, total_tokens=67)
+
+    def test_usage_semantic_completion_detail_is_refused(self) -> None:
+        """A provider-reported count with no canonical target is refused, not dropped.
+
+        The placeholder exception is drawn on the value, not the field: a
+        non-zero count the canonical usage model cannot carry — here an
+        audio-token count — is still refused, because silently dropping it
+        would tell the caller the usage was honoured when part of the report
+        was dropped (PRD 9.1).
+        """
+        response = response_from(
+            completion_payload(
+                usage={
+                    "prompt_tokens": 25,
+                    "completion_tokens": 42,
+                    "total_tokens": 67,
+                    "completion_tokens_details": {"audio_tokens": 10},
+                }
+            )
+        )
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(), make_request(), response)
+        assert "audio_tokens" in error.value.message
+
     def test_full_round_trip_from_a_realistic_payload(self) -> None:
         """A complete realistic payload normalises into the canonical response.
 

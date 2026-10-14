@@ -51,12 +51,26 @@ boundary, and each is enforced rather than assumed:
 
 The LiteLLM shapes this module reads and writes are the installed library's own:
 ``litellm.types.utils.ModelResponse`` with its ``Choices``, ``Message``,
-``ChatCompletionMessageToolCall`` and ``Usage`` records, and the
-``litellm.exceptions`` hierarchy, which extends the OpenAI exception classes.
-Tests build fixtures from those real types — by constructing them, or by parsing
-a realistic upstream payload through LiteLLM's own
+``ChatCompletionMessageToolCall`` and ``Usage`` records, the streaming
+counterparts ``ModelResponseStream``, ``StreamingChoices`` and ``Delta``, and
+the ``litellm.exceptions`` hierarchy, which extends the OpenAI exception
+classes. Tests build fixtures from those real types — by constructing them, or
+by parsing a realistic upstream payload through LiteLLM's own
 ``convert_to_model_response_object`` — so a fixture carrying an extra semantic
 field fails a translator that would drop it.
+
+The stream side is the same boundary applied chunk by chunk
+-----------------------------------------------------------
+:func:`to_litellm_stream_params` and :func:`from_litellm_chunk` carry the three
+rules above onto a streaming call, where they are enforced per chunk rather than
+per response. A chunk that carries nothing reportable produces no event rather
+than an empty one, because a keep-alive asserts nothing; a chunk that carries
+several things produces several events in the order the answer reads, with the
+finish reason last because it is terminal; and a chunk carrying a semantic the
+canonical stream cannot represent is refused by the same four-way rule, naming
+the field, rather than being trimmed. The events a chunk produces are numbered
+from the sequence number the caller supplies, which is the gateway's own
+numbering of the invocation's events — never a number taken from upstream.
 """
 
 import json
@@ -76,8 +90,11 @@ from model_gateway.domain import (
     ResponseFormat,
     ResponseFormatMode,
     Role,
+    StreamEvent,
+    StreamEventKind,
     TextPart,
     ToolCall,
+    ToolCallDelta,
     ToolChoice,
     ToolChoiceMode,
     ToolDefinition,
@@ -103,14 +120,23 @@ from model_gateway.errors import (
 from model_gateway.providers._litellm import (
     ChatCompletionMessageToolCall,
     Choices,
+    Delta,
     LiteLLMMessage,
     LiteLLMUsage,
     ModelResponse,
+    ModelResponseStream,
+    StreamingChoices,
     litellm,
     openai,
 )
 
-__all__ = ["from_litellm_response", "map_litellm_error", "to_litellm_params"]
+__all__ = [
+    "from_litellm_chunk",
+    "from_litellm_response",
+    "map_litellm_error",
+    "to_litellm_params",
+    "to_litellm_stream_params",
+]
 
 
 def to_litellm_params(route: Route, request: InvocationRequest) -> dict[str, object]:
@@ -158,6 +184,30 @@ def to_litellm_params(route: Route, request: InvocationRequest) -> dict[str, obj
     if request.tool_choice is not None:
         params["tool_choice"] = _tool_choice(request.tool_choice)
     return params
+
+
+def to_litellm_stream_params(route: Route, request: InvocationRequest) -> dict[str, object]:
+    """Translate a canonical invocation into ``litellm.acompletion`` streaming arguments.
+
+    The streaming call is the non-streaming call with ``stream=True`` and nothing
+    else added (PRD section 9.6): the same route, the same conversation, the same
+    tools and tool choice, the same generation parameters, and the same
+    ``num_retries=0``, because the gateway core owns the retry loop and the
+    invocation deadline on this path exactly as it does on the other one (PRD
+    section 11.3). The translation is written as that one addition rather than
+    duplicated, so a parameter added to the non-streaming call is carried by the
+    streaming call and the two cannot drift apart.
+
+    No ``stream_options`` is sent. The gateway asks the upstream for nothing
+    beyond streaming itself: usage reporting is taken where the upstream chooses
+    to offer it, and a parameter the gateway invented would be a request the
+    caller never made (PRD section 5.1). In particular the gateway does not ask
+    for a trailing usage chunk, so it must accept one arriving after the finish
+    reason when the upstream sends one anyway — which the pinned library does for
+    the OpenAI dialect, as :mod:`~model_gateway.providers.litellm_provider`
+    documents.
+    """
+    return {**to_litellm_params(route, request), "stream": True}
 
 
 def from_litellm_response(
@@ -223,6 +273,109 @@ def from_litellm_response(
         raw_finish_reason=raw_finish_reason,
         usage=_usage(getattr(response, "usage", None)),
     )
+
+
+def from_litellm_chunk(
+    chunk: ModelResponseStream, *, invocation_id: str, sequence: int
+) -> tuple[StreamEvent, ...]:
+    """Translate one upstream streaming chunk into canonical stream events (PRD 5.3, 16).
+
+    ``chunk`` is one ``ModelResponseStream``, the shape the pinned library yields
+    for ``stream=True``. It is upstream data, never forwarded unchanged (PRD
+    section 9), and it is classified by the same four rules the response side
+    applies to a whole answer: a canonical semantic is mapped; a known semantic
+    the canonical stream cannot represent — a reasoning trace, an audio block, an
+    image part, a legacy function call, a log-probability block, a token count
+    with no canonical target, a tool call that is not a function call — is
+    refused with an :class:`~model_gateway.errors.InternalError` naming it,
+    because a consumer must not be told the stream was honoured when part of it
+    was dropped; a known non-semantic operational field, the backend fingerprint,
+    is deliberately ignored; and an unknown provider-specific field is refused
+    until it is classified.
+
+    A chunk carrying several things produces several events, in the order the
+    answer reads: the text fragment, then each tool-call fragment, then the usage
+    report, then the finish reason. The finish reason is emitted last because it
+    is terminal — nothing the upstream says after it belongs to the answer the
+    caller was already told was complete (PRD section 5.3) — so a chunk that
+    carries both text and a finish reason produces two ordered events rather than
+    one. A chunk carrying nothing reportable produces no event at all: a role
+    marker, an empty delta and a keep-alive assert nothing about the answer, and
+    an event for one would be a fragment of nothing.
+
+    A chunk with no choices is the usage-only trailing chunk OpenAI sends when
+    usage reporting is on, so it produces a usage event and nothing else. Its
+    usage is mapped by the same :func:`_usage` the response side uses, so a
+    provider-reported count is recorded as reported and a total the library left
+    at zero beside non-zero parts is derived and named as the estimate it is (PRD
+    section 13).
+
+    ``sequence`` is the gateway's own numbering of the events of this invocation,
+    never a number taken from upstream (PRD section 16): the events this chunk
+    produces are numbered from it in order, and the caller advances it by the
+    number of events actually emitted. It must be a non-negative integer, because
+    a negative or fractional number would break the strictly-increasing guarantee
+    a consumer relies on to detect a gap or a reordering.
+
+    Raises :class:`~model_gateway.errors.InternalError` naming the field when the
+    chunk carries a semantic the canonical stream cannot represent, and
+    :exc:`ValueError` when ``sequence`` is not a non-negative integer.
+    """
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+        raise ValueError(
+            f"stream event 'sequence' must be a non-negative integer, got {sequence!r}"
+        )
+    _reject_unmappable_chunk(chunk)
+    events: list[StreamEvent] = []
+    choices = chunk.choices
+    if len(choices) > 1:
+        raise InternalError(
+            f"the upstream chunk carries {len(choices)} choices; the canonical stream "
+            f"represents exactly one answer, so the remaining choices cannot be dropped"
+        )
+    if choices:
+        choice = choices[0]
+        index = getattr(choice, "index", None)
+        if index != 0:
+            raise InternalError(
+                f"the upstream chunk carries choice index {index}; the canonical stream "
+                f"represents exactly one answer, so a chunk for another choice cannot be "
+                f"folded into it"
+            )
+        _reject_unmappable_choice(choice)
+        delta = getattr(choice, "delta", None)
+        if delta is not None:
+            _reject_unmappable_delta(delta)
+            text = _delta_text(delta)
+            if text is not None:
+                events.append(
+                    StreamEvent(
+                        kind=StreamEventKind.CONTENT,
+                        sequence=sequence + len(events),
+                        invocation_id=invocation_id,
+                        text=text,
+                    )
+                )
+            events.extend(
+                _tool_call_events(
+                    delta, invocation_id=invocation_id, sequence=sequence + len(events)
+                )
+            )
+    usage = getattr(chunk, "usage", None)
+    if usage is not None:
+        events.append(
+            StreamEvent(
+                kind=StreamEventKind.USAGE,
+                sequence=sequence + len(events),
+                invocation_id=invocation_id,
+                usage=_usage(usage),
+            )
+        )
+    if choices and getattr(choices[0], "finish_reason", None) is not None:
+        events.append(
+            _finish_event(choices[0], invocation_id=invocation_id, sequence=sequence + len(events))
+        )
+    return tuple(events)
 
 
 def map_litellm_error(exc: BaseException) -> GatewayError:
@@ -415,13 +568,16 @@ def _response_format(response_format: ResponseFormat) -> dict[str, object]:
 # --------------------------------------------------------------------------- response side
 
 
-def _raw_finish_reason(choice: Choices) -> str:
+def _raw_finish_reason(choice: Choices | StreamingChoices) -> str:
     """The provider's own finish reason, verbatim (PRD section 5.2).
 
     LiteLLM maps recognised reasons onto its OpenAI-shaped vocabulary and keeps
     the original in ``provider_specific_fields`` whenever the two differ, so the
     native reason is that value when it is present and the mapped reason
-    otherwise.
+    otherwise. The same rule holds on both paths — a whole response's
+    ``Choices`` and a streaming chunk's ``StreamingChoices`` carry the field the
+    same way — so the stream side reads the reason through this function rather
+    than through a second copy of the rule.
     """
     fields = getattr(choice, "provider_specific_fields", None) or {}
     native = fields.get("native_finish_reason")
@@ -545,6 +701,13 @@ def _reject_unrepresentable_usage(usage: LiteLLMUsage) -> None:
     allowlisted into :data:`_NON_SEMANTIC_RESPONSE_FIELDS`, because a token
     count is a reported fact about the answer, not backend metadata, and
     ignoring it would hide a difference the caller was never told about.
+
+    The one exception is the library's own placeholder population, which
+    :func:`_reject_extra_detail_fields` ignores by value rather than by field:
+    a detail field the library fills to satisfy its usage schema carries no
+    provider fact, while any other value does. The distinction is drawn on
+    the value because the library and a provider write the same fields — only
+    the value tells a reported count from the library's schema satisfaction.
     """
     prompt_details = usage.prompt_tokens_details
     if prompt_details is not None:
@@ -553,7 +716,12 @@ def _reject_unrepresentable_usage(usage: LiteLLMUsage) -> None:
         )
     completion_details = usage.completion_tokens_details
     if completion_details is not None:
-        _reject_extra_detail_fields(completion_details, "completion token details", frozenset())
+        _reject_extra_detail_fields(
+            completion_details,
+            "completion token details",
+            frozenset(),
+            completion_tokens=usage.completion_tokens,
+        )
     if getattr(usage, "server_tool_use", None) is not None:
         raise InternalError(
             "the upstream usage carries a server-tool-use record, which the canonical usage "
@@ -561,16 +729,57 @@ def _reject_unrepresentable_usage(usage: LiteLLMUsage) -> None:
         )
 
 
-def _reject_extra_detail_fields(details: Any, where: str, allowed: frozenset[str]) -> None:
-    """Refuse a usage-detail field with no canonical target, naming the first one found."""
+def _reject_extra_detail_fields(
+    details: Any,
+    where: str,
+    allowed: frozenset[str],
+    *,
+    completion_tokens: int | None = None,
+) -> None:
+    """Refuse a usage-detail field with no canonical target, naming the first one found.
+
+    The line between a provider fact and the library's own schema
+    satisfaction is drawn on the value the field carries:
+
+    * ``None`` — the field is absent; there is nothing to classify.
+    * ``0`` — a placeholder. LiteLLM's streaming chunk builder fills
+      ``reasoning_tokens`` with a hard-coded zero when it assembles the
+      trailing usage report, and a provider that reports a category at zero
+      states the same thing as omitting it: zero of a token category is no
+      fact about the answer, so it must not fail the response.
+    * ``text_tokens`` equal to ``completion_tokens - reasoning_tokens`` —
+      LiteLLM's own arithmetic on the completion side, not a provider field
+      (OpenAI's completion details carry no ``text_tokens``; the library
+      derives it). The value restates a count the canonical model already
+      carries as ``output_tokens``, so ignoring it drops nothing.
+    * any other value — a provider-reported count the canonical usage model
+      cannot carry: a reasoning-token breakdown, an audio-token count, a
+      prediction-token count, a cache-write count, a modality count. Refused,
+      because the caller must not be told the usage was honoured when part of
+      the report was dropped.
+
+    The completion side is where the library's placeholder population lives,
+    so only that call passes ``completion_tokens``. The prompt side has no
+    derived field: the library passes prompt details through as the provider
+    sent them, so a prompt-detail value is always a provider fact.
+    """
+    reasoning_tokens = getattr(details, "reasoning_tokens", None) or 0
     for name in type(details).model_fields:
         if name in allowed:
             continue
-        if getattr(details, name, None) is not None:
-            raise InternalError(
-                f"the upstream usage carries {where[:-1]} field {name!r}, which the canonical "
-                f"usage representation cannot carry"
-            )
+        value = getattr(details, name, None)
+        if value is None or value == 0:
+            continue
+        if (
+            name == "text_tokens"
+            and completion_tokens is not None
+            and value == completion_tokens - reasoning_tokens
+        ):
+            continue
+        raise InternalError(
+            f"the upstream usage carries {where[:-1]} field {name!r}, which the canonical "
+            f"usage representation cannot carry"
+        )
 
 
 # Response fields classified as provider operational metadata rather than answer
@@ -666,6 +875,201 @@ def _reject_extra_provider_fields(
             f"the upstream {where} carries provider-specific field {extra[0]!r}, which the "
             f"canonical representation cannot carry"
         )
+
+
+# --------------------------------------------------------------------------- stream side
+
+
+def _reject_unmappable_chunk(chunk: ModelResponseStream) -> None:
+    """Refuse a chunk-level semantic the canonical stream cannot carry (PRD section 9.1).
+
+    The backend fingerprint is the one chunk-level field classified non-semantic
+    operational metadata and deliberately ignored, from
+    :data:`_NON_SEMANTIC_RESPONSE_FIELDS`: it identifies provider infrastructure
+    rather than anything about the answer, so it must not fail an otherwise valid
+    chunk. Every other provider-specific annotation is refused until it is
+    classified, exactly as on the response side, so a new one cannot pass
+    unexamined.
+
+    Citations are refused for the same reason the response side refuses them: a
+    citation is a statement about where the answer came from, and the canonical
+    stream has no event that could carry one. Ignoring it would tell a consumer
+    it had the whole answer when part of what the provider said about it was
+    dropped.
+    """
+    _reject_extra_provider_fields(
+        getattr(chunk, "provider_specific_fields", None), "chunk", frozenset()
+    )
+    if getattr(chunk, "citations", None) is not None:
+        raise InternalError(
+            "the upstream chunk carries citations, which the canonical stream cannot carry"
+        )
+
+
+def _reject_unmappable_choice(choice: StreamingChoices) -> None:
+    """Refuse a choice-level semantic the canonical stream cannot carry (PRD section 9.1).
+
+    ``native_finish_reason`` is allowed, because it is where the library keeps
+    the provider's own reason whenever it differs from the mapped one, and it is
+    what :func:`_raw_finish_reason` reads; a log-probability block has no
+    canonical target on any path and is refused.
+    """
+    if getattr(choice, "logprobs", None) is not None:
+        raise InternalError(
+            "the upstream chunk carries a log-probability block, which the canonical stream "
+            "cannot carry"
+        )
+    _reject_extra_provider_fields(
+        getattr(choice, "provider_specific_fields", None),
+        "choice",
+        frozenset({"native_finish_reason"}),
+    )
+
+
+def _reject_unmappable_delta(delta: Delta) -> None:
+    """Refuse a delta-level semantic the canonical stream cannot carry (PRD section 9.1).
+
+    These are the streaming counterparts of the response-side refusals, and they
+    are refusals rather than drops for the same reason: a reasoning trace, a
+    thinking block, a reasoning item, a content-safety annotation, an audio
+    block, an image part and a legacy function call are each something the
+    provider said about the answer, and the canonical event vocabulary has no
+    event for any of them. A tool call is the one exception, and it is mapped
+    rather than refused — but only in its function-call form, which is the form
+    the canonical delta represents (PRD section 9.3).
+
+    Provider-specific fields on a delta are refused entirely, with nothing
+    allowlisted: unlike a choice, a delta has no field the gateway reads from
+    there, so any entry is an annotation it would otherwise be dropping.
+    """
+    if getattr(delta, "reasoning_content", None) is not None:
+        raise InternalError(
+            "the upstream chunk carries reasoning content, which the canonical stream "
+            "cannot carry"
+        )
+    if getattr(delta, "thinking_blocks", None) is not None:
+        raise InternalError(
+            "the upstream chunk carries thinking blocks, which the canonical stream cannot carry"
+        )
+    if getattr(delta, "reasoning_items", None) is not None:
+        raise InternalError(
+            "the upstream chunk carries reasoning items, which the canonical stream cannot carry"
+        )
+    if getattr(delta, "annotations", None) is not None:
+        raise InternalError(
+            "the upstream chunk carries content-safety annotations, which the canonical stream "
+            "cannot carry"
+        )
+    if getattr(delta, "audio", None) is not None:
+        raise InternalError(
+            "the upstream chunk carries audio content, which the canonical stream cannot carry"
+        )
+    if getattr(delta, "images", None) is not None:
+        raise InternalError(
+            "the upstream chunk carries image content, which the canonical stream cannot carry"
+        )
+    if getattr(delta, "function_call", None) is not None:
+        raise InternalError(
+            "the upstream chunk carries a legacy function call, which the canonical tool call "
+            "delta cannot carry"
+        )
+    _reject_extra_provider_fields(
+        getattr(delta, "provider_specific_fields", None), "chunk delta", frozenset()
+    )
+
+
+def _delta_text(delta: Delta) -> str | None:
+    """The delta's text fragment, or ``None`` when it carries none.
+
+    A delta whose content is not a string is refused rather than coerced: the
+    library admits an ordered block list there for providers that stream content
+    parts, and a canonical content event carries text. Mapping blocks onto text
+    would change what the provider sent, and dropping them would tell the caller
+    the fragment was delivered (PRD section 9.1). An empty string is an absent
+    fragment rather than an empty one — there is nothing to append, and a
+    canonical content event refuses empty text because it asserts no change while
+    claiming to report one.
+    """
+    content = getattr(delta, "content", None)
+    if content is None:
+        return None
+    if not isinstance(content, str):
+        raise InternalError(
+            "the upstream chunk carries content that is not a string, which the canonical "
+            "content event cannot carry"
+        )
+    return content or None
+
+
+def _tool_call_events(
+    delta: Delta, *, invocation_id: str, sequence: int
+) -> list[StreamEvent]:
+    """One tool-call event per call fragment the delta carries, numbered from ``sequence``.
+
+    A call fragment that says nothing about the call — the index alone — is a
+    keep-alive rather than a fragment, so it produces no event, and the numbering
+    of the ones that follow it is not advanced for it. The index is required on
+    every fragment, because it is what matches a later fragment to the call it
+    belongs to; a fragment the gateway cannot attribute to a call has no
+    canonical representation.
+    """
+    events: list[StreamEvent] = []
+    for call in getattr(delta, "tool_calls", None) or ():
+        kind = getattr(call, "type", None)
+        if kind != "function":
+            raise InternalError(
+                f"the upstream chunk carries a tool call of type {kind!r}, which the canonical "
+                f"tool call delta cannot carry: a call that is not a function call has no "
+                f"canonical representation"
+            )
+        index = getattr(call, "index", None)
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise InternalError(
+                f"the upstream chunk carries a tool call delta with index {index!r}; a call's "
+                f"index is its position among the answer's calls, so it must be a non-negative "
+                f"integer"
+            )
+        function = getattr(call, "function", None)
+        name = getattr(function, "name", None) if function is not None else None
+        arguments = getattr(function, "arguments", None) if function is not None else None
+        identifier = getattr(call, "id", None)
+        if not (identifier or name or arguments):
+            continue
+        events.append(
+            StreamEvent(
+                kind=StreamEventKind.TOOL_CALL,
+                sequence=sequence + len(events),
+                invocation_id=invocation_id,
+                tool_call=ToolCallDelta(
+                    index=index,
+                    id=identifier or None,
+                    name=name or None,
+                    arguments_delta=arguments or None,
+                ),
+            )
+        )
+    return events
+
+
+def _finish_event(choice: StreamingChoices, *, invocation_id: str, sequence: int) -> StreamEvent:
+    """The terminal event for a choice that reported a finish reason (PRD section 5.3).
+
+    The classification and the raw reason are read exactly as the response side
+    reads them: :func:`_raw_finish_reason` prefers the provider's own reason from
+    ``provider_specific_fields`` and falls back to the mapped one, and the
+    gateway's own vocabulary classifies whatever that was. A reason the gateway
+    has not been taught becomes ``FinishReason.UNKNOWN`` with the raw value still
+    recorded, so ``UNKNOWN`` never means the gateway deleted what upstream said
+    (PRD sections 5.2 and 9.1).
+    """
+    raw_finish_reason = _raw_finish_reason(choice)
+    return StreamEvent(
+        kind=StreamEventKind.FINISH,
+        sequence=sequence,
+        invocation_id=invocation_id,
+        finish_reason=FinishReason.coerce(raw_finish_reason),
+        raw_finish_reason=raw_finish_reason,
+    )
 
 
 # --------------------------------------------------------------------------- error mapping
