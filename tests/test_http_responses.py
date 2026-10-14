@@ -645,6 +645,100 @@ async def test_every_unsupported_parameter_is_refused_naming_it(provider, extra)
     assert provider.calls == []
 
 
+MALFORMED_PARAMETERS = [
+    # A boolean is not the integer a parameter types, whatever True == 1 says.
+    {"max_tool_calls": True},
+    {"top_logprobs": True},
+    # A falsy value is not the default a parameter types.
+    {"store": 0},
+    {"store": ""},
+    {"store": []},
+    {"store": {}},
+    {"background": 0},
+    {"background": ""},
+    {"background": []},
+    {"background": {}},
+    {"include": ""},
+    {"include": {}},
+    {"include": 0},
+    {"stream_options": ""},
+    {"stream_options": []},
+    {"stream_options": 0},
+    # A value of the wrong JSON type for the parameter.
+    {"service_tier": 5},
+    {"reasoning": "high"},
+    {"context_management": "none"},
+    {"conversation": 5},
+    {"previous_response_id": 5},
+    {"user": 5},
+    {"text": "auto"},
+    {"prompt": "pmpt_1"},
+    {"prompt_cache_key": 5},
+    {"prompt_cache_retention": 5},
+    {"safety_identifier": 5},
+    {"moderation": "standard"},
+    {"prompt_cache_options": "24h"},
+    {"truncation": 5},
+    {"parallel_tool_calls": 5},
+    {"tool_choice": 5},
+    {"metadata": "trace"},
+    {"metadata": 5},
+    {"metadata": []},
+    {"metadata": False},
+    {"top_p": True},
+    {"top_p": "0.9"},
+    {"store": None},
+    {"include": None},
+    {"stream_options": None},
+    {"background": None},
+]
+
+
+@pytest.mark.parametrize("extra", MALFORMED_PARAMETERS, ids=lambda extra: next(iter(extra)))
+async def test_a_malformed_value_for_a_recognised_parameter_is_a_400_naming_it(provider, extra):
+    status, body = await call(provider, payload(**extra))
+
+    assert status == 400
+    assert body["reason"] == "invalid_request"
+    assert next(iter(extra)) in body["message"]
+    assert provider.calls == []
+
+
+DEFAULT_PARAMETERS = [
+    {"store": False},
+    {"background": False},
+    {"include": []},
+    {"stream_options": {}},
+    {"metadata": {}},
+    {"metadata": None},
+    {"service_tier": None},
+    {"reasoning": None},
+    {"context_management": None},
+    {"conversation": None},
+    {"previous_response_id": None},
+    {"user": None},
+    {"text": None},
+    {"prompt": None},
+    {"prompt_cache_key": None},
+    {"prompt_cache_retention": None},
+    {"safety_identifier": None},
+    {"moderation": None},
+    {"prompt_cache_options": None},
+    {"truncation": None},
+    {"parallel_tool_calls": None},
+    {"max_tool_calls": None},
+    {"top_logprobs": None},
+]
+
+
+@pytest.mark.parametrize("extra", DEFAULT_PARAMETERS, ids=lambda extra: next(iter(extra)))
+async def test_a_default_value_for_a_recognised_parameter_is_accepted(provider, extra):
+    status, body = await call(provider, payload(**extra))
+
+    assert status == 200
+    assert provider.calls != []
+
+
 async def test_store_false_is_accepted_because_the_gateway_stores_nothing(client, provider):
     response = await post(client, payload(store=False))
 
