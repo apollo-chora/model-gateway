@@ -18,40 +18,50 @@ Responses API serve the endpoint without lying about what it returned.
 
 **The accepted request is a documented subset, and nothing else is ignored.**
 The body carries ``model``, ``input``, ``instructions``, ``tools``,
-``temperature``, ``max_output_tokens``, ``stream`` and ``response_format``, and
-that set is closed (PRD section 4.5). A key the gateway does not understand is
-refused with an invalid-request error naming it; a key the Responses format
-defines and this endpoint does not carry — ``top_p``, ``tool_choice``,
-``previous_response_id``, ``store``, ``text`` and the rest — is refused with a
-capability error naming the feature it would request. Neither is dropped, so a
-client SDK that serialises a parameter receives an error it can act on instead
-of a false assurance that its request was honoured (PRD sections 4.5 and 9.5).
-``stream`` is accepted only as ``false``, which is the default and asks for
-nothing; ``store: false`` is likewise the one value that matches what the
-gateway does, because it stores nothing.
+``temperature``, ``top_p``, ``max_output_tokens``, ``stream``,
+``response_format``, ``tool_choice`` and ``metadata``, and that set is closed
+(PRD section 4.5). A key the gateway does not understand is refused with an
+invalid-request error naming it; a key the Responses format defines and this
+endpoint does not carry — ``previous_response_id``, ``store``, ``text`` and
+the rest — is refused with a capability error naming the feature it would
+request. Neither is dropped, so a client SDK that serialises a parameter
+receives an error it can act on instead of a false assurance that its request
+was honoured (PRD sections 4.5 and 9.5). ``stream`` is accepted only as
+``false``, which is the default and asks for nothing; ``store: false`` is
+likewise the one value that matches what the gateway does, because it stores
+nothing. A recognised parameter is held to its wire type before anything else:
+a value of the wrong JSON type — ``{"store": 0}``, ``{"background": ""}``,
+``{"include": "text"}`` — is an invalid-request error naming the parameter
+and the type actually supplied, because the test that decides whether a
+recognised parameter was actually requested runs on a validated value rather
+than on whatever the caller sent.
 
 **The input is normalised into the canonical conversation.** A string ``input``
 is one user message. An array carries message-like objects, each of which is a
 role, an ordered content list and nothing else, beside the two items a tool turn
 needs: ``function_call``, which becomes an assistant message proposing the call,
-and ``function_call_output``, which becomes the tool message answering it. The
-Responses input item and the canonical message are not the same shape, so the
-mapping is written out rather than guessed at, and an item type this endpoint
-does not carry is refused with a capability error naming the type.
+and ``function_call_output``, which becomes the tool message answering it. A
+content part is ``input_text``, ``output_text`` or ``input_image``: the first
+two become canonical text and the third a canonical image, which the route
+must declare the ``vision`` capability to carry. The Responses input item and
+the canonical message are not the same shape, so the mapping is written out
+rather than guessed at, and an item type this endpoint does not carry is
+refused with a capability error naming the type.
 
-**The answer is rendered in the order the model produced it.** The Responses
+**The answer is rendered content-first, then tool calls.** The Responses
 ``output`` array is ordered and mixes ``message`` items with ``function_call``
-items, so — unlike the chat shape, which records no order between ``content``
-and ``tool_calls`` — the order of the canonical output survives the translation.
-One assistant turn's content parts become one ``message`` item's ordered content
-list, and each tool call becomes a ``function_call`` item after it. Two canonical
-answers are still refused rather than approximated: one carrying an image, which
-no ``message`` content variant can hold, and one whose content continues after a
-tool call. The second is refused because a Responses ``output`` is *one assistant
-turn*, and a turn that calls a function ends there — splitting the content into a
-second ``message`` item would present one turn as two, and joining it would
-report "said did said" as "said said, did", which is not the answer the model
-gave (PRD section 9.1).
+items, but the renderer emits every content part of the assistant turn first
+and then every tool call, so the order it can express is ``(ContentPart)*
+(ToolCall)*`` and an arbitrary interleaving of content and tool calls is not
+representable. One assistant turn's content parts become one ``message`` item's
+ordered content list, and each tool call becomes a ``function_call`` item after
+every content part. Two canonical answers are still refused rather than
+approximated: one carrying an image, which no ``message`` content variant can
+hold, and one whose content continues after a tool call. The second is refused
+because a Responses ``output`` is *one assistant turn*, and a turn that calls a
+function ends there — splitting the content into a second ``message`` item
+would present one turn as two, and joining it would report "said did said" as
+"said said, did", which is not the answer the model gave (PRD section 9.1).
 
 **Streaming is refused, not faked.** ``stream: true`` is answered with a
 capability error naming ``streaming``, before any provider is called. The
@@ -81,6 +91,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, NamedTuple, Self
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import orjson
@@ -102,14 +113,14 @@ from model_gateway.domain import (
     Role,
     TextPart,
     ToolCall,
+    ToolChoice,
+    ToolChoiceMode,
     ToolDefinition,
     Usage,
     thaw_json,
 )
 from model_gateway.domain.serialization import (
     as_object,
-    as_optional_float,
-    as_optional_int,
     as_optional_text,
     as_required_text,
     describe,
@@ -146,12 +157,18 @@ _INPUT_FUNCTION_CALL = "function_call"
 _INPUT_FUNCTION_CALL_OUTPUT = "function_call_output"
 _INPUT_TEXT = "input_text"
 _INPUT_OUTPUT_TEXT = "output_text"
+_INPUT_IMAGE = "input_image"
 
 _STREAMING_CAPABILITY = "streaming"
 _IMAGE_OUTPUT_CAPABILITY = "image_output"
 _INTERLEAVED_OUTPUT_CAPABILITY = "interleaved_output"
 _ANNOTATIONS_CAPABILITY = "annotations"
 _STRICT_TOOLS_CAPABILITY = "strict_tool_schemas"
+_REMOTE_IMAGE_CAPABILITY = "remote_image_fetch"
+
+_DATA_URI_PREFIX = "data:"
+_BASE64_MARKER = ";base64,"
+_SECURE_SCHEMES = frozenset({"http", "https"})
 
 _REQUEST_KEYS = frozenset(
     {
@@ -160,9 +177,12 @@ _REQUEST_KEYS = frozenset(
         "instructions",
         "tools",
         "temperature",
+        "top_p",
         "max_output_tokens",
         "stream",
         "response_format",
+        "tool_choice",
+        "metadata",
     }
 )
 """The request fields ``POST /v1/responses`` accepts (PRD section 4.5).
@@ -178,6 +198,9 @@ _FUNCTION_CALL_KEYS = frozenset({"type", "call_id", "name", "arguments", "id", "
 _FUNCTION_CALL_OUTPUT_KEYS = frozenset({"type", "call_id", "output", "id", "status"})
 _INPUT_TEXT_PART_KEYS = frozenset({"type", "text"})
 _OUTPUT_TEXT_PART_KEYS = frozenset({"type", "text", "annotations"})
+_INPUT_IMAGE_PART_KEYS = frozenset({"type", "image_url"})
+_NAMED_CHOICE_KEYS = frozenset({"type", "function"})
+_NAMED_CHOICE_FUNCTION_KEYS = frozenset({"name"})
 _TOOL_KEYS = frozenset({"type", "name", "description", "parameters", "strict"})
 _RESPONSE_FORMAT_KEYS = frozenset({"type", "json_schema"})
 _JSON_SCHEMA_KEYS = frozenset({"name", "schema", "strict"})
@@ -436,6 +459,8 @@ class ResponsesRequest:
                 ),
                 generation_config=_generation_config(where, body),
                 tools=_as_tools(f"{where} 'tools'", body.get("tools")),
+                tool_choice=_tool_choice_from(f"{where} 'tool_choice'", body.get("tool_choice")),
+                metadata=_metadata_from(f"{where} 'metadata'", body.get("metadata")),
             )
         except ValueError as error:
             raise InvalidArgumentError(f"invalid responses request: {error}") from error
@@ -465,9 +490,11 @@ class ResponseObject:
     """An OpenAI Responses object (PRD section 4.5).
 
     ``output`` is the ordered array of items the answer produced, rendered from
-    the canonical output sequence so that the order the model emitted survives
-    the translation: one ``message`` item carrying the turn's content parts in
-    order, then one ``function_call`` item per tool call.
+    the canonical output sequence content-first: one ``message`` item carrying
+    the turn's content parts in the order the model emitted them, then one
+    ``function_call`` item per tool call, so the order the representation can
+    express is ``(ContentPart)* (ToolCall)*`` and an arbitrary interleaving of
+    content and tool calls is not representable.
 
     The payload is the documented subset of the Responses object this endpoint
     can state truthfully: its identity, its creation time, the public model ID,
@@ -772,7 +799,7 @@ def _role(where: str, value: object) -> Role:
     return role
 
 
-def _content_from(where: str, value: object) -> tuple[TextPart, ...]:
+def _content_from(where: str, value: object) -> tuple[TextPart | ImagePart, ...]:
     if isinstance(value, str):
         return (TextPart(value),)
     if not isinstance(value, list):
@@ -782,15 +809,18 @@ def _content_from(where: str, value: object) -> tuple[TextPart, ...]:
     return tuple(_content_part_from(f"{where}[{index}]", item) for index, item in enumerate(value))
 
 
-def _content_part_from(where: str, payload: object) -> TextPart:
-    """One input content part as canonical text.
+def _content_part_from(where: str, payload: object) -> TextPart | ImagePart:
+    """One input content part as canonical content.
 
     ``input_text`` is what a caller writes and ``output_text`` is what an
     assistant turn the caller is replaying contained; both are text and both
-    become a canonical text part. Anything else is refused rather than
-    approximated: an image or a file is a feature this endpoint does not carry,
-    and it is named so the caller learns what is missing instead of sending a
-    message the model never saw (PRD sections 9.1 and 9.5).
+    become a canonical text part. ``input_image`` is a caller-supplied image
+    and becomes a canonical image part, which the route must declare the
+    ``vision`` capability to carry. Anything else is refused rather than
+    approximated: a part type this endpoint does not carry is a feature the
+    gateway has no representation for, and it is named so the caller learns
+    what is missing instead of sending a message the model never saw (PRD
+    sections 9.1 and 9.5).
     """
     body = _as_object(where, payload)
     kind = body.get("type")
@@ -801,15 +831,59 @@ def _content_part_from(where: str, payload: object) -> TextPart:
         _reject_nested_keys(where, body, _OUTPUT_TEXT_PART_KEYS)
         _reject_annotations(where, body.get("annotations"))
         return _text_part_from(f"{where} 'text'", body.get("text"))
+    if kind == _INPUT_IMAGE:
+        _reject_nested_keys(where, body, _INPUT_IMAGE_PART_KEYS)
+        return _image_part_from(f"{where} 'image_url'", body.get("image_url"))
     if not isinstance(kind, str):
         raise InvalidArgumentError(
             f"{where} must carry a string 'type' discriminator, got {describe(kind)}"
         )
     raise CapabilityError(
-        f"{where} has type {kind!r}; this endpoint carries 'input_text' and 'output_text' "
-        f"content parts and has no representation for {kind!r}, so the part is refused rather "
-        f"than dropped",
+        f"{where} has type {kind!r}; this endpoint carries 'input_text', 'output_text' and "
+        f"'input_image' content parts and has no representation for {kind!r}, so the part is "
+        f"refused rather than dropped",
         details={"capability": kind, "parameter": "input[].content[].type"},
+    )
+
+
+def _image_part_from(where: str, value: object) -> ImagePart:
+    """An ``input_image`` part's ``image_url`` as a canonical image part.
+
+    A data URI carries the base64 payload inline, so it becomes image content
+    with its media type and needs no fetch, no policy decision and no network —
+    exactly as the chat endpoint's ``image_url`` part carries it. A remote
+    ``http`` or ``https`` URL is refused with a capability error: the canonical
+    type documents its URL as one the URL policy has admitted, and admitting it
+    means resolving the hostname and rejecting loopback, private, link-local and
+    metadata addresses — a blocking DNS lookup this async handler must not
+    perform, and one that would only screen the URL, not pin the connection or
+    evaluate redirects as PRD section 14.1 requires. Remote image fetching
+    arrives with that safe asynchronous validation and transport path; until
+    then only inline content is accepted. Any other scheme, ``file`` included,
+    is malformed input rather than a missing feature.
+    """
+    if not isinstance(value, str) or not value:
+        raise InvalidArgumentError(f"{where} must be a non-empty string, got {describe(value)}")
+    if value.startswith(_DATA_URI_PREFIX):
+        media_type, _, payload = value[len(_DATA_URI_PREFIX) :].partition(_BASE64_MARKER)
+        if not payload:
+            raise InvalidArgumentError(
+                f"{where} is a data URI without a base64 payload; supply "
+                f"'data:<media type>;base64,<payload>'"
+            )
+        return ImagePart(data=payload, media_type=media_type or None)
+    scheme = urlsplit(value).scheme.lower()
+    if scheme in _SECURE_SCHEMES:
+        raise CapabilityError(
+            "the gateway cannot fetch a remote image URL on this endpoint: it screens an image "
+            "URL against its URL policy and fetches it under address pinning and redirect "
+            "evaluation, and neither is implemented yet, so only an inline base64 data URI is "
+            "accepted; remote image fetching arrives with that safe asynchronous path",
+            details={"capability": _REMOTE_IMAGE_CAPABILITY},
+        )
+    raise InvalidArgumentError(
+        f"{where} must be a base64 data URI, got scheme {scheme!r}; supply "
+        f"'data:<media type>;base64,<payload>'"
     )
 
 
@@ -946,22 +1020,69 @@ def _tool_from(where: str, payload: object) -> ToolDefinition:
         raise InvalidArgumentError(f"invalid responses tool declaration: {error}") from error
 
 
+def _tool_choice_from(where: str, value: object) -> ToolChoice | None:
+    """A Responses ``tool_choice`` as the canonical tool-choice policy.
+
+    The Responses format carries the choice as a bare string naming a mode or
+    as an object naming one function, and both shapes map onto the canonical
+    policy: the chat endpoint accepts the same two and the binding forwards the
+    policy upstream, so accepting it here keeps the two endpoints in agreement
+    about what a caller may ask the model to do with its tools (PRD section
+    9.3).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            return ToolChoice(mode=ToolChoiceMode(value))
+        except ValueError as error:
+            raise InvalidArgumentError(
+                f"{where} must be 'none', 'auto', 'required' or a named function choice; "
+                f"got {value!r}"
+            ) from error
+    body = _as_object(where, value)
+    _reject_nested_keys(where, body, _NAMED_CHOICE_KEYS)
+    if body.get("type") != _TYPE_FUNCTION:
+        raise InvalidArgumentError(
+            f"{where} 'type' must be 'function', got {describe(body.get('type'))}"
+        )
+    function = _as_object(f"{where} 'function'", body.get("function"))
+    _reject_nested_keys(f"{where} 'function'", function, _NAMED_CHOICE_FUNCTION_KEYS)
+    return ToolChoice.specific(
+        _required_text(f"{where} 'function' 'name'", function.get("name"))
+    )
+
+
+def _metadata_from(where: str, value: object) -> Mapping[str, JsonValue]:
+    """A Responses ``metadata`` object as the canonical request metadata.
+
+    PRD section 5.1 defines ``metadata`` as request metadata, and the canonical
+    request carries it as arbitrary JSON held as an immutable mapping, so the
+    value is forwarded to the canonical type and nothing is invented here. The
+    canonical type's own rules bound it and are enforced there rather than
+    restated: a key naming a canonical invocation field or a generation
+    parameter is refused, because metadata is never forwarded to a model or a
+    provider and a model parameter parked there would be a semantic the gateway
+    neither represents nor sends (PRD section 9.1).
+    """
+    if value is None:
+        return {}
+    return _as_object(where, value)
+
+
 def _generation_config(where: str, body: Mapping[str, object]) -> GenerationConfig:
     """Map the Responses sampling parameters onto the canonical generation config.
 
     ``max_output_tokens`` is the canonical field's own name, and ``temperature``
-    maps onto itself. Every parameter the caller omitted stays unset, so the
-    provider's own default applies rather than a value the gateway invented (PRD
-    section 5.1).
+    and ``top_p`` map onto themselves. Every parameter the caller omitted stays
+    unset, so the provider's own default applies rather than a value the
+    gateway invented (PRD section 5.1).
     """
     try:
         return GenerationConfig(
-            temperature=as_optional_float(
-                f"{where} 'temperature'", body.get("temperature"), minimum=0.0
-            ),
-            max_output_tokens=as_optional_int(
-                f"{where} 'max_output_tokens'", body.get("max_output_tokens"), minimum=1
-            ),
+            temperature=body.get("temperature"),
+            top_p=body.get("top_p"),
+            max_output_tokens=body.get("max_output_tokens"),
             response_format=_as_response_format(
                 f"{where} 'response_format'", body.get("response_format")
             ),
@@ -1058,12 +1179,14 @@ def _reject_unrepresentable_output(response: InvocationResponse) -> None:
 def _output_items(content: tuple[OutputItem, ...], *, response_id: str) -> list[dict[str, object]]:
     """The ordered ``output`` array for one canonical answer (PRD section 4.5).
 
-    The canonical sequence is ordered, so the rendering preserves that order
-    rather than splitting text and tool calls into separate buckets: the content
-    parts become the content list of one ``message`` item, in the order the model
-    emitted them, and each tool call becomes a ``function_call`` item after it.
-    :func:`_reject_unrepresentable_output` has already established that no
-    content part follows a call, so grouping them here loses no ordering. A
+    The rendering is content-first: every content part becomes the content list
+    of one ``message`` item, in the order the model emitted them, and then every
+    tool call becomes a ``function_call`` item. The order the representation
+    can express is therefore ``(ContentPart)* (ToolCall)*``, and an arbitrary
+    interleaving of content and tool calls is not representable — the one
+    interleaving that would break the partition, content after a tool call, is
+    refused by :func:`_reject_unrepresentable_output` before this runs, so the
+    partition loses no ordering the representation could have carried. A
     tool-call-only answer has no ``message`` item at all, exactly as the chat
     endpoint answers it with no content.
     """
@@ -1150,11 +1273,14 @@ def _usage_payload(usage: Usage) -> dict[str, object]:
     """The Responses usage object, with its own field names.
 
     The three counts are the Responses names for the canonical counts. A count
-    the provider never reported is presented as zero because the Responses usage
-    object types its counts as integers; the canonical record keeps the
-    difference between "none were used" and "nobody counted" (PRD section 13). A
-    total the provider omitted is summed from the two counts it did report, which
-    is arithmetic the caller can repeat.
+    the provider never reported is presented as zero, because the Responses
+    usage object types its counts as integers and has no null: the wire shape
+    cannot preserve the canonical record's difference between "none were used"
+    and "nobody counted", so the gateway reports zero rather than inventing an
+    omission the shape has no field for, and a caller cannot recover from the
+    response alone which of the two a zero is (PRD section 13). A total the
+    provider omitted is summed from the two counts it did report, which is
+    arithmetic the caller can repeat.
 
     The two detail objects are the categories the Responses usage shape carries.
     ``cached_tokens`` is the canonical record's own cached count. The other two —
