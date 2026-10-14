@@ -76,18 +76,31 @@ makes no further attempt (PRD section 15).
 """
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 
 from model_gateway.capabilities import Capability
 from model_gateway.config.routes import Route
 from model_gateway.domain import (
+    FinishReason,
     ImagePart,
     InvocationRequest,
     InvocationResponse,
     ResponseFormatMode,
 )
-from model_gateway.errors import CapabilityError, DeadlineExceededError
-from model_gateway.providers.base import AttemptContext, TextProvider, _is_usable_budget
+from model_gateway.domain.streaming import StreamEvent, StreamEventKind
+from model_gateway.errors import (
+    CapabilityError,
+    DeadlineExceededError,
+    GatewayError,
+    normalise_exception,
+)
+from model_gateway.providers.base import (
+    AttemptContext,
+    StreamingTextProvider,
+    TextProvider,
+    _is_usable_budget,
+)
 from model_gateway.registry import ModelRegistry
 from model_gateway.reliability import (
     ConcurrencyLimiter,
@@ -98,6 +111,8 @@ from model_gateway.reliability import (
 )
 
 __all__ = ["InferenceService", "InvocationState"]
+
+_STREAMING_CAPABILITY = "streaming"
 
 _DEFAULT_MAX_CONCURRENT_REQUESTS = 100
 """The concurrency bound a service is built with when no limiter is injected.
@@ -262,6 +277,47 @@ class InferenceService:
         routes = self._registry.routes_for(request.model)
         return await self._invoke_on(request, routes)
 
+    async def invoke_stream(self, request: InvocationRequest) -> AsyncIterator[StreamEvent]:
+        """Invoke the public model named by ``request.model``, streaming the answer.
+
+        The streaming counterpart of :meth:`invoke`, under the same policy: the
+        ID is resolved to its configured routes, the request is validated against
+        the primary route's capability contract, and the invocation runs under
+        one deadline and one retry loop (PRD sections 11.2, 11.3 and 15). The
+        difference is what a failure may do once the answer has begun.
+
+        **No fallback after the first output.** Before the first event reaches
+        the caller, a retryable or fallback-eligible failure may still move to
+        another route, exactly as :meth:`invoke` does — the caller has seen
+        nothing, so nothing it was told can be contradicted. After the first
+        event, a failure ends the stream instead: switching providers, or even
+        retrying the same route, would concatenate a second answer onto the
+        first, and a caller that has seen output cannot be given a contradictory
+        one (PRD sections 11.2, 11.3 and 16). The stream then ends with exactly
+        one terminal :class:`~model_gateway.domain.streaming.StreamEvent` of kind
+        ``FINISH`` that reports the error, rather than stopping silently.
+
+        Raises :class:`~model_gateway.errors.ModelNotFoundError` for an unknown
+        ID, :class:`~model_gateway.errors.CapabilityError` when the primary route
+        cannot honour the request or the provider cannot stream, and otherwise
+        the failure of the last attempt — surfaced the same way :meth:`invoke`
+        surfaces it, except that a failure after the first output is reported
+        through the terminal event and then raised.
+        """
+        if not isinstance(self._provider, StreamingTextProvider):
+            raise CapabilityError(
+                "this provider cannot stream a chat completion; the gateway does not answer a "
+                "streaming request with a non-streamed body, so the request is refused",
+                details={"capability": _STREAMING_CAPABILITY},
+            )
+        routes = self._registry.routes_for(request.model)
+        stream = self._invoke_stream_on(request, routes)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await stream.aclose()
+
     async def _invoke_on(
         self, request: InvocationRequest, routes: tuple[Route, ...]
     ) -> InvocationResponse:
@@ -384,6 +440,120 @@ class InferenceService:
             )
             return await self._provider.complete(route, request, context)
 
+    async def _invoke_stream_on(
+        self, request: InvocationRequest, routes: tuple[Route, ...]
+    ) -> AsyncIterator[StreamEvent]:
+        """Serve one streaming invocation from the configured route order.
+
+        The streaming counterpart of :meth:`_invoke_on`, and the same walk:
+        the primary route first, then the fallbacks that could serve the
+        request, under the invocation's single deadline, with the same two
+        questions asked of every failure. The difference is the rule PRD
+        sections 11.2 and 11.3 state and a non-streaming invocation never had
+        to enforce: **once an event has been yielded to the caller, no fallback
+        and no retry may occur.**
+
+        Before the first event, the walk is exactly :meth:`_invoke_on`'s: a
+        retryable failure is retried on the same route within the configured
+        count, a fallback-eligible failure moves to the next route, and a
+        failure that answers no to both terminates the invocation where it
+        happened. The caller has seen nothing, so moving to another provider
+        contradicts nothing.
+
+        After the first event, a failure ends the stream. The events already
+        yielded stay — they are what the upstream produced — and the stream is
+        closed with exactly one terminal ``FINISH`` event that reports the
+        error, rather than stopping silently or restarting on another provider
+        (PRD section 16). The error is then raised, so the caller knows the
+        invocation failed; the terminal event is what the stream itself shows.
+
+        Sequence numbers are strictly increasing across the whole stream. A
+        provider numbers its own events from 0, and a route is only retried or
+        walked away from before it has produced any event, so the numbers a
+        caller sees never repeat or go backwards. The terminal event after a
+        failure takes the next number after the last one yielded.
+        """
+        plan = _select_routes(routes, request)
+        deadline = Deadline.after(self._attempt_timeout)
+        state = InvocationState()
+        failure: BaseException | None = None
+        output_started = False
+        last_sequence = -1
+
+        for position, route in enumerate((plan.primary, *plan.fallbacks)):
+            for retry in range(self._retry_count + 1):
+                if _budget_is_spent(deadline.budget_for(self._attempt_timeout)):
+                    raise _deadline_exceeded(request, state) from failure
+                state = state.with_attempt(on_fallback=position > 0)
+                attempt_events = self._stream_attempt(route, request, state, deadline)
+                try:
+                    async for event in attempt_events:
+                        last_sequence = event.sequence
+                        output_started = True
+                        yield event
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    failure = error
+                    if output_started:
+                        yield _error_finish_event(request, error, sequence=last_sequence + 1)
+                        raise
+                    remaining = deadline.remaining()
+                    if (
+                        retry < self._retry_count
+                        and is_retryable(error, remaining=remaining)
+                        and await _back_off(retry + 1, self._retry_backoff_ms, deadline)
+                    ):
+                        continue
+                    if not is_fallback_eligible(error, remaining=remaining):
+                        raise
+                    break
+                finally:
+                    await attempt_events.aclose()
+                return
+
+        if failure is None:
+            raise _deadline_exceeded(request, state)
+        raise failure
+
+    async def _stream_attempt(
+        self,
+        route: Route,
+        request: InvocationRequest,
+        state: InvocationState,
+        deadline: Deadline,
+    ) -> AsyncIterator[StreamEvent]:
+        """One provider stream against one route, inside one concurrency slot.
+
+        The streaming counterpart of :meth:`_attempt`: the slot is held for the
+        duration of the stream and released when it ends — success, failure or
+        cancellation — and the budget handed to the provider is derived from
+        the invocation's one deadline after the slot is held, so waiting for a
+        slot consumes invocation budget too (PRD section 15).
+
+        The provider is handed the route, the request and an
+        :class:`~model_gateway.providers.base.AttemptContext` carrying the
+        attempt's own facts, exactly as :meth:`_attempt` hands them to
+        :meth:`~model_gateway.providers.base.TextProvider.complete`. The
+        provider performs one gateway attempt and translates each upstream
+        chunk; it does not retry and does not choose between routes.
+        """
+        async with self._limiter.slot(deadline.remaining()):
+            budget = deadline.budget_for(self._attempt_timeout)
+            if _budget_is_spent(budget):
+                raise _deadline_exceeded(request, state)
+            context = AttemptContext(
+                invocation_id=request.invocation_id,
+                attempt_number=state.attempt_count,
+                timeout=budget,
+            )
+            upstream = self._provider.stream(route, request, context)
+            try:
+                async for event in upstream:
+                    yield event
+            finally:
+                await upstream.aclose()
+
 
 def _require_count(name: str, value: int) -> None:
     """Refuse a retry count or backoff that is not a non-negative integer.
@@ -455,6 +625,38 @@ def _deadline_exceeded(request: InvocationRequest, state: InvocationState) -> De
         f"the invocation deadline for model {request.model!r} expired before a provider "
         f"could serve it",
         details={"model": request.model, "attempts": str(state.attempt_count)},
+    )
+
+
+def _error_finish_event(
+    request: InvocationRequest, error: BaseException, *, sequence: int
+) -> StreamEvent:
+    """The terminal event that ends a stream which failed after output began.
+
+    A failure after the first event cannot be retried or walked to another
+    route — the caller has already seen output, and a second answer would
+    contradict it (PRD sections 11.2 and 11.3). The stream therefore ends
+    with exactly one terminal ``FINISH`` event that reports the error, so the
+    caller is not left with a stream that simply stopped.
+
+    The event carries no finish reason the provider gave, because the provider
+    did not finish — it failed. ``FinishReason.UNKNOWN`` states that plainly:
+    the gateway could not classify a reason because there was not one to
+    classify. The error's own reason is recorded verbatim in
+    ``raw_finish_reason``, the field that already keeps the provider's own
+    untranslated reason beside its classification, so the error that ended the
+    stream is named rather than swallowed (PRD section 5.2).
+    """
+    if isinstance(error, GatewayError):
+        raw = error.reason.value
+    else:
+        raw = normalise_exception(error).reason.value
+    return StreamEvent(
+        kind=StreamEventKind.FINISH,
+        sequence=sequence,
+        invocation_id=request.invocation_id or "",
+        finish_reason=FinishReason.UNKNOWN,
+        raw_finish_reason=raw,
     )
 
 
