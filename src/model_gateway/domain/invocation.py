@@ -373,8 +373,15 @@ class InvocationResponse:
 
     ``attempt_count`` counts provider attempts, including retries of the same
     route, and is at least one because a response exists only once an attempt
-    produced one. ``fallback_used`` says whether the answering route was anything
-    other than the first configured one.
+    produced one. ``fallback_used`` records that the invocation took a fallback
+    path: a route other than the primary one served it because the normal
+    primary path could not. It is deliberately narrower than "the answering
+    route was anything other than the first configured one", which was also
+    true whenever capability routing passed the primary over. Capability
+    routing can never set this flag: the registry advertises the primary route's
+    capabilities as the public model's own (PRD section 4.3), so a request the
+    primary cannot honour is refused rather than routed elsewhere (PRD section
+    9.5).
 
     ``estimated_cost`` and ``cost_currency`` come from configured pricing data
     (PRD section 13) and are ``None`` when cost tracking is off or no price is
