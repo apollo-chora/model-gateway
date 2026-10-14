@@ -7,11 +7,20 @@
 // The shape is deliberately the canonical model, not a provider dialect: the
 // gateway resolves the public model, applies policy, and returns the canonical
 // answer. A provider's own field names never appear here.
+//
+// That fidelity rule decides each field's type, and it draws one line. A field
+// the canonical model types - a scalar, an enum, a structured object the gateway
+// validates - is typed protobuf. A field the canonical model holds as arbitrary
+// JSON is canonical JSON bytes, because the only JSON-ish well-known protobuf
+// types represent every number as a double, and a double changes both the type
+// and the value of a JSON integer: `1` arrives as `1.0`, and one beyond 2^53 is
+// lost. Metadata, a tool's parameters, a JSON Schema and a tool call's arguments
+// are therefore `bytes`, and the mapping parses them with orjson and enforces
+// the shape the canonical type requires.
 syntax = "proto3";
 
 package gateway.v1;
 
-import "google/protobuf/struct.proto";
 
 // ModelGatewayService serves every inference operation the gateway exposes.
 //
@@ -68,10 +77,11 @@ message InvokeRequest {
   repeated string fallback_models = 12;
   // Caller-supplied deduplication key.
   string idempotency_key = 13;
-  // Caller bookkeeping as a JSON object. Never forwarded to the model or a
-  // provider. google.protobuf.Struct is chosen because canonical metadata is
-  // Mapping[str, JsonValue] and a string map cannot carry it.
-  google.protobuf.Struct metadata = 14;
+  // Caller bookkeeping as its canonical JSON text, never forwarded to the model
+  // or a provider. JSON bytes rather than a Struct because Struct types every
+  // number as a double, so a JSON integer would arrive as a float and one beyond
+  // 2^53 would not be represented exactly (section 5.1).
+  bytes metadata_json = 14;
 }
 
 // ToolChoice is the caller's tool-choice policy (PRD section 9.3).
@@ -157,8 +167,11 @@ message ToolCall {
 message ToolDefinition {
   string name = 1;
   string description = 2;
-  // The JSON schema the tool's arguments must satisfy.
-  google.protobuf.Struct parameters = 3;
+  // The JSON schema the tool's arguments must satisfy, as its canonical JSON
+  // text. JSON bytes rather than a Struct for the reason metadata_json gives:
+  // a schema's numeric constraints are semantic, and a double cannot carry one
+  // faithfully.
+  bytes parameters_json = 3;
 }
 
 // GenerationConfig holds the model parameters a caller may state.
@@ -179,10 +192,11 @@ message GenerationConfig {
 
 message ResponseFormat {
   ResponseFormatMode mode = 1;
-  // The schema a json_schema mode requires. A JSON Schema may be an object or a
-  // boolean; Value is chosen so the mapper accepts struct_value and bool_value
-  // and rejects every other kind.
-  google.protobuf.Value schema = 2;
+  // The schema a json_schema mode requires, as its canonical JSON text. A JSON
+  // Schema may be an object or a boolean, and the mapping accepts exactly those
+  // two shapes. JSON bytes rather than a Value for the reason metadata_json
+  // gives: a double cannot carry a JSON integer faithfully.
+  bytes schema_json = 2;
   string name = 3;
   bool strict = 4;
 }
@@ -327,10 +341,9 @@ message EmbedRequest {
   // "float" or "base64". The gateway answers floats only.
   string encoding_format = 4;
   string user = 5;
-  // Caller bookkeeping as a JSON object. Never forwarded to the model or a
-  // provider. google.protobuf.Struct is chosen because canonical metadata is
-  // Mapping[str, JsonValue] and a string map cannot carry it.
-  google.protobuf.Struct metadata = 6;
+  // Caller bookkeeping as its canonical JSON text. Never forwarded to the model
+  // or a provider. JSON bytes for the reason InvokeRequest.metadata_json gives.
+  bytes metadata_json = 6;
 }
 
 message EmbedResponse {

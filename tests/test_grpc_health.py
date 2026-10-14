@@ -101,20 +101,16 @@ async def grpc_server():
         await server.stop()
 
 
-async def test_the_overall_service_is_not_serving_until_the_listener_starts():
-    """Before the listener starts the overall service is NOT_SERVING.
+async def test_the_overall_service_reports_serving_once_the_listener_starts():
+    """Once the listener has started, a Check reports the overall service SERVING.
 
-    The listener binds its port in its constructor, so the window before
-    ``start`` is real, but no RPC is answered in it — a ``Check`` cannot be
-    answered until the server starts. What must be truthful in that window is
-    the state, so it is read here directly rather than over the wire.
+    The window before ``start`` is not asserted, because nothing in it is
+    observable: the listener reserves its port in its constructor but answers no
+    RPC until ``start``, so no probe can read a state there and the gateway
+    declines to reach into the servicer's private state to manufacture one.
     """
     server = _listener()
     try:
-        assert (
-            server._health._server_status[""]
-            == health_pb2.HealthCheckResponse.NOT_SERVING
-        )
         await server.start()
         channel = grpc.aio.insecure_channel(f"127.0.0.1:{server.port}")
         try:

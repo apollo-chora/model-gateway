@@ -8,16 +8,17 @@ covered by the sibling RPC test files, and this file owns the translation alone.
 
 Four rules shape the file.
 
-**A Struct carries the whole of JSON, at the cost of exact integers.** Metadata
-crosses as a ``google.protobuf.Struct``, so a nested object, a boolean and a list
-all reach the canonical record; the well-known type's numbers are doubles, which
-is why a small integer compares equal to its float form rather than arriving as
-a different value.
+**Arbitrary JSON crosses as its canonical JSON text.** Metadata, a tool's
+parameters and a JSON Schema travel as ``bytes`` carrying JSON text, so a nested
+object, a boolean and a list all reach the canonical record with their types and
+values intact. The well-known protobuf types were tried for these fields and
+rejected: ``Struct`` and ``Value`` represent every number as a double, which
+changes both the type and the value of a JSON integer.
 
-**A JSON Schema may be a boolean.** ``ResponseFormat.schema`` is a
-``google.protobuf.Value`` so that ``true`` and ``false`` — both valid schema
-documents — cross as themselves, and a schema of any other kind is refused by the
-mapper rather than coerced.
+**A JSON Schema may be a boolean.** ``ResponseFormat.schema_json`` carries the
+schema's JSON text, so ``true`` and ``false`` — both valid schema documents —
+cross as themselves, and a schema of any other kind is refused by the mapper
+rather than coerced.
 
 **Tool-call arguments travel as JSON text.** ``bytes arguments_json`` keeps a
 JSON integer exact, which the well-known value could not; the mapper decodes with
@@ -35,7 +36,6 @@ mapper already wraps.
 
 import orjson
 import pytest
-from google.protobuf.struct_pb2 import Struct, Value
 
 from model_gateway.domain import (
     FinishReason,
@@ -45,6 +45,7 @@ from model_gateway.domain import (
     TextPart,
     ToolCall,
     Usage,
+    thaw_json,
 )
 from model_gateway.domain.json_value import FrozenJsonObject
 from model_gateway.domain.streaming import StreamEvent, StreamEventKind
@@ -55,13 +56,6 @@ from model_gateway.security.identity import Identity
 
 PUBLIC_MODEL = "text-default"
 TENANT = "tenant-a"
-
-
-def _list_value(values):
-    """A ``google.protobuf.Value`` carrying a JSON array."""
-    value = Value()
-    value.list_value.extend(values)
-    return value
 
 
 def identity() -> Identity:
@@ -97,15 +91,24 @@ def completion(**overrides) -> InvocationResponse:
 
 
 # --------------------------------------------------------------------------- #
-# Metadata: a Struct both ways
+# Metadata: JSON text both ways
 # --------------------------------------------------------------------------- #
 
 
-def test_a_struct_and_a_json_object_convert_both_ways():
+def test_canonical_json_text_and_a_json_object_convert_both_ways():
+    # The boundary carries JSON text, not a well-known type: the canonical
+    # mapping goes out as its text and comes back as the same mapping, with an
+    # integer an integer and a boolean a boolean — and a JSON array as the tuple
+    # the canonical record freezes it into.
     metadata = FrozenJsonObject({"trace": {"sampled": True}, "ids": [1, 2], "flag": True})
-    struct = mapping._mapping_to_struct(metadata)
-    assert isinstance(struct, Struct)
-    assert mapping._struct_to_json(struct) == dict(metadata)
+    request = invoke_request()
+    request.metadata_json = orjson.dumps(thaw_json(metadata))
+
+    invocation = mapping.invocation_request_from_proto(request, identity=identity())
+
+    assert invocation.metadata == {"trace": {"sampled": True}, "ids": (1, 2), "flag": True}
+    assert type(invocation.metadata["ids"][0]) is int
+    assert type(invocation.metadata["flag"]) is bool
 
 
 @pytest.mark.parametrize(
@@ -117,18 +120,15 @@ def test_a_struct_and_a_json_object_convert_both_ways():
     ],
 )
 def test_request_metadata_of_every_json_kind_reaches_the_invocation(metadata):
-    # A Struct types numbers as doubles and the canonical record freezes a JSON
-    # array into a tuple, so the list comes back as (1.0, 2.0, 3.0); the nested
-    # object and the boolean cross unchanged. Equality, not type identity, is
-    # what a caller comparing the round trip can rely on.
+    # The bytes carry the canonical text, so every JSON kind crosses as itself:
+    # the list comes back as a tuple of integers, where the struct the contract
+    # used to carry typed every number as a double and returned (1.0, 2.0, 3.0).
     request = invoke_request()
-    request.metadata.update(metadata)
+    request.metadata_json = orjson.dumps(metadata)
 
     invocation = mapping.invocation_request_from_proto(request, identity=identity())
 
-    expected = (
-        {"ids": (1.0, 2.0, 3.0)} if "ids" in metadata else metadata
-    )
+    expected = {"ids": (1, 2, 3)} if "ids" in metadata else metadata
     assert invocation.metadata == expected
 
 
@@ -140,7 +140,8 @@ def test_absent_request_metadata_becomes_an_empty_object():
 
 def test_absent_embed_metadata_stays_absent():
     # The canonical embeddings request distinguishes no metadata from empty
-    # metadata, and a Struct field has presence, so the distinction survives.
+    # metadata, and the mapper reads the field's absence — the empty bytes an
+    # unset field carries — as the first of the two.
     request = pb.EmbedRequest(model=PUBLIC_MODEL, input=("first",))
 
     embedding_request = mapping.embed_request_from_proto(request)
@@ -150,7 +151,7 @@ def test_absent_embed_metadata_stays_absent():
 
 def test_present_embed_metadata_reaches_the_canonical_request():
     request = pb.EmbedRequest(model=PUBLIC_MODEL, input=("first",))
-    request.metadata.update({"trace": "abc"})
+    request.metadata_json = b'{"trace": "abc"}'
 
     embedding_request = mapping.embed_request_from_proto(request)
 
@@ -167,8 +168,7 @@ def test_a_boolean_json_schema_round_trips():
 
     proto = mapping._response_format_to_proto(canonical)
 
-    assert proto.schema.WhichOneof("kind") == "bool_value"
-    assert proto.schema.bool_value is True
+    assert proto.schema_json == b"true"
     assert mapping.response_format_from_proto("response_format", proto) == canonical
 
 
@@ -178,31 +178,31 @@ def test_an_object_json_schema_round_trips():
 
     proto = mapping._response_format_to_proto(canonical)
 
-    assert proto.schema.WhichOneof("kind") == "struct_value"
+    assert orjson.loads(proto.schema_json) == dict(schema)
     assert mapping.response_format_from_proto("response_format", proto) == canonical
 
 
 @pytest.mark.parametrize(
     "schema",
     [
-        pytest.param(Value(number_value=42.0), id="number"),
-        pytest.param(Value(string_value="true"), id="string"),
-        pytest.param(Value(), id="null"),
-        pytest.param(_list_value([1.0]), id="array"),
+        pytest.param(b"42", id="number"),
+        pytest.param(b'"str"', id="string"),
+        pytest.param(b"null", id="null"),
+        pytest.param(b"[1,2]", id="array"),
     ],
 )
 def test_a_schema_of_any_other_kind_is_refused(schema):
     proto = pb.ResponseFormat(mode=pb.RESPONSE_FORMAT_MODE_JSON_SCHEMA)
-    proto.schema.CopyFrom(schema)
+    proto.schema_json = schema
 
-    with pytest.raises(InvalidArgumentError, match="'schema'"):
+    with pytest.raises(InvalidArgumentError, match="'schema_json'"):
         mapping.response_format_from_proto("response_format 'response_format'", proto)
 
 
 def test_a_boolean_schema_in_a_generation_config_reaches_the_canonical_request():
     config = pb.GenerationConfig()
     config.response_format.mode = pb.RESPONSE_FORMAT_MODE_JSON_SCHEMA
-    config.response_format.schema.CopyFrom(Value(bool_value=True))
+    config.response_format.schema_json = b"true"
 
     invocation = mapping.invocation_request_from_proto(
         invoke_request(generation_config=config), identity=identity()
@@ -312,6 +312,58 @@ def test_an_absent_stream_raw_finish_reason_stays_absent():
     chunk = mapping.chunk_from_event(event)
 
     assert not chunk.finish.HasField("raw_finish_reason")
+
+
+# --------------------------------------------------------------------------- #
+# A tool's parameters: JSON text, with a schema's integers intact
+# --------------------------------------------------------------------------- #
+
+
+def test_a_tool_definitions_parameters_reach_the_invocation_as_they_were_given():
+    request = invoke_request(
+        tools=(
+            pb.ToolDefinition(
+                name="lookup",
+                description="Look a term up.",
+                parameters_json=b'{"type": "object", "properties": {"n": {"type": "integer"}}}',
+            ),
+        )
+    )
+
+    invocation = mapping.invocation_request_from_proto(request, identity=identity())
+
+    assert invocation.tools[0].parameters == {
+        "type": "object",
+        "properties": {"n": {"type": "integer"}},
+    }
+
+
+def test_a_tool_definitions_parameters_carry_a_large_integer_constraint_exactly():
+    # The reason parameters travel as bytes: the struct they replaced typed
+    # every number as a double, and 2^53 + 1 is not a double at all, so the
+    # constraint would cross changed.
+    request = invoke_request(
+        tools=(
+            pb.ToolDefinition(
+                name="lookup",
+                description="Look a term up.",
+                parameters_json=orjson.dumps(
+                    {
+                        "type": "object",
+                        "properties": {
+                            "n": {"type": "integer", "maximum": 9007199254740993}
+                        },
+                    }
+                ),
+            ),
+        )
+    )
+
+    invocation = mapping.invocation_request_from_proto(request, identity=identity())
+
+    maximum = invocation.tools[0].parameters["properties"]["n"]["maximum"]
+    assert maximum == 9007199254740993
+    assert type(maximum) is int
 
 
 # --------------------------------------------------------------------------- #
@@ -448,7 +500,7 @@ def test_a_tool_choice_naming_an_undeclared_tool_is_an_invalid_argument():
 
 def test_a_reserved_metadata_key_is_an_invalid_argument():
     request = invoke_request()
-    request.metadata.update({"temperature": "0.2"})
+    request.metadata_json = b'{"temperature": "0.2"}'
 
     with pytest.raises(InvalidArgumentError, match="metadata"):
         mapping.invocation_request_from_proto(request, identity=identity())

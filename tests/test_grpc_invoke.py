@@ -36,7 +36,6 @@ from contextlib import asynccontextmanager
 import grpc
 import orjson
 import pytest
-from google.protobuf.struct_pb2 import Value
 
 from model_gateway.capabilities import Capability
 from model_gateway.config import Settings
@@ -273,15 +272,18 @@ async def test_the_provider_is_handed_the_canonical_request(stub, provider):
 
 async def test_metadata_carries_json_values_beside_strings(stub, provider):
     # The canonical record is Mapping[str, JsonValue]: an integer and a boolean
-    # beside a string are the same kind of fact, and the struct the contract
-    # carries holds every one of them, where a map of strings held only strings.
+    # beside a string are the same kind of fact, and the JSON text the contract
+    # carries holds every one of them exactly, where the struct it replaced typed
+    # every number as a double.
     invocation_request = request()
-    invocation_request.metadata.update({"trace": "abc", "attempt": 2, "cached": True})
+    invocation_request.metadata_json = b'{"trace": "abc", "attempt": 2, "cached": true}'
 
     await stub.Invoke(invocation_request, metadata=bearer())
 
     _, invocation, _ = provider.calls[0]
     assert invocation.metadata == {"trace": "abc", "attempt": 2, "cached": True}
+    assert type(invocation.metadata["attempt"]) is int
+    assert type(invocation.metadata["cached"]) is bool
 
 
 async def test_the_invocation_carries_the_credentials_tenant(stub, provider):
@@ -517,15 +519,13 @@ async def test_a_boolean_json_schema_reaches_the_provider_as_a_boolean():
     # canonical record carries it as the boolean it is, not as an object with a
     # claim inside it.
     provider = MockProvider()
-    schema = Value()
-    schema.bool_value = True
 
     async with serve(provider, registry=structured_output_registry()) as stub:
         await stub.Invoke(
             request(
                 generation_config=pb.GenerationConfig(
                     response_format=pb.ResponseFormat(
-                        mode=pb.RESPONSE_FORMAT_MODE_JSON_SCHEMA, schema=schema
+                        mode=pb.RESPONSE_FORMAT_MODE_JSON_SCHEMA, schema_json=b"true"
                     )
                 )
             ),
@@ -540,15 +540,14 @@ async def test_a_boolean_json_schema_reaches_the_provider_as_a_boolean():
 
 async def test_a_json_schema_object_reaches_the_provider_as_it_was_given():
     provider = MockProvider()
-    schema = Value()
-    schema.struct_value.update({"type": "object", "properties": {"name": {"type": "string"}}})
+    schema = b'{"type": "object", "properties": {"name": {"type": "string"}}}'
 
     async with serve(provider, registry=structured_output_registry()) as stub:
         await stub.Invoke(
             request(
                 generation_config=pb.GenerationConfig(
                     response_format=pb.ResponseFormat(
-                        mode=pb.RESPONSE_FORMAT_MODE_JSON_SCHEMA, schema=schema
+                        mode=pb.RESPONSE_FORMAT_MODE_JSON_SCHEMA, schema_json=schema
                     )
                 )
             ),
@@ -562,13 +561,20 @@ async def test_a_json_schema_object_reaches_the_provider_as_it_was_given():
     }
 
 
-async def test_a_schema_that_is_neither_object_nor_boolean_is_refused():
-    # The canonical rule the contract now mirrors: a schema is an object or one
-    # of the two boolean schemas, and anything else — a string naming a shape,
-    # a number, an array — is refused rather than coerced.
+@pytest.mark.parametrize(
+    "schema",
+    [
+        pytest.param(b'"str"', id="string"),
+        pytest.param(b"null", id="null"),
+        pytest.param(b"[1,2]", id="array"),
+        pytest.param(b"42", id="number"),
+    ],
+)
+async def test_a_schema_that_is_neither_object_nor_boolean_is_refused(schema):
+    # A schema is an object or one of the two boolean schemas, and anything
+    # else — a string naming a shape, a number, an array, null — is refused
+    # rather than coerced, with the field that carried it named.
     provider = MockProvider()
-    schema = Value()
-    schema.string_value = "not-a-schema"
 
     async with serve(provider) as stub:
         with pytest.raises(grpc.aio.AioRpcError) as raised:
@@ -576,7 +582,7 @@ async def test_a_schema_that_is_neither_object_nor_boolean_is_refused():
                 request(
                     generation_config=pb.GenerationConfig(
                         response_format=pb.ResponseFormat(
-                            mode=pb.RESPONSE_FORMAT_MODE_JSON_SCHEMA, schema=schema
+                            mode=pb.RESPONSE_FORMAT_MODE_JSON_SCHEMA, schema_json=schema
                         )
                     )
                 ),
@@ -584,6 +590,7 @@ async def test_a_schema_that_is_neither_object_nor_boolean_is_refused():
             )
 
     assert raised.value.code() is grpc.StatusCode.INVALID_ARGUMENT
+    assert "schema_json" in raised.value.details()
     assert provider.calls == []
 
 

@@ -31,11 +31,11 @@ module makes. Tool-call arguments do not cross through it: they travel as JSON
 text, which carries every integer exactly.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from enum import Enum
+from typing import Any
 
 import orjson
-from google.protobuf.struct_pb2 import Struct, Value
 
 from model_gateway.domain import (
     EmbeddingRequest,
@@ -144,63 +144,60 @@ def _canonical_member(table: Mapping[int, Enum], where: str, value: int) -> Enum
 
 
 # --------------------------------------------------------------------------- #
-# Well-known types
+# Canonical JSON
 # --------------------------------------------------------------------------- #
+#
+# Arbitrary canonical JSON crosses the boundary as its JSON text, and the two
+# helpers below are the whole of how. A well-known protobuf type was tried for
+# each of these fields and rejected: ``Struct`` and ``Value`` represent every
+# number as a double, so a JSON integer arrives as a float and one beyond 2^53 is
+# lost. The canonical model holds arbitrary JSON, so the boundary carries its
+# text instead, and the gateway parses it and enforces the shape the canonical
+# type requires.
 
 
-def _value_to_json(value: Value) -> JsonValue:
-    """A ``google.protobuf.Value`` as the JSON value it carries.
+def _mapped(where: str, build: Callable[[], Any]) -> Any:
+    """Build one canonical value, translating a domain refusal into a caller error.
 
-    ``null_value`` is ``None``, which is the same statement the canonical record
-    makes wherever a JSON null can arrive: nothing was said, rather than an
-    empty object or an empty list.
+    The canonical constructors validate heavily, and a refusal from one is a
+    request the caller got wrong rather than a gateway defect. Wrapping at every
+    mapping entry point keeps that true for all of them, and leaves the
+    inference service's own construction unwrapped, so a genuine bug there still
+    surfaces as an internal error rather than a caller's.
     """
-    kind = value.WhichOneof("kind")
-    if kind is None or kind == "null_value":
-        return None
-    if kind == "bool_value":
-        return value.bool_value
-    if kind == "number_value":
-        return value.number_value
-    if kind == "string_value":
-        return value.string_value
-    if kind == "struct_value":
-        return _struct_to_json(value.struct_value)
-    return [_value_to_json(item) for item in value.list_value.values]
+    try:
+        return build()
+    except ValueError as error:
+        raise InvalidArgumentError(f"{where} is not valid: {error}") from error
 
 
-def _struct_to_json(struct: Struct) -> dict[str, JsonValue]:
-    """A ``google.protobuf.Struct`` as a JSON object."""
-    return {name: _value_to_json(item) for name, item in struct.fields.items()}
+def _json_object(where: str, payload: bytes) -> Mapping[str, JsonValue]:
+    """A JSON object carried as text, or a refusal naming the rule.
 
-
-def _json_to_value(value: JsonValue) -> Value:
-    """A JSON value as a ``google.protobuf.Value``."""
-    result = Value()
-    if value is None:
-        result.null_value = 0
-    elif isinstance(value, bool):
-        result.bool_value = value
-    elif isinstance(value, (int, float)):
-        result.number_value = value
-    elif isinstance(value, str):
-        result.string_value = value
-    elif isinstance(value, Mapping):
-        result.struct_value.update(value)
-    else:
-        result.list_value.extend(value)
-    return result
-
-
-def _mapping_to_struct(metadata: Mapping[str, JsonValue]) -> Struct:
-    """A metadata mapping as a ``google.protobuf.Struct``.
-
-    The canonical record holds a frozen JSON object; the protobuf one holds a
-    struct, and the two are the same statement.
+    A schema or a tool's parameters must be a JSON object; a boolean is the one
+    other shape a JSON Schema permits. Anything else — a bare number, a string, an
+    array, null — is refused rather than coerced, exactly as the canonical type
+    refuses it.
     """
-    result = Struct()
-    result.update(dict(metadata))
-    return result
+    value = _mapped(where, lambda: orjson.loads(payload))
+    if not isinstance(value, Mapping):
+        raise InvalidArgumentError(f"{where} must be a JSON object, got {type(value).__name__}")
+    return value
+
+
+def _json_schema(where: str, payload: bytes) -> Mapping[str, JsonValue] | bool:
+    """A JSON Schema carried as text: an object or a boolean, or a refusal.
+
+    ``true`` and ``false`` are valid JSON Schemas, so a boolean crosses as itself
+    rather than being coerced into an object. A string, a number, an array or
+    null is none of the two shapes and is refused.
+    """
+    value = _mapped(where, lambda: orjson.loads(payload))
+    if isinstance(value, (bool, Mapping)):
+        return value
+    raise InvalidArgumentError(
+        f"{where} must be a JSON object or a boolean, got {type(value).__name__}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -268,8 +265,8 @@ def tool_definition_from_proto(where: str, definition: pb.ToolDefinition) -> Too
     schema the gateway filled defaults into would describe a different tool.
     """
     parameters: Mapping[str, JsonValue] = {}
-    if definition.HasField("parameters"):
-        parameters = _struct_to_json(definition.parameters)
+    if definition.parameters_json:
+        parameters = _json_object(f"{where} 'parameters_json'", definition.parameters_json)
     return ToolDefinition(
         name=definition.name,
         description=definition.description,
@@ -277,36 +274,18 @@ def tool_definition_from_proto(where: str, definition: pb.ToolDefinition) -> Too
     )
 
 
-def _schema_from_value(where: str, schema: Value) -> Mapping[str, JsonValue] | bool:
-    """A JSON Schema carried by a ``google.protobuf.Value``, or a refusal.
-
-    A JSON Schema is an object or one of the two booleans the specification
-    permits. ``struct_value`` and ``bool_value`` are those two kinds; a string,
-    a number, an array or null is none of them, and is refused rather than
-    coerced, exactly as the canonical type refuses it.
-    """
-    kind = schema.WhichOneof("kind")
-    if kind == "struct_value":
-        return _struct_to_json(schema.struct_value)
-    if kind == "bool_value":
-        return schema.bool_value
-    raise InvalidArgumentError(
-        f"{where} must be a JSON object or a boolean, got {kind or 'null_value'!r}"
-    )
-
-
 def response_format_from_proto(where: str, response_format: pb.ResponseFormat) -> ResponseFormat:
     """A canonical structured-output requirement.
 
-    ``schema`` is read through :func:`_schema_from_value`: a JSON Schema may be
-    an object or a boolean, and ``google.protobuf.Value`` is the one well-known
-    type that carries both, so a boolean schema crosses the boundary as itself
-    instead of being coerced into an object.
+    ``schema_json`` is read through :func:`_json_schema`: a JSON Schema may be an
+    object or a boolean, and the JSON text carries both, where the well-known
+    protobuf types either could not carry a boolean at all or carried both but
+    typed their numbers as doubles.
     """
     mode = _canonical_member(_RESPONSE_FORMAT_MODES, f"{where} 'mode'", response_format.mode)
     schema: Mapping[str, JsonValue] | bool | None = None
-    if response_format.HasField("schema"):
-        schema = _schema_from_value(f"{where} 'schema'", response_format.schema)
+    if response_format.schema_json:
+        schema = _json_schema(f"{where} 'schema_json'", response_format.schema_json)
     return ResponseFormat(
         mode=mode,
         schema=schema,
@@ -414,7 +393,11 @@ def invocation_request_from_proto(request: pb.InvokeRequest, *, identity) -> Inv
             ),
             fallback_models=tuple(request.fallback_models),
             idempotency_key=request.idempotency_key or None,
-            metadata=_struct_to_json(request.metadata),
+            metadata=(
+                _mapped("metadata", lambda: orjson.loads(request.metadata_json))
+                if request.metadata_json
+                else {}
+            ),
         )
     except ValueError as error:
         raise InvalidArgumentError(f"the invocation request is not valid: {error}") from error
@@ -437,7 +420,9 @@ def embed_request_from_proto(request: pb.EmbedRequest) -> EmbeddingRequest:
             encoding_format=request.encoding_format or None,
             user=request.user or None,
             metadata=(
-                _struct_to_json(request.metadata) if request.HasField("metadata") else None
+                _mapped("metadata", lambda: orjson.loads(request.metadata_json))
+                if request.metadata_json
+                else None
             ),
         )
     except ValueError as error:
@@ -510,7 +495,7 @@ def _response_format_to_proto(response_format) -> pb.ResponseFormat:
         strict=response_format.strict,
     )
     if response_format.schema is not None:
-        result.schema.CopyFrom(_json_to_value(response_format.schema))
+        result.schema_json = orjson.dumps(thaw_json(response_format.schema))
     return result
 
 
