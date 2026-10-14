@@ -12,11 +12,14 @@ mapping is exercised by constructing LiteLLM's exception classes in memory.
 
 The preservation rule of PRD section 9.1 is tested on both sides. On the
 request side, a canonical element with no upstream equivalent (a refusal part)
-is rejected rather than dropped. On the response side, a response carrying a
-semantic field the canonical model cannot represent — a log-probability block, a
-reasoning trace, a provider-specific annotation, a backend fingerprint — is
-rejected rather than silently trimmed, and the fixtures deliberately carry
-those extra fields so a translator that drops them fails the test.
+is rejected rather than dropped. On the response side, the four-way
+classification is pinned: a semantic field the canonical model cannot represent
+— a log-probability block, a reasoning trace, a provider-specific annotation —
+is rejected rather than silently trimmed, an unknown provider-specific field
+is refused until it is classified, and a backend fingerprint is classified
+non-semantic operational metadata and deliberately ignored. The fixtures
+deliberately carry those extra fields so a translator that drops a semantic,
+or fails one it should ignore, fails the test.
 """
 
 import httpx
@@ -65,6 +68,7 @@ from model_gateway.errors import (
     UnavailableError,
 )
 from model_gateway.providers.litellm_translation import (
+    _NON_SEMANTIC_RESPONSE_FIELDS,
     from_litellm_response,
     map_litellm_error,
     to_litellm_params,
@@ -793,13 +797,24 @@ class TestFromLitellmResponse:
             from_litellm_response(make_route(), make_request(), response)
         assert "reasoning content" in error.value.message
 
-    def test_system_fingerprint_is_rejected(self) -> None:
-        response = response_from(
-            completion_payload(system_fingerprint="fp_abc123")
-        )
-        with pytest.raises(InternalError) as error:
-            from_litellm_response(make_route(), make_request(), response)
-        assert "fingerprint" in error.value.message
+    def test_system_fingerprint_is_ignored(self) -> None:
+        """Backend metadata, not answer semantics: the response is not failed (PRD 9.1).
+
+        ``system_fingerprint`` identifies the upstream's infrastructure, not
+        anything about the answer — two backends serving the same model return
+        the same tokens — so it is classified non-semantic operational
+        metadata and deliberately ignored, from the explicit set
+        :data:`~model_gateway.providers.litellm_translation._NON_SEMANTIC_RESPONSE_FIELDS`.
+        It must not fail an otherwise valid response, and it must not be
+        treated as a semantic either: the canonical response has no field for
+        it and nothing downstream depends on it.
+        """
+        assert "system_fingerprint" in _NON_SEMANTIC_RESPONSE_FIELDS
+        response = response_from(completion_payload(system_fingerprint="fp_abc123"))
+
+        result = from_litellm_response(make_route(), make_request(), response)
+
+        assert result.text == "Recursion is a technique..."
 
     def test_reasoning_token_detail_is_rejected(self) -> None:
         """A completion-token breakdown count has no canonical target (PRD 9.1)."""
@@ -818,10 +833,16 @@ class TestFromLitellmResponse:
         assert "reasoning_tokens" in error.value.message
 
     def test_full_round_trip_from_a_realistic_payload(self) -> None:
-        """A complete realistic payload normalises into the canonical response."""
+        """A complete realistic payload normalises into the canonical response.
+
+        The payload carries a backend fingerprint beside the mapped fields: it
+        is classified non-semantic operational metadata and must not fail the
+        round trip.
+        """
         response = response_from(
             completion_payload(
                 id="chatcmpl-roundtrip",
+                system_fingerprint="fp_roundtrip",
                 choices=[
                     {
                         "index": 0,

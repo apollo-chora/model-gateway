@@ -22,15 +22,26 @@ boundary, and each is enforced rather than assumed:
   none of ``model`` (the public ID), ``invocation_id``, ``fallback_models``,
   ``idempotency_key`` or ``metadata`` is forwarded (PRD sections 5.1, 9.2 and
   12).
-* **Response side.** Every semantically relevant field of the upstream response
-  is mapped into the canonical model, or the response is rejected as
-  unsupported with an :class:`~model_gateway.errors.InternalError` naming the
-  field. A log-probability block, a reasoning trace, a provider-specific
-  annotation or a backend fingerprint the canonical model cannot carry is a
-  refusal, not something to trim. The gateway's own identity is stamped on the
-  response — ``model`` is the public ID the caller asked for, ``upstream_model``
-  is the route's model ID and ``invocation_id`` is the gateway's own — never a
-  value the upstream supplied (PRD sections 5.2 and 9).
+* **Response side.** Every field of the upstream response is classified
+  before it is acted on, by four rules (PRD section 9.1):
+
+  - a canonical semantic is mapped into the canonical model;
+  - a known semantic the canonical model cannot represent — log probabilities,
+    reasoning content, audio, a legacy function call, multiple choices, an
+    unrepresentable usage detail — is refused with an
+    :class:`~model_gateway.errors.InternalError` naming it, because the caller
+    must not be told the answer was honoured when part of it was dropped;
+  - a known non-semantic operational metadata field is deliberately ignored,
+    from the explicit set :data:`_NON_SEMANTIC_RESPONSE_FIELDS` — a provider
+    diagnostic that does not change the answer must not fail an otherwise
+    valid response once it is understood;
+  - an unknown provider-specific field is still refused until it is
+    classified, so a new provider annotation cannot pass unexamined.
+
+  The gateway's own identity is stamped on the response — ``model`` is the
+  public ID the caller asked for, ``upstream_model`` is the route's model ID
+  and ``invocation_id`` is the gateway's own — never a value the upstream
+  supplied (PRD sections 5.2 and 9).
 * **Errors.** LiteLLM's exception hierarchy is mapped onto the gateway taxonomy
   by class, never by parsing an upstream message. Every message the taxonomy
   publishes is gateway-authored and fixed, so an upstream message, URL or
@@ -51,16 +62,6 @@ field fails a translator that would drop it.
 import json
 from collections.abc import Mapping
 from typing import Any
-
-import litellm
-import openai
-from litellm.types.utils import (
-    ChatCompletionMessageToolCall,
-    Choices,
-    ModelResponse,
-)
-from litellm.types.utils import Message as LiteLLMMessage
-from litellm.types.utils import Usage as LiteLLMUsage
 
 from model_gateway.config.routes import Route
 from model_gateway.domain import (
@@ -98,6 +99,15 @@ from model_gateway.errors import (
     UnauthenticatedError,
     UnavailableError,
     normalise_exception,
+)
+from model_gateway.providers._litellm import (
+    ChatCompletionMessageToolCall,
+    Choices,
+    LiteLLMMessage,
+    LiteLLMUsage,
+    ModelResponse,
+    litellm,
+    openai,
 )
 
 __all__ = ["from_litellm_response", "map_litellm_error", "to_litellm_params"]
@@ -189,9 +199,10 @@ def from_litellm_response(
 
     Raises :class:`~model_gateway.errors.InternalError` naming the field when
     the response carries a semantic the canonical model cannot represent — a
-    log-probability block, a reasoning trace, a provider-specific annotation, a
-    backend fingerprint, a server-tool-use record or an extra usage-detail count
-    (PRD section 9.1).
+    log-probability block, a reasoning trace, a provider-specific annotation,
+    a server-tool-use record or an extra usage-detail count (PRD section 9.1).
+    A backend fingerprint is no longer one of them: it is classified
+    non-semantic operational metadata and deliberately ignored.
     """
     choices = response.choices
     if len(choices) != 1:
@@ -526,6 +537,14 @@ def _reject_unrepresentable_usage(usage: LiteLLMUsage) -> None:
     is rejected rather than trimmed. LiteLLM's own ``cost`` is deliberately not
     checked: cost is the gateway's, computed from configured pricing data
     (PRD section 13), not a provider semantic the binding forwards.
+
+    A refusal that recurs — extra token categories in the usage details, such
+    as a reasoning-token count — is a signal that the canonical usage model
+    (PRD section 13) may genuinely need extending with a field for that
+    category. Until it does, the refusal stands: the semantic is not
+    allowlisted into :data:`_NON_SEMANTIC_RESPONSE_FIELDS`, because a token
+    count is a reported fact about the answer, not backend metadata, and
+    ignoring it would hide a difference the caller was never told about.
     """
     prompt_details = usage.prompt_tokens_details
     if prompt_details is not None:
@@ -554,18 +573,37 @@ def _reject_extra_detail_fields(details: Any, where: str, allowed: frozenset[str
             )
 
 
+# Response fields classified as provider operational metadata rather than answer
+# semantics — the third branch of the four-way rule, the deliberate-ignore
+# branch. A field belongs here only by the same act of classification that
+# would otherwise refuse it, and the reason it is non-semantic is recorded
+# beside it; listing a field is a decision that it changes nothing about the
+# answer, never a place to park a semantic the canonical model cannot hold.
+# The upstream's own identity fields — ``id``, ``created``, ``model`` — need no
+# entry: the gateway stamps its own identity on the response (PRD sections 5.2
+# and 9.6), so an upstream identity is deliberately neither mapped nor refused.
+_NON_SEMANTIC_RESPONSE_FIELDS: frozenset[str] = frozenset(
+    {
+        # The fingerprint of the upstream backend that produced the answer: it
+        # identifies provider infrastructure, not anything about the answer.
+        # Two backends serving the same model return the same tokens, so the
+        # fingerprint is backend metadata that does not change what the caller
+        # was told — it must not fail an otherwise valid response.
+        "system_fingerprint",
+    }
+)
+
+
 def _reject_unmappable(response: ModelResponse, choice: Choices, message: LiteLLMMessage) -> None:
     """Refuse a response carrying a semantic the canonical model cannot represent.
 
     Each check names the field it refuses, so a drop cannot pass undetected:
     a response the canonical model cannot fully represent is rejected as
-    unsupported rather than silently trimmed (PRD section 9.1).
+    unsupported rather than silently trimmed (PRD section 9.1). The one
+    response-level field the binding inspects, ``system_fingerprint``, is
+    deliberately not here: it is classified non-semantic operational metadata
+    and ignored, from :data:`_NON_SEMANTIC_RESPONSE_FIELDS`.
     """
-    if response.system_fingerprint is not None:
-        raise InternalError(
-            "the upstream response carries a system fingerprint, which the canonical response "
-            "representation cannot carry"
-        )
     if getattr(choice, "logprobs", None) is not None:
         raise InternalError(
             "the upstream response carries a log-probability block, which the canonical "
