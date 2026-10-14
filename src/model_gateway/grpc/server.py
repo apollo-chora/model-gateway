@@ -71,14 +71,12 @@ class GrpcServer:
             ),
             self._grpc,
         )
+        # The package's constructor starts the overall service as SERVING, and
+        # start() sets it again to notify any watcher that opened in between.
+        # The state before start() is deliberately left alone: the listener
+        # reserves its port here but answers no RPC until start(), so no probe
+        # can read that state and there is nothing to correct.
         self._health = HealthServicer()
-        # The package's constructor starts the overall service as SERVING, but
-        # this listener is not serving until start(); set() is a coroutine and
-        # cannot run in this synchronous constructor, so the initial state is
-        # assigned directly — the same write set() makes before any watcher
-        # exists, which a probe answered before startup would otherwise read as
-        # a serving lie.
-        self._health._server_status[""] = health_pb2.HealthCheckResponse.NOT_SERVING
         health_pb2_grpc.add_HealthServicer_to_server(self._health, self._grpc)
         self._port = self._grpc.add_insecure_port(f"{_BIND_ADDRESS}:{settings.grpc_port}")
         if not self._port:

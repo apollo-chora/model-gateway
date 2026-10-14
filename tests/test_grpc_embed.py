@@ -23,7 +23,6 @@ from contextlib import asynccontextmanager
 
 import grpc
 import pytest
-from google.protobuf.struct_pb2 import Struct
 
 from model_gateway.capabilities import Capability
 from model_gateway.config import Settings
@@ -204,10 +203,9 @@ async def test_embed_hands_the_provider_the_canonical_request():
     # A route that accepts a caller-selectable dimensionality, because a stated
     # dimension is refused by the gateway core on a route that does not declare one.
     provider = FakeEmbeddingProvider()
-    metadata = Struct()
-    # The struct carries the JSON values the canonical record holds, an integer
-    # beside a string, where a map of strings could carry only strings.
-    metadata.update({"trace": "abc", "attempt": 2})
+    # The JSON text carries the values the canonical record holds, an integer
+    # beside a string, exactly as it was written.
+    metadata = b'{"trace": "abc", "attempt": 2}'
     async with served(service(provider, supports_dimensions_param=True), authenticator()) as stub:
         await call(
             stub,
@@ -216,7 +214,7 @@ async def test_embed_hands_the_provider_the_canonical_request():
                 input=["first", "second"],
                 dimensions=3,
                 user="caller-7",
-                metadata=metadata,
+                metadata_json=metadata,
             ),
         )
 
@@ -229,6 +227,7 @@ async def test_embed_hands_the_provider_the_canonical_request():
         user="caller-7",
         metadata={"trace": "abc", "attempt": 2},
     )
+    assert type(request.metadata["attempt"]) is int
 
 
 async def test_embed_returns_the_vectors_in_the_callers_input_order():
