@@ -34,7 +34,9 @@ coroutine, so an abort that is not awaited leaves the call to fail as
 from contextlib import asynccontextmanager
 
 import grpc
+import orjson
 import pytest
+from google.protobuf.struct_pb2 import Value
 
 from model_gateway.capabilities import Capability
 from model_gateway.config import Settings
@@ -73,7 +75,12 @@ FALLBACK_MODEL = "fallback-text"
 _HOST = "127.0.0.1"
 
 
-def text_route(index: int, model_id: str) -> Route:
+def text_route(
+    index: int,
+    model_id: str,
+    *,
+    capabilities: frozenset[Capability] = frozenset({Capability.CHAT, Capability.TOOLS}),
+) -> Route:
     """One configured text route, with the capabilities a chat invocation needs."""
     return Route(
         operation=Operation.TEXT,
@@ -83,9 +90,29 @@ def text_route(index: int, model_id: str) -> Route:
         model_id=model_id,
         format="openai",
         api_key=UPSTREAM_KEY,
-        capabilities=frozenset({Capability.CHAT, Capability.TOOLS}),
+        capabilities=capabilities,
         extra_headers={},
         allow_absolute_path_url=False,
+    )
+
+
+def structured_output_registry() -> ModelRegistry:
+    """A registry whose route can honour a structured-output requirement.
+
+    A schema in the generation config is refused by the gateway core on a route
+    that does not declare the capability, so a test about the schema itself needs
+    a route that declares it.
+    """
+    return ModelRegistry(
+        (
+            text_route(
+                0,
+                PRIMARY_MODEL,
+                capabilities=frozenset(
+                    {Capability.CHAT, Capability.TOOLS, Capability.STRUCTURED_OUTPUT}
+                ),
+            ),
+        )
     )
 
 
@@ -223,7 +250,7 @@ async def test_the_provider_is_handed_the_canonical_request(stub, provider):
             invocation_id="inv-2",
             actor_id="actor-1",
             agent_id="agent-1",
-            system_prompt="Answer briefly.",
+            system_instruction="Answer briefly.",
         ),
         metadata=bearer(),
     )
@@ -242,6 +269,19 @@ async def test_the_provider_is_handed_the_canonical_request(stub, provider):
         )
         for message in invocation.messages
     ] == [("user", "Explain recursion.")]
+
+
+async def test_metadata_carries_json_values_beside_strings(stub, provider):
+    # The canonical record is Mapping[str, JsonValue]: an integer and a boolean
+    # beside a string are the same kind of fact, and the struct the contract
+    # carries holds every one of them, where a map of strings held only strings.
+    invocation_request = request()
+    invocation_request.metadata.update({"trace": "abc", "attempt": 2, "cached": True})
+
+    await stub.Invoke(invocation_request, metadata=bearer())
+
+    _, invocation, _ = provider.calls[0]
+    assert invocation.metadata == {"trace": "abc", "attempt": 2, "cached": True}
 
 
 async def test_the_invocation_carries_the_credentials_tenant(stub, provider):
@@ -350,8 +390,110 @@ async def test_an_answer_carrying_a_tool_call_is_translated():
     call = response.output[1].tool_call
     assert call.id == "call_1"
     assert call.name == "lookup"
-    assert call.arguments.struct_value.fields["query"].string_value == "recursion"
+    assert orjson.loads(call.arguments_json) == {"query": "recursion"}
     assert response.finish_reason == pb.FINISH_REASON_TOOL_CALLS
+
+
+async def test_a_tool_calls_integer_arguments_survive_as_integers():
+    # The arguments cross as JSON text, not as a protobuf Value: a JSON integer
+    # is a double in the well-known type, and one beyond 2^53 is not a double
+    # at all, so the bytes are what keep an integer an integer.
+    provider = MockProvider(
+        MockSpec(
+            tool_calls=(
+                ToolCall(
+                    id="call_1",
+                    name="lookup",
+                    arguments={"a": 1, "big": 9007199254740993},
+                ),
+            ),
+            finish_reason=FinishReason.TOOL_CALLS,
+        )
+    )
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    call = response.output[1].tool_call
+    arguments = orjson.loads(call.arguments_json)
+    assert arguments == {"a": 1, "big": 9007199254740993}
+    assert type(arguments["a"]) is int
+    assert type(arguments["big"]) is int
+
+
+async def test_a_tool_call_reporting_no_arguments_carries_no_bytes_for_them():
+    # None — the provider reported no arguments at all — is not an empty
+    # object: it leaves the field unset, which reads back as no bytes.
+    provider = ScriptedProvider(
+        InvocationResponse(
+            model=PUBLIC_MODEL,
+            upstream_model=PRIMARY_MODEL,
+            content=(ToolCall(id="call_1", name="lookup"),),
+            finish_reason=FinishReason.TOOL_CALLS,
+        )
+    )
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    assert response.output[0].tool_call.arguments_json == b""
+
+
+async def test_a_tool_calls_raw_string_arguments_stay_a_string():
+    # A provider that did not parse its arguments reported text, and the text
+    # stays text: the canonical record keeps a JSON string a string.
+    provider = ScriptedProvider(
+        InvocationResponse(
+            model=PUBLIC_MODEL,
+            upstream_model=PRIMARY_MODEL,
+            content=(ToolCall(id="call_1", name="lookup", arguments="not json {"),),
+            finish_reason=FinishReason.TOOL_CALLS,
+        )
+    )
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    assert orjson.loads(response.output[0].tool_call.arguments_json) == "not json {"
+
+
+async def test_a_tool_call_in_the_conversation_reaches_the_provider_parsed():
+    # The same fidelity on the request side: the bytes are decoded before the
+    # invocation is built, so the provider is handed the JSON object the caller
+    # wrote, with its integers intact.
+    provider = MockProvider()
+    call = pb.ToolCall(
+        id="call_1", name="lookup", arguments_json=b'{"a": 1, "big": 9007199254740993}'
+    )
+
+    async with serve(provider) as stub:
+        await stub.Invoke(
+            request(messages=(pb.Message(role=pb.ROLE_ASSISTANT, tool_calls=(call,)),)),
+            metadata=bearer(),
+        )
+
+    _, invocation, _ = provider.calls[0]
+    arguments = invocation.messages[0].tool_calls[0].arguments
+    assert arguments == {"a": 1, "big": 9007199254740993}
+    assert type(arguments["a"]) is int
+
+
+async def test_a_tool_call_carrying_unparsable_json_is_refused():
+    # Bytes that are not JSON are a malformed request, not a tool call the
+    # gateway may guess at: they are refused as an invalid argument before
+    # any provider is called.
+    provider = MockProvider()
+    call = pb.ToolCall(id="call_1", name="lookup", arguments_json=b"not json")
+
+    async with serve(provider) as stub:
+        with pytest.raises(grpc.aio.AioRpcError) as raised:
+            await stub.Invoke(
+                request(messages=(pb.Message(role=pb.ROLE_ASSISTANT, tool_calls=(call,)),)),
+                metadata=bearer(),
+            )
+
+    assert raised.value.code() is grpc.StatusCode.INVALID_ARGUMENT
+    assert provider.calls == []
 
 
 async def test_a_tool_choice_reaches_the_provider(stub, provider):
@@ -368,6 +510,81 @@ async def test_a_tool_choice_reaches_the_provider(stub, provider):
     assert invocation.tool_choice is not None
     assert invocation.tool_choice.mode.value == "specific"
     assert invocation.tool_choice.name == "lookup"
+
+
+async def test_a_boolean_json_schema_reaches_the_provider_as_a_boolean():
+    # ``true`` is a complete JSON Schema — it admits every value — and the
+    # canonical record carries it as the boolean it is, not as an object with a
+    # claim inside it.
+    provider = MockProvider()
+    schema = Value()
+    schema.bool_value = True
+
+    async with serve(provider, registry=structured_output_registry()) as stub:
+        await stub.Invoke(
+            request(
+                generation_config=pb.GenerationConfig(
+                    response_format=pb.ResponseFormat(
+                        mode=pb.RESPONSE_FORMAT_MODE_JSON_SCHEMA, schema=schema
+                    )
+                )
+            ),
+            metadata=bearer(),
+        )
+
+    _, invocation, _ = provider.calls[0]
+    response_format = invocation.generation_config.response_format
+    assert response_format.mode.value == "json_schema"
+    assert response_format.schema is True
+
+
+async def test_a_json_schema_object_reaches_the_provider_as_it_was_given():
+    provider = MockProvider()
+    schema = Value()
+    schema.struct_value.update({"type": "object", "properties": {"name": {"type": "string"}}})
+
+    async with serve(provider, registry=structured_output_registry()) as stub:
+        await stub.Invoke(
+            request(
+                generation_config=pb.GenerationConfig(
+                    response_format=pb.ResponseFormat(
+                        mode=pb.RESPONSE_FORMAT_MODE_JSON_SCHEMA, schema=schema
+                    )
+                )
+            ),
+            metadata=bearer(),
+        )
+
+    _, invocation, _ = provider.calls[0]
+    assert invocation.generation_config.response_format.schema == {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+    }
+
+
+async def test_a_schema_that_is_neither_object_nor_boolean_is_refused():
+    # The canonical rule the contract now mirrors: a schema is an object or one
+    # of the two boolean schemas, and anything else — a string naming a shape,
+    # a number, an array — is refused rather than coerced.
+    provider = MockProvider()
+    schema = Value()
+    schema.string_value = "not-a-schema"
+
+    async with serve(provider) as stub:
+        with pytest.raises(grpc.aio.AioRpcError) as raised:
+            await stub.Invoke(
+                request(
+                    generation_config=pb.GenerationConfig(
+                        response_format=pb.ResponseFormat(
+                            mode=pb.RESPONSE_FORMAT_MODE_JSON_SCHEMA, schema=schema
+                        )
+                    )
+                ),
+                metadata=bearer(),
+            )
+
+    assert raised.value.code() is grpc.StatusCode.INVALID_ARGUMENT
+    assert provider.calls == []
 
 
 async def test_an_answer_carrying_an_image_is_translated():
@@ -433,6 +650,30 @@ async def test_the_usage_the_provider_reported_is_carried():
     assert response.usage.input_tokens == 25
     assert response.usage.output_tokens == 42
     assert response.usage.total_tokens == 67
+    # Every count was the provider's own, so none is named as an estimate.
+    assert list(response.usage.estimated_fields) == []
+
+
+async def test_an_estimated_count_is_named_as_one_on_the_wire():
+    # The provider reported the input and output counts and left the total to
+    # the gateway, so the total is an estimate: the answer names it, which is
+    # the only way a consumer can tell a reported count from a derived one.
+    provider = MockProvider(
+        MockSpec(
+            usage=Usage(
+                input_tokens=25,
+                output_tokens=42,
+                total_tokens=67,
+                estimated_fields=frozenset({"total_tokens"}),
+            )
+        )
+    )
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    assert response.usage.total_tokens == 67
+    assert response.usage.estimated_fields == [pb.USAGE_FIELD_TOTAL_TOKENS]
 
 
 async def test_attempt_count_is_one_when_the_primary_route_answered(stub):
@@ -470,7 +711,41 @@ async def test_a_raw_finish_reason_is_carried_beside_its_classification():
         response = await stub.Invoke(request(), metadata=bearer())
 
     assert response.finish_reason == pb.FINISH_REASON_UNKNOWN
+    assert response.HasField("raw_finish_reason")
     assert response.raw_finish_reason == "eos"
+
+
+async def test_an_absent_raw_finish_reason_arrives_absent():
+    # The provider reported no reason of its own, and the optional field says
+    # so by being absent: an empty string would assert the provider supplied a
+    # blank one, which is a different fact.
+    provider = ScriptedProvider(
+        InvocationResponse(
+            model=PUBLIC_MODEL,
+            upstream_model=PRIMARY_MODEL,
+            content=(TextPart(text="Explain recursion."),),
+            finish_reason=FinishReason.UNKNOWN,
+            raw_finish_reason=None,
+        )
+    )
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    assert response.finish_reason == pb.FINISH_REASON_UNKNOWN
+    assert not response.HasField("raw_finish_reason")
+
+
+async def test_an_empty_raw_finish_reason_is_kept_apart_from_an_absent_one():
+    # The provider did report a reason and it was the empty string: the field
+    # is present and empty, which is not the same statement as an absent one.
+    provider = MockProvider(MockSpec(finish_reason=FinishReason.STOP, raw_finish_reason=""))
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    assert response.HasField("raw_finish_reason")
+    assert response.raw_finish_reason == ""
 
 
 async def test_an_anonymous_call_can_claim_no_tenant():

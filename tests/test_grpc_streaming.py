@@ -338,8 +338,54 @@ class TestTheAnswerStream:
         last = chunks[-1]
         assert last.WhichOneof("payload") == "finish"
         assert last.finish.finish_reason == pb.FINISH_REASON_STOP
+        assert last.finish.HasField("raw_finish_reason")
         assert last.finish.raw_finish_reason == "stop"
         assert not last.HasField("usage")
+
+    async def test_a_finish_reporting_no_raw_reason_arrives_absent(self, serve):
+        # The provider reported no reason of its own, and the optional field
+        # says so by being absent: an empty string would assert the provider
+        # supplied a blank one, which is a different fact.
+        provider = ScriptedStreamProvider(
+            [
+                StreamEvent(
+                    kind=StreamEventKind.FINISH,
+                    sequence=0,
+                    invocation_id=INVOCATION_ID,
+                    finish_reason=FinishReason.STOP,
+                    raw_finish_reason=None,
+                )
+            ]
+        )
+        stub = await serve(provider)
+
+        chunks = await collect(stub, invoke_request(), metadata=authorization())
+
+        assert len(chunks) == 1
+        assert chunks[0].finish.finish_reason == pb.FINISH_REASON_STOP
+        assert not chunks[0].finish.HasField("raw_finish_reason")
+
+    async def test_a_finish_reporting_an_empty_raw_reason_keeps_it(self, serve):
+        # The provider did report a reason and it was the empty string: the
+        # field is present and empty, which is not the same statement as an
+        # absent one.
+        provider = ScriptedStreamProvider(
+            [
+                StreamEvent(
+                    kind=StreamEventKind.FINISH,
+                    sequence=0,
+                    invocation_id=INVOCATION_ID,
+                    finish_reason=FinishReason.STOP,
+                    raw_finish_reason="",
+                )
+            ]
+        )
+        stub = await serve(provider)
+
+        chunks = await collect(stub, invoke_request(), metadata=authorization())
+
+        assert chunks[0].finish.HasField("raw_finish_reason")
+        assert chunks[0].finish.raw_finish_reason == ""
 
     async def test_a_tool_call_arrives_as_a_fragment_naming_its_position(self, serve):
         provider = ScriptedStreamProvider(
@@ -367,7 +413,15 @@ class TestTheAnswerStream:
     async def test_a_usage_report_arrives_with_only_the_counts_that_are_known(self, serve):
         provider = ScriptedStreamProvider(
             [
-                usage_event(Usage(input_tokens=25, output_tokens=42, total_tokens=67), 0),
+                usage_event(
+                    Usage(
+                        input_tokens=25,
+                        output_tokens=42,
+                        total_tokens=67,
+                        estimated_fields=frozenset({"total_tokens"}),
+                    ),
+                    0,
+                ),
                 finish_event(sequence=1),
             ]
         )
@@ -379,6 +433,8 @@ class TestTheAnswerStream:
         assert usage.input_tokens == 25
         assert usage.output_tokens == 42
         assert usage.total_tokens == 67
+        # The total is the gateway's own arithmetic, and the answer names it.
+        assert usage.estimated_fields == [pb.USAGE_FIELD_TOTAL_TOKENS]
         # A count the provider never reported arrives absent, not as zero.
         assert not usage.HasField("cached_tokens")
 
