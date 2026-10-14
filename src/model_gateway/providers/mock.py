@@ -230,7 +230,7 @@ class MockProvider:
                 for index in range(len(request.input))
             ),
             usage=spec.usage,
-            invocation_id=request.invocation_id,
+            invocation_id=getattr(request, "invocation_id", None) or context.invocation_id or "",
         )
 
 

@@ -57,7 +57,7 @@ from model_gateway.domain import (
     ToolDefinition,
     Usage,
 )
-from model_gateway.domain.serialization import JsonValue
+from model_gateway.domain.json_value import JsonValue
 from model_gateway.domain.streaming import StreamEvent, StreamEventKind, ToolCallDelta
 from model_gateway.errors import InvalidArgumentError
 from model_gateway.grpc import gateway_pb2 as pb
@@ -359,15 +359,25 @@ def invocation_request_from_proto(request: pb.InvokeRequest, *, identity) -> Inv
 
 
 def embed_request_from_proto(request: pb.EmbedRequest) -> EmbeddingRequest:
-    """The canonical embeddings request a gRPC request asks for."""
-    return EmbeddingRequest(
-        model=request.model,
-        input=tuple(request.input),
-        dimensions=request.dimensions if request.HasField("dimensions") else None,
-        encoding_format=request.encoding_format or None,
-        user=request.user or None,
-        metadata=_struct_to_json(_mapping_to_struct(dict(request.metadata))),
-    )
+    """The canonical embeddings request a gRPC request asks for.
+
+    The canonical type's own validation — at least one input, no blank entry, a
+    positive ``dimensions``, an encoding the gateway answers — is a gateway rule
+    and not a protobuf one, so a failure is an invalid argument naming the rule
+    rather than an internal error. The HTTP embeddings endpoint applies the same
+    rule the same way.
+    """
+    try:
+        return EmbeddingRequest(
+            model=request.model,
+            input=tuple(request.input),
+            dimensions=request.dimensions if request.HasField("dimensions") else None,
+            encoding_format=request.encoding_format or None,
+            user=request.user or None,
+            metadata=_struct_to_json(_mapping_to_struct(dict(request.metadata))),
+        )
+    except ValueError as error:
+        raise InvalidArgumentError(f"the embeddings request is not valid: {error}") from error
 
 
 # --------------------------------------------------------------------------- #
