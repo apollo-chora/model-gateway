@@ -25,11 +25,15 @@ would serve the model; a fallback route the primary does not need is not evidenc
 the primary can do more. Its advertised limits are the ones the deployment
 configured for the operation (PRD sections 4.3, 6.1 and 6.3):
 ``TEXT_LLM_CONTEXT_WINDOW`` and ``TEXT_LLM_MAX_OUTPUT_TOKENS`` for the text
-operation, ``EMBEDDINGS_DIMENSIONS`` for the embeddings operation. Those settings
-are environment configuration rather than route fields, so they are read from the
-environment the registry was built from. An operation with no configured route is
-not listed at all, which is what makes an absent optional capability disabled
-rather than fatal to the others (PRD section 6).
+operation, which are environment configuration the route model does not carry
+and are read from the environment the registry was built from, and the declared
+embedding dimensionality for the embeddings operation, which is a property of
+the *primary route* (``EMBEDDINGS_DIMENSIONS``, or a ``dimensions`` entry on it),
+because the inference path checks every answer against the dimensionality of the
+route that produced it rather than against one operation-wide setting. An
+operation with no configured route is not listed at all, which is what makes an
+absent optional capability disabled rather than fatal to the others (PRD
+section 6).
 """
 
 import os
@@ -47,7 +51,6 @@ __all__ = ["PUBLIC_MODEL_IDS", "ModelInfo", "ModelRegistry"]
 
 _CONTEXT_WINDOW = "TEXT_LLM_CONTEXT_WINDOW"
 _MAX_OUTPUT_TOKENS = "TEXT_LLM_MAX_OUTPUT_TOKENS"
-_DIMENSIONS = "EMBEDDINGS_DIMENSIONS"
 
 PUBLIC_MODEL_IDS: Mapping[Operation, str] = MappingProxyType(
     {
@@ -84,6 +87,11 @@ class ModelInfo:
     An unconfigured limit is not a limit of zero: publishing zero would be a
     claim about a model that no configuration made, and PRD section 4.3's own
     example omits the fields it does not set.
+
+    ``dimensions`` is the dimensionality the primary route declares for the
+    embeddings operation, because the route is what an answer is checked
+    against; it is ``None`` when no route of the operation declares one, or when
+    the deployment declared no embeddings dimensionality.
     """
 
     id: str
@@ -96,15 +104,15 @@ class ModelInfo:
 
 @dataclass(frozen=True)
 class _Limits:
-    """The advertised limits of the configured operations (PRD sections 6.1 and 6.3).
+    """The text operation's advertised limits (PRD section 6.1).
 
     These are deployment settings the route model does not carry, so they are
-    read from the environment rather than derived from a route.
+    read from the environment rather than derived from a route. The embeddings
+    operation's dimensionality is not one of them: it is a route property.
     """
 
     context_window: int | None = None
     max_output_tokens: int | None = None
-    dimensions: int | None = None
 
 
 class ModelRegistry:
@@ -114,12 +122,12 @@ class ModelRegistry:
     route of an operation is its first configured route, and the rest are that
     operation's fallbacks (PRD section 11.2).
 
-    Construction from routes alone reads the advertised limits from the process
+    Construction from routes alone reads the text limits from the process
     environment, which is where a deployment's configuration lives; pass
-    :meth:`from_env` an environment mapping to read both the routes and the limits
-    from it instead. A malformed limit is rejected rather than guessed at, because
-    a value the gateway cannot read is a configuration error and PRD section 21
-    requires configuration errors to be detected at startup.
+    :meth:`from_env` an environment mapping to read both the routes and the text
+    limits from it instead. A malformed limit is rejected rather than guessed at,
+    because a value the gateway cannot read is a configuration error and PRD
+    section 21 requires configuration errors to be detected at startup.
     """
 
     def __init__(self, routes: tuple[Route, ...]) -> None:
@@ -133,11 +141,13 @@ class ModelRegistry:
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ModelRegistry":
         """Build the registry from ``env``, defaulting to the process environment.
 
-        Routes come from :func:`~model_gateway.config.routes.parse_routes`, and the
-        advertised limits come from the same environment they were configured in:
-        the limits are deployment configuration (PRD section 6), not route fields,
-        so when an environment mapping is supplied both are read from it rather
-        than from the process environment.
+        Routes come from :func:`~model_gateway.config.routes.parse_routes`, and
+        the text operation's advertised limits come from the same environment
+        they were configured in: those limits are deployment configuration
+        (PRD section 6), not route fields, so when an environment mapping is
+        supplied both are read from it rather than from the process environment.
+        The embeddings operation's advertised dimensionality is not read here at
+        all — it is a property of the parsed routes' primary route.
         """
         source = os.environ if env is None else env
         registry = cls(parse_routes(source))
@@ -196,12 +206,12 @@ class ModelRegistry:
             capabilities=routes[0].capabilities,
             context_window=limits.context_window if operation is Operation.TEXT else None,
             max_output_tokens=limits.max_output_tokens if operation is Operation.TEXT else None,
-            dimensions=limits.dimensions if operation is Operation.EMBEDDINGS else None,
+            dimensions=routes[0].dimensions if operation is Operation.EMBEDDINGS else None,
         )
 
 
 def _limits_from(env: Mapping[str, str]) -> _Limits:
-    """Read the advertised limits from ``env`` (PRD sections 6.1 and 6.3).
+    """Read the text operation's advertised limits from ``env`` (PRD section 6.1).
 
     A blank value means the deployment did not configure the limit, which is
     ``None`` and never zero. A value that is not a non-negative integer is a
@@ -210,7 +220,6 @@ def _limits_from(env: Mapping[str, str]) -> _Limits:
     return _Limits(
         context_window=_read_limit(env, _CONTEXT_WINDOW),
         max_output_tokens=_read_limit(env, _MAX_OUTPUT_TOKENS),
-        dimensions=_read_limit(env, _DIMENSIONS),
     )
 
 
