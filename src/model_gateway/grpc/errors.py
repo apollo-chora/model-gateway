@@ -55,13 +55,18 @@ def grpc_details(error: BaseException) -> str:
     return json.dumps(payload, separators=(",", ":"))
 
 
-def abort(context: grpc.ServicerContext, error: BaseException) -> None:
+async def abort(context: grpc.ServicerContext, error: BaseException) -> None:
     """Abort the call with the gateway error's own status and payload.
+
+    ``grpc.aio``'s ``abort`` is a coroutine, so it is awaited. Called without the
+    await it builds and discards the coroutine, the handler returns ``None`` and
+    the caller reads ``UNKNOWN`` instead of the category's status — the opposite of
+    what PRD section 5.4 requires.
 
     Raises gRPC's own abort error to terminate the handler; it returns nothing.
     """
     gateway_error = _as_gateway_error(error)
-    context.abort(
+    await context.abort(
         getattr(grpc.StatusCode, gateway_error.grpc_code.value),
         json.dumps(gateway_error.to_payload(include_details=True), separators=(",", ":")),
     )

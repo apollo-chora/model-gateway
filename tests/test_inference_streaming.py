@@ -25,6 +25,7 @@ from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import (
     FinishReason,
     InvocationRequest,
+    InvocationResponse,
     Message,
     Role,
     TextPart,
@@ -153,6 +154,30 @@ class ScriptedStreamProvider:
             yield item
 
 
+class NonStreamingProvider:
+    """A provider that completes but cannot stream.
+
+    It is the control case for the streaming capability rule: a provider with no
+    ``stream`` method at all is not a streaming provider, so the gateway refuses a
+    streaming request rather than answering it with a complete, non-streamed body
+    (PRD 16). :class:`MockProvider` can stream, so it no longer stands in for this
+    case — an accidental absence is not a premise a capability test should rest on.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Route, InvocationRequest, AttemptContext]] = []
+
+    async def complete(self, route, request, context):
+        self.calls.append((route, request, context))
+        return InvocationResponse(
+            model=request.model,
+            upstream_model=route.model_id,
+            invocation_id=request.invocation_id,
+            content=(TextPart(text="hello"),),
+            finish_reason=FinishReason.STOP,
+        )
+
+
 def service(routes: tuple[Route, ...], provider, **overrides) -> InferenceService:
     values = {
         "registry": ModelRegistry(routes),
@@ -171,7 +196,7 @@ class TestTheCapability:
     """Streaming is a separate capability, refused rather than faked (PRD 16)."""
 
     async def test_a_provider_that_cannot_stream_is_refused(self):
-        inference = service((route(),), MockProvider())
+        inference = service((route(),), NonStreamingProvider())
 
         with pytest.raises(CapabilityError) as error:
             await collect(inference.invoke_stream(request()))
@@ -183,7 +208,7 @@ class TestTheCapability:
     async def test_the_refusal_names_the_operation_and_reaches_no_provider(self):
         provider = ScriptedStreamProvider([])
         # A provider with no stream method at all is not a streaming provider.
-        inference = service((route(),), MockProvider())
+        inference = service((route(),), NonStreamingProvider())
 
         with pytest.raises(CapabilityError, match="cannot stream"):
             await collect(inference.invoke_stream(request()))
