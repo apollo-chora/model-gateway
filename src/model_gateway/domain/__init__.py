@@ -54,6 +54,13 @@ own; deciding which error category a caller sees belongs to the gateway core.
 """
 
 from model_gateway.domain.content import Message, Role
+from model_gateway.domain.embeddings import (
+    ENCODING_FORMATS,
+    Embedding,
+    EmbeddingRequest,
+    EmbeddingResponse,
+    as_embeddings,
+)
 from model_gateway.domain.generation import (
     FinishReason,
     GenerationConfig,
@@ -99,6 +106,10 @@ from model_gateway.domain.tools import (
 
 __all__ = [
     "ContentPart",
+    "ENCODING_FORMATS",
+    "Embedding",
+    "EmbeddingRequest",
+    "EmbeddingResponse",
     "FORWARDABLE_METADATA_KEYS",
     "FinishReason",
     "FrozenJsonObject",
@@ -127,6 +138,7 @@ __all__ = [
     "ToolResult",
     "Usage",
     "UsageSource",
+    "as_embeddings",
     "content_part_from_dict",
     "freeze_json",
     "output_item_from_dict",
