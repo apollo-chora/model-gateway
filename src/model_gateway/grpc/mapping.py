@@ -147,7 +147,7 @@ def _canonical_member(table: Mapping[int, Enum], where: str, value: int) -> Enum
 # Canonical JSON
 # --------------------------------------------------------------------------- #
 #
-# Arbitrary canonical JSON crosses the boundary as its JSON text, and the two
+# Arbitrary canonical JSON crosses the boundary as its JSON text, and the
 # helpers below are the whole of how. A well-known protobuf type was tried for
 # each of these fields and rejected: ``Struct`` and ``Value`` represent every
 # number as a double, so a JSON integer arrives as a float and one beyond 2^53 is
@@ -174,10 +174,9 @@ def _mapped(where: str, build: Callable[[], Any]) -> Any:
 def _json_object(where: str, payload: bytes) -> Mapping[str, JsonValue]:
     """A JSON object carried as text, or a refusal naming the rule.
 
-    A schema or a tool's parameters must be a JSON object; a boolean is the one
-    other shape a JSON Schema permits. Anything else — a bare number, a string, an
-    array, null — is refused rather than coerced, exactly as the canonical type
-    refuses it.
+    Metadata and a tool's parameters must be a JSON object. Anything else — a
+    bare number, a string, a boolean, an array, null — is refused rather than
+    coerced, exactly as the canonical type refuses it.
     """
     value = _mapped(where, lambda: orjson.loads(payload))
     if not isinstance(value, Mapping):
