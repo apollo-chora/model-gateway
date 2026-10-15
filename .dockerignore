@@ -1,0 +1,25 @@
+# What the image build must not carry (PRD section 19).
+#
+# The build copies only `pyproject.toml`, `uv.lock` and `src`, so none of this
+# would reach the image — but it would all reach the builder, and two entries are
+# worth naming for what they protect rather than for their size:
+#
+#   * `tests` and the caches are the development tree, and the image is not.
+#   * `.env*` are a deployment's credentials. They are excluded so that a stray
+#     `COPY . .` added later cannot put a secret in a layer, where removing it in a
+#     later layer would not remove it from the image.
+
+.venv
+.git
+.github
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+tests
+docs
+proto
+.env
+.env.*
+Dockerfile
+.dockerignore
