@@ -197,6 +197,28 @@ async def test_an_invocation_leaves_one_span_named_for_the_operation():
     assert spans[0].attributes["gateway.model"] == "text-default"
 
 
+async def test_an_invocation_leaves_a_span_that_is_actually_recorded():
+    """The span reaches an exporter, not just the current context.
+
+    A provider that is built but never installed as the process's still lets a
+    span be started and still gives it the right parent, but the span never
+    reaches an exporter — a deployment that asked for tracing would receive
+    nothing and would have no way to tell. This asserts the span is finished
+    and readable from an exporter.
+    """
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    service = _service(provider.get_tracer("model_gateway"))
+
+    await service.invoke(_request())
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].name == "invoke"
+    assert spans[0].attributes["gateway.model"] == "text-default"
+
+
 async def test_a_deployment_that_does_not_trace_still_serves():
     """No tracer is not a degraded mode: the API is a no-op, and the answer is the answer."""
     service = _service(None)
