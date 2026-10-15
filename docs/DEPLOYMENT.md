@@ -146,10 +146,20 @@ uv run pytest -m live
 It reads those variables from the environment rather than from a fixture, because
 the claim it tests is that the environment is the only configuration path: it builds
 the application with `create_app` and nothing injected, and asks it one real
-question. Adding `_2` to each variable configures a second provider, and the second
-test then demonstrates switching between them — the same code, a different
-environment.
+question.
 
-What it does not do is establish that the gateway is correct. That is what the
-deterministic suite is for; this establishes that configuration reaches a real
-provider, which is a different question and usually the first one an operator asks.
+Adding `_2` to each variable configures a second provider, and the second test then
+demonstrates switching between them — the same code, a different environment.
+
+**The two commands answer different questions, and a run that skips says which one it
+answered.** With one provider configured the first test runs and the second skips,
+naming the switch it did not exercise; so `1 passed, 1 skipped` means "this provider
+answers", not "the gateway switches providers". The switch is demonstrated only when
+both are configured and both pass. A provider configured *partially* — an endpoint
+with no credential, say — skips both tests and names the variables it is missing,
+rather than running and failing as though the provider had been reached.
+
+What the smoke test does not do is establish that the gateway is correct. That is
+what the deterministic suite is for; this establishes that configuration reaches a
+real provider, which is a different question and usually the first one an operator
+asks.

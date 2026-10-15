@@ -43,18 +43,6 @@ from blacksheep.testing import TestClient
 
 from model_gateway.app import create_app
 
-pytestmark = [
-    pytest.mark.live,
-    pytest.mark.skipif(
-        not os.environ.get("GATEWAY_LIVE_TEXT_ENDPOINT"),
-        reason=(
-            "no live provider is configured: set GATEWAY_LIVE_TEXT_ENDPOINT, "
-            "GATEWAY_LIVE_TEXT_MODEL_ID, GATEWAY_LIVE_TEXT_API_KEY and "
-            "GATEWAY_LIVE_TEXT_FORMAT to run this (see this module's docstring)"
-        ),
-    ),
-]
-
 _PROMPT = {
     "model": "text-default",
     "messages": [{"role": "user", "content": "Reply with the word ok."}],
@@ -71,14 +59,35 @@ _FIRST = {
 
 _SECOND = {variable: f"{live}_2" for variable, live in _FIRST.items()}
 
+_MISSING = sorted(live for live in _FIRST.values() if not os.environ.get(live))
 
-def _configure(monkeypatch: pytest.MonkeyPatch, source: dict[str, str]) -> None:
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        bool(_MISSING),
+        reason=(
+            "a live provider is not fully configured: set "
+            f"{', '.join(_MISSING)} to run this (see this module's docstring)"
+        ),
+    ),
+]
+"""Skipped unless the **whole** first provider is configured.
+
+The group matters rather than the endpoint alone: a run with an endpoint and no
+credential is a misconfiguration, and reporting it as a test that ran and failed
+would be worse than reporting it as the incomplete setup it is. The second
+provider is checked by the test that needs it, because requiring both here would
+hide the one-provider check behind the two-provider one.
+"""
+
+
+def _configure(monkeypatch: pytest.MonkeyPatch, source: dict[str, str], *, what: str) -> None:
     """Point the gateway's own variables at one live provider."""
+    missing = sorted(live for live in source.values() if not os.environ.get(live))
+    if missing:
+        pytest.skip(f"{', '.join(missing)} is not set, so {what} is not exercised")
     for variable, live in source.items():
-        value = os.environ.get(live)
-        if value is None:
-            pytest.skip(f"{live} is not set, so this provider cannot be exercised")
-        monkeypatch.setenv(variable, value)
+        monkeypatch.setenv(variable, os.environ[live])
 
 
 async def _one_answer() -> tuple[int, str]:
@@ -99,7 +108,7 @@ async def _one_answer() -> tuple[int, str]:
 
 async def test_a_configured_provider_answers_a_real_request(monkeypatch):
     """One provider, configured by environment alone, reached through the public API."""
-    _configure(monkeypatch, _FIRST)
+    _configure(monkeypatch, _FIRST, what="the configured provider")
 
     status, body = await _one_answer()
 
@@ -115,7 +124,7 @@ async def test_a_second_provider_configured_the_same_way_answers(monkeypatch):
     what "switched without recompilation" means when it is done for real rather than
     asserted about a mapping.
     """
-    _configure(monkeypatch, _SECOND)
+    _configure(monkeypatch, _SECOND, what="the switch between two providers")
 
     status, body = await _one_answer()
 
