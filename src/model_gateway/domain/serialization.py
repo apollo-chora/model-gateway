@@ -1,9 +1,9 @@
-"""Shared parsing vocabulary for the canonical domain types (PRD sections 5, 9.1).
+"""Shared parsing vocabulary for the canonical domain types.
 
 Every ``from_dict`` in this package reads its input through these helpers, so one
 rule holds across the whole package: a key the canonical type does not define is
 an error rather than something to ignore, and a value of the wrong JSON type is
-an error rather than something to coerce. That is PRD section 9.1 applied at the
+an error rather than something to coerce. That rule is applied at the
 boundary — a feature the gateway cannot represent fails loudly here instead of
 disappearing between the caller and the provider.
 
@@ -66,14 +66,14 @@ def as_object(where: str, value: object) -> Mapping[str, object]:
 
 
 def reject_unknown_keys(where: str, data: Mapping[str, object], allowed: frozenset[str]) -> None:
-    """Refuse a key the canonical type does not define (PRD section 9.1)."""
+    """Refuse a key the canonical type does not define."""
     unsupported = sorted(set(data) - allowed)
     if unsupported:
         supported = ", ".join(repr(key) for key in sorted(allowed))
         raise ValueError(
             f"{where} has unsupported key {unsupported[0]!r}; supported keys are {supported}. "
             f"An unrecognised field is a feature the gateway cannot represent, so it fails "
-            f"explicitly rather than being dropped (PRD section 9.1)"
+            f"explicitly rather than being dropped"
         )
 
 

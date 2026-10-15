@@ -1,12 +1,12 @@
-"""Canonical image generation request and response (PRD sections 4.6, 6.2, 9.6 and 13).
+"""Canonical image generation request and response.
 
 Image generation is the second of the gateway's three operations, and its
 canonical types follow the same rules as the other two: the request names a
 public model ID and carries the caller's parameters, the response reports the
 public ID beside the upstream model that served it, and both round-trip through
-``to_dict`` and ``from_dict`` with every field always emitted (PRD sections 4.6
-and 5.2). Nothing here names a vendor or a wire format — translating these types
-into a provider's image call is the LiteLLM binding's work (PRD section 9).
+``to_dict`` and ``from_dict`` with every field always emitted. Nothing here
+names a vendor or a wire format — translating these types
+into a provider's image call is the LiteLLM binding's work.
 
 **A generated image carries exactly one payload.** ``GeneratedImage.b64_json``
 is the image itself and ``GeneratedImage.url`` is where the caller may fetch it,
@@ -24,30 +24,30 @@ type's parsing because it is a non-empty string, not because the gateway screene
 it: nothing here resolves it, applies the URL policy to it, pins a connection to
 it or follows it. A caller fetches it on its own authority and under its own
 policy; the gateway must never treat it as a gateway-fetchable trusted URL. It is
-the mirror image of the remote image *input* the gateway refuses (PRD section
-9.5): an inbound ``image_url`` is rejected because the gateway cannot screen and
+the mirror image of the remote image *input* the gateway refuses:
+an inbound ``image_url`` is rejected because the gateway cannot screen and
 fetch it safely, and an outbound ``url`` is not thereby safe to fetch either —
 neither has passed the URL policy.
 
 **Only the documented parameter values are accepted.** ``size`` is the
 documented ``WxH`` form and ``response_format`` one of the two wire encodings
-the OpenAI-compatible image API defines, ``url`` and ``b64_json`` (PRD section
-4.6). A value outside either set is refused rather than dropped or defaulted,
+the OpenAI-compatible image API defines, ``url`` and ``b64_json``.
+A value outside either set is refused rather than dropped or defaulted,
 for the same reason the embeddings request refuses an undocumented encoding: a
 caller told its request was honoured while the gateway quietly substituted
-another size or another representation cannot tell the two apart (PRD section
-9.1). ``n`` is positive when stated, because a request for zero images is not a
+another size or another representation cannot tell the two apart.
+``n`` is positive when stated, because a request for zero images is not a
 request any provider could honour, and ``prompt`` must carry something, because
 an image generation request with nothing to generate from has no canonical
 representation.
 
 **What a route can do is the route's business, not this type's.** Whether a
 model supports generation alone or generation and editing is the ``generation``
-and ``editing`` capabilities its primary route declares (PRD section 6.2), and
+and ``editing`` capabilities its primary route declares, and
 that check belongs to the inference service and the model registry rather than
 to the canonical request. ``metadata`` is the caller's bookkeeping — routing
 hints, correlation and provenance attributes — held as an immutable JSON object
-and never forwarded to the model or the provider (PRD section 5.1).
+and never forwarded to the model or the provider.
 """
 
 import re
@@ -84,7 +84,7 @@ _RESPONSE_KEYS = frozenset(
 )
 
 IMAGE_RESPONSE_FORMATS: frozenset[str] = frozenset({"url", "b64_json"})
-"""The wire representations an image request may ask for (PRD section 4.6).
+"""The wire representations an image request may ask for.
 
 The gateway's image endpoint is OpenAI-compatible, and that API documents exactly
 two: ``url``, a location the caller fetches the image from — untrusted provider
@@ -92,7 +92,7 @@ output the gateway neither screens nor fetches, as :class:`GeneratedImage`
 documents — and ``b64_json``, the image itself base64-encoded. A request naming
 anything else is refused rather than silently answered in the gateway's own
 default, because a caller told its request was honoured while the gateway ignored
-the representation it asked for cannot tell the two apart (PRD section 9.1).
+the representation it asked for cannot tell the two apart.
 """
 
 _SIZE_PATTERN = re.compile(r"(\d+)x(\d+)")
@@ -100,7 +100,7 @@ _SIZE_PATTERN = re.compile(r"(\d+)x(\d+)")
 
 @dataclass(frozen=True)
 class GeneratedImage:
-    """One generated image, carried as its payload or as its location (PRD section 4.6).
+    """One generated image, carried as its payload or as its location.
 
     ``b64_json`` is the image itself, base64-encoded, and ``url`` is where the
     caller may fetch it. Exactly one of the two is set: they are alternatives in
@@ -117,8 +117,8 @@ class GeneratedImage:
     on its own authority and under its own policy; the gateway must not treat it
     as a gateway-fetchable trusted URL, and must not hand it to an operation that
     would fetch it on the gateway's behalf. This is the mirror image of the
-    remote image *input* the gateway refuses for exactly that reason (PRD section
-    9.5): an inbound ``image_url`` is rejected because the gateway cannot screen
+    remote image *input* the gateway refuses for exactly that reason:
+    an inbound ``image_url`` is rejected because the gateway cannot screen
     and fetch it safely, and an outbound ``url`` is not thereby safe to fetch
     either.
 
@@ -139,14 +139,14 @@ class GeneratedImage:
             raise ValueError(
                 "a generated image must carry either a 'b64_json' payload or a 'url'; this one "
                 "carries neither, so it is a result entry with no image in it and a caller "
-                "cannot tell which of the two to read (PRD section 4.6)"
+                "cannot tell which of the two to read"
             )
         if b64_json is not None and url is not None:
             raise ValueError(
                 "a generated image must carry either a 'b64_json' payload or a 'url', not both; "
                 "the two are alternatives in the shape this type mirrors, so a caller reading "
                 "one of them would be choosing between two answers the gateway never said were "
-                "the same image (PRD section 4.6)"
+                "the same image"
             )
 
         object.__setattr__(self, "b64_json", b64_json)
@@ -181,12 +181,11 @@ class GeneratedImage:
 
 @dataclass(frozen=True)
 class ImageRequest:
-    """One canonical image generation invocation (PRD sections 4.6 and 6.2).
+    """One canonical image generation invocation.
 
     ``model`` is the public model ID, never an upstream model name, for the same
     reason as an invocation request: the route resolver decides which upstream
-    serves it and a caller-supplied name must not reach an unconfigured endpoint
-    (PRD section 10).
+    serves it and a caller-supplied name must not reach an unconfigured endpoint.
 
     ``prompt`` is what the image is generated from and must carry something: an
     image request with nothing to generate from has no canonical representation.
@@ -202,7 +201,7 @@ class ImageRequest:
     same request as ``n=1``.
 
     ``metadata`` is non-sensitive request metadata held as an immutable JSON
-    object, never forwarded to the model or the provider (PRD section 5.1).
+    object, never forwarded to the model or the provider.
     """
 
     model: str
@@ -254,18 +253,18 @@ class ImageRequest:
 
 @dataclass(frozen=True)
 class ImageResponse:
-    """The canonical result of one image generation invocation (PRD sections 4.6 and 13).
+    """The canonical result of one image generation invocation.
 
     ``model`` is the public model ID the caller asked for and ``upstream_model``
     the route's own model ID, reported separately because a fallback may have
-    served it (PRD section 5.2). ``created`` is when the gateway assembled the
+    served it. ``created`` is when the gateway assembled the
     answer and is non-negative, because a negative timestamp is not a time any
     answer was produced at.
 
     ``data`` holds the generated images and must carry at least one: a response
     reporting that an image was generated and returning none of them is not an
-    answer to the request that was made. ``usage`` is the accounting of the call
-    (PRD section 13), and ``invocation_id`` the identifier of the invocation
+    answer to the request that was made. ``usage`` is the accounting of the call,
+    and ``invocation_id`` the identifier of the invocation
     this response belongs to, so a caller can reconcile the response with the
     request it sent.
     """
@@ -340,7 +339,7 @@ def _as_data(where: str, value: object) -> tuple[GeneratedImage, ...]:
         raise ValueError(
             f"{where} must carry at least one generated image; a response reporting that an "
             f"image was generated and returning none of them is not an answer to the request "
-            f"that was made (PRD section 4.6)"
+            f"that was made"
         )
     return items
 
@@ -356,7 +355,7 @@ def _as_size(where: str, value: object) -> str | None:
             f"{where} must be the documented 'WxH' form, for example '1024x1024'; got {size!r}. "
             f"A size outside that form is refused rather than dropped, because a caller told "
             f"its request was honoured while the gateway substituted another size cannot tell "
-            f"the two apart (PRD section 9.1)"
+            f"the two apart"
         )
     return size
 
@@ -372,7 +371,7 @@ def _as_response_format(where: str, value: object) -> str | None:
             f"{where} must be one of {supported}; got {response_format!r}. A representation "
             f"outside the documented set is refused rather than answered in the gateway's own "
             f"default, because a caller told its request was honoured while the gateway ignored "
-            f"the representation it asked for cannot tell the two apart (PRD section 9.1)"
+            f"the representation it asked for cannot tell the two apart"
         )
     return response_format
 

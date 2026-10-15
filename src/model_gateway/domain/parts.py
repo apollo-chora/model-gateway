@@ -1,4 +1,4 @@
-"""Canonical content parts (PRD sections 5.1, 9.1 and 9.4).
+"""Canonical content parts.
 
 A content part is one element of an ordered sequence. Three canonical types are
 such a sequence: a message is a role plus its parts, a tool result is the parts
@@ -60,7 +60,7 @@ CONTENT_PART_TYPES: frozenset[str] = frozenset({_TEXT, _IMAGE, _REFUSAL})
 
 @dataclass(frozen=True)
 class TextPart:
-    """A run of text inside a message (PRD section 9.4).
+    """A run of text inside a message.
 
     Empty text is allowed: a provider may legitimately report a text part with
     nothing in it, and refusing it would leave the gateway unable to represent a
@@ -85,14 +85,14 @@ class TextPart:
 
 @dataclass(frozen=True)
 class ImagePart:
-    """An image inside a message (PRD section 9.4).
+    """An image inside a message.
 
     Exactly one of ``data`` and ``url`` is set. ``data`` is the base64 payload
     exactly as supplied — the gateway passes it through and never decodes it.
     ``url`` is a remote URL the URL policy has already admitted; the gateway does
     not fetch it here, and the fetch, when it happens, is subject to the same
-    address pinning, redirect and size controls as any upstream call (PRD
-    sections 9.4 and 14.1). ``media_type`` is the image's media type, such as
+    address pinning, redirect and size controls as any upstream call.
+    ``media_type`` is the image's media type, such as
     ``image/png``, and ``None`` means the provider must infer it.
 
     A part carrying both a payload and a URL, or neither, is refused: those are
@@ -140,7 +140,7 @@ class ImagePart:
 
 @dataclass(frozen=True)
 class RefusalPart:
-    """A provider's refusal to answer, kept apart from ordinary text (PRD 5.2, 9.1).
+    """A provider's refusal to answer, kept apart from ordinary text.
 
     A provider that declines on safety grounds says so, and a model that answers
     with text saying much the same thing is a different event: the first is the
@@ -189,7 +189,7 @@ def content_part_from_dict(data: object) -> ContentPart:
     The discriminator is what makes a part unambiguous on the wire. A part whose
     type the gateway does not know cannot be represented and is refused rather
     than skipped, because a dropped part silently changes the message the model
-    sees (PRD section 9.1).
+    sees.
     """
     where = "content part"
     payload = as_object(where, data)
@@ -207,7 +207,7 @@ def content_part_from_dict(data: object) -> ContentPart:
     supported = ", ".join(repr(item) for item in sorted(CONTENT_PART_TYPES))
     raise ValueError(
         f"{where} has type {kind!r}, which the canonical content representation does not "
-        f"define; supported types are {supported} (PRD section 9.1)"
+        f"define; supported types are {supported}"
     )
 
 

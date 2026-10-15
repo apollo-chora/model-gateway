@@ -1,7 +1,7 @@
-"""Canonical conversation turns: roles and messages (PRD sections 4.4, 5.1, 9.4).
+"""Canonical conversation turns: roles and messages.
 
 A message is a role plus an ordered sequence of content parts, so one message can
-carry text and images together (PRD section 9.4). The parts themselves live in
+carry text and images together. The parts themselves live in
 :mod:`model_gateway.domain.parts`, because a message is not their only home: a
 tool result and a model's output are ordered part sequences too.
 
@@ -36,12 +36,12 @@ _MESSAGE_KEYS = frozenset({"role", "content", "name", "tool_calls", "tool_call_i
 
 
 class Role(StrEnum):
-    """The author of a message (PRD section 4.4).
+    """The author of a message.
 
     The vocabulary is the gateway's own. A role it does not recognise cannot be
     carried into a message at all, because there is no canonical way to present
     it to a provider and inventing one would change the conversation the caller
-    asked for (PRD section 9.1).
+    asked for.
     """
 
     SYSTEM = "system"
@@ -53,14 +53,14 @@ class Role(StrEnum):
 
 @dataclass(frozen=True)
 class Message:
-    """One turn of a conversation (PRD sections 4.4 and 5.1).
+    """One turn of a conversation.
 
     ``tool_calls`` belongs to an assistant message, the only role that proposes a
     call, and ``tool_call_id`` belongs to a tool message, the only role that
     answers one — and a tool message must carry it, because a result that cannot
     be matched to its call is not a result. Both rules are enforced here so that
     an inconsistent conversation fails at construction rather than upstream,
-    where the provider's complaint would be less specific (PRD section 9.3).
+    where the provider's complaint would be less specific.
 
     ``content`` is an ordered sequence of content parts. It may be empty: a
     provider may report an assistant turn whose only content is a tool call, and
@@ -87,17 +87,17 @@ class Message:
         if tool_calls and role is not Role.ASSISTANT:
             raise ValueError(
                 f"a {role.value!r} message cannot carry tool calls; only an assistant message "
-                f"proposes a call (PRD section 9.3)"
+                f"proposes a call"
             )
         if tool_call_id is not None and role is not Role.TOOL:
             raise ValueError(
                 f"a {role.value!r} message cannot carry a tool call id; only a tool message "
-                f"answers a call (PRD section 9.3)"
+                f"answers a call"
             )
         if role is Role.TOOL and tool_call_id is None:
             raise ValueError(
                 "a tool message must carry the 'tool_call_id' it answers; a result that cannot "
-                "be matched to its call cannot be represented (PRD section 9.3)"
+                "be matched to its call cannot be represented"
             )
 
         object.__setattr__(self, "role", role)

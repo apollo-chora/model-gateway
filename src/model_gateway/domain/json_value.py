@@ -1,4 +1,4 @@
-"""Immutable, hashable JSON values for the canonical domain types (PRD sections 5, 9.1).
+"""Immutable, hashable JSON values for the canonical domain types.
 
 Tool schemas, tool arguments and request metadata are arbitrary JSON. The
 canonical types are frozen dataclasses, but a frozen dataclass holding a plain
@@ -15,7 +15,7 @@ is what lets the dataclasses holding one be hashable too.
 Anything JSON cannot carry — a set, a ``bytes`` payload, a ``datetime``, a
 non-string key, a NaN — is rejected rather than coerced. The canonical
 representation has no way to hold it, and a silent coercion would be exactly the
-loss PRD section 9.1 forbids.
+loss this package forbids.
 """
 
 import math
@@ -83,7 +83,7 @@ def freeze_json(where: str, value: object) -> JsonValue:
         return tuple(freeze_json(f"{where}[{index}]", item) for index, item in enumerate(value))
     raise ValueError(
         f"{where} is a {type(value).__name__}, which the canonical JSON representation cannot "
-        f"carry; encode it as JSON before it reaches the domain layer (PRD section 9.1)"
+        f"carry; encode it as JSON before it reaches the domain layer"
     )
 
 

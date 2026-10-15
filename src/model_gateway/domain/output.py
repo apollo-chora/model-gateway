@@ -1,4 +1,4 @@
-"""Canonical model output as an ordered sequence of items (PRD 5.2, 9.1, 9.3 and 9.4).
+"""Canonical model output as an ordered sequence of items.
 
 A model emits its answer in order, and the order carries meaning: text, then an
 image, then more text is not the same response as both texts followed by the
@@ -16,7 +16,7 @@ comes from, so the restriction on where a refusal may appear is enforced by the
 containers that are not the model's own output, not here.
 
 An item whose type the gateway does not know is refused rather than skipped: a
-dropped item changes the answer the caller receives (PRD section 9.1).
+dropped item changes the answer the caller receives.
 """
 
 from model_gateway.domain.json_value import JsonDocument
@@ -76,7 +76,7 @@ def output_item_from_dict(data: object) -> OutputItem:
     supported = ", ".join(repr(item) for item in sorted(_OUTPUT_ITEM_TYPES))
     raise ValueError(
         f"{where} has type {kind!r}, which the canonical output representation does not "
-        f"define; supported types are {supported} (PRD section 9.1)"
+        f"define; supported types are {supported}"
     )
 
 

@@ -1,4 +1,4 @@
-"""Canonical streaming events: the gateway's own representation of a streamed answer (PRD 5.3, 16).
+"""Canonical streaming events: the gateway's own representation of a streamed answer.
 
 The canonical request and response describe an invocation that has finished. A
 streamed invocation also needs a type for the pieces that arrive before it has:
@@ -6,7 +6,7 @@ a text fragment, a fragment of a tool call, a usage report, the reason
 generation stopped, and the failure that ends a stream which has already
 produced output. This module is that type, and nothing else — it knows no
 provider wire format and no vendor vocabulary, so translating a provider's
-streaming chunks into these events is the LiteLLM binding's work (PRD section 9).
+streaming chunks into these events is the LiteLLM binding's work.
 
 The same three properties hold here as in the rest of the canonical package.
 
@@ -17,7 +17,7 @@ cannot change into a different one afterwards.
 and ``to_dict`` always emits every field, so the shape is pinned rather than
 implied.
 
-**Explicit about what it cannot represent (PRD section 9.1).** An event whose
+**Explicit about what it cannot represent.** An event whose
 kind and payload do not agree — a ``content`` event without text, a ``finish``
 event without a reason — is refused rather than silently truncated, for the
 same reason the rest of the package refuses an unrepresentable state.
@@ -36,12 +36,10 @@ has delivered its first event ends in exactly one of two ways, and each has an
 event of its own.
 
 * ``StreamEventKind.FINISH`` ends a stream that **completed**. It is the only
-  event carrying a finish reason, and it reports why generation stopped (PRD
-  section 5.3).
+  event carrying a finish reason, and it reports why generation stopped.
 * ``StreamEventKind.ERROR`` ends a stream that **failed** after it had already
   produced output. It carries the gateway's own stable reason and its sanitised
-  message, and no finish reason, because the provider did not finish (PRD
-  sections 5.4 and 16).
+  message, and no finish reason, because the provider did not finish.
 
 Nothing follows either one: a terminal event is the last event of the stream it
 ends, so a stream contains at most one. A stream that reaches neither simply
@@ -52,8 +50,8 @@ stopped — which is deliberately not the same as a completed answer.
 **A failure is its own kind, not a finish reason.** The obvious alternative —
 emit ``FINISH`` with ``FinishReason.UNKNOWN`` and put the failure's reason in
 ``raw_finish_reason`` — is refused here, and the reason is the point of the
-split. ``raw_finish_reason`` means *the provider's own finish reason, verbatim*
-(PRD section 5.2), so parking a gateway reason such as ``provider_unavailable``
+split. ``raw_finish_reason`` means *the provider's own finish reason, verbatim*,
+so parking a gateway reason such as ``provider_unavailable``
 in it would overload a field that belongs to a different vocabulary with a value
 from a namespace the provider never used. It would also present a gateway
 failure as a finish reason to every consumer of the OpenAI-compatible shape the
@@ -88,7 +86,7 @@ __all__ = [
 
 
 class StreamEventKind(StrEnum):
-    """What one streaming event reports (PRD sections 5.3 and 16).
+    """What one streaming event reports.
 
     The vocabulary is the gateway's own. A provider's chunk shape does not
     decide it: a chunk carrying nothing reportable produces no event at all, and
@@ -97,13 +95,13 @@ class StreamEventKind(StrEnum):
 
     * ``CONTENT`` — a fragment of generated text.
     * ``TOOL_CALL`` — a fragment of a tool call: its identifier, its name, or a
-      piece of its arguments (PRD section 16).
+      piece of its arguments.
     * ``USAGE`` — a token report, on the chunk the provider chose to send it.
     * ``FINISH`` — the terminal event of a stream that completed. The reason
-      generation stopped (PRD section 5.3).
+      generation stopped.
     * ``ERROR`` — the terminal event of a stream that failed after it had
       produced output. The gateway's own stable reason and its sanitised
-      message (PRD sections 5.4 and 16).
+      message.
 
     ``FINISH`` and ``ERROR`` are terminal in the ordering sense as well: each is
     the last event of the stream it ends, because nothing the provider says after
@@ -121,7 +119,7 @@ class StreamEventKind(StrEnum):
 
 @dataclass(frozen=True)
 class ToolCallDelta:
-    """One fragment of a tool call as it arrives (PRD sections 5.3, 9.3 and 16).
+    """One fragment of a tool call as it arrives.
 
     A tool call does not arrive whole. The first chunk that mentions it carries
     its identifier and its name; the ones after it carry fragments of its
@@ -203,7 +201,7 @@ _EVENT_KEYS = frozenset(
 # the kind names the payload, and a second one is a different event rather than
 # a larger one. ``raw_finish_reason`` alone is auxiliary beside ``finish_reason``,
 # because the provider's own reason is only meaningful beside the classification
-# of it (PRD section 9.1); ``error_message`` is auxiliary beside ``error_reason``,
+# of it; ``error_message`` is auxiliary beside ``error_reason``,
 # because the reason is what a caller switches on and the message only explains
 # it. The two terminal kinds allow nothing else, and in particular neither
 # allows the other's payload: a finish reason classifies *why generation
@@ -230,7 +228,7 @@ _PAYLOAD_FIELDS = (
 
 @dataclass(frozen=True)
 class StreamEvent:
-    """One event of a streamed invocation (PRD sections 5.3 and 16).
+    """One event of a streamed invocation.
 
     ``kind`` says what the event reports, and the event carries exactly that
     payload: a ``content`` event its ``text``, a ``tool_call`` event its
@@ -244,7 +242,7 @@ class StreamEvent:
     is the provider's own reason verbatim, kept beside it exactly as the
     canonical response keeps the two apart, so an unrecognised reason states
     plainly that the gateway did not classify it without the gateway having
-    deleted what upstream said (PRD sections 5.2 and 9.1). Both belong to a
+    deleted what upstream said. Both belong to a
     ``finish`` event alone.
 
     An absent raw reason and an empty one are different facts, and the event
@@ -254,8 +252,8 @@ class StreamEvent:
     about whether the provider said anything.
 
     ``error_reason`` and ``error_message`` belong to an ``error`` event alone,
-    and they are the failure's own vocabulary rather than a finish reason's
-    (PRD sections 5.4 and 16). ``error_reason`` is the gateway's stable
+    and they are the failure's own vocabulary rather than a finish reason's.
+    ``error_reason`` is the gateway's stable
     machine-readable reason — the value of
     :class:`~model_gateway.errors.ErrorReason` for the failure that ended the
     stream — and is what a consumer switches on. ``error_message`` is the same
@@ -423,7 +421,7 @@ def _check_payload(
     error_reason: str | None,
     error_message: str | None,
 ) -> None:
-    """Refuse a kind that does not agree with the payload it carries (PRD section 9.1).
+    """Refuse a kind that does not agree with the payload it carries.
 
     The payload the kind names must be present, because a ``content`` event with
     no text reports nothing while claiming to report content, and a terminal

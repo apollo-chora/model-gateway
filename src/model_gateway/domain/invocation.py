@@ -1,22 +1,22 @@
-"""Canonical invocation request and response (PRD sections 4.4, 5.1, 5.2, 12 and 13).
+"""Canonical invocation request and response.
 
 These two types are the gateway core's own contract: what it accepts from a
 caller and what it reports back. Both are written in the gateway's vocabulary —
 public model IDs, canonical content, canonical finish reasons — and neither
 carries a provider's wire format. Mapping either side onto LiteLLM is the
-binding's work (PRD section 9).
+binding's work.
 
 A response reports more than the model's answer. It says which upstream model
 actually served it, how many provider attempts that took, whether a fallback was
 used, what happened to any idempotency key, and what the call cost. A caller that
 cannot see those cannot reconcile its own accounting, nor tell a first attempt
-from a rescued one (PRD sections 5.2, 11.2, 12 and 13).
+from a rescued one.
 
 The answer itself is an ordered sequence of output items rather than a text field
 beside an image field, and the finish reason is reported beside the provider's own
 untranslated reason. Both exist for the same reason: a canonical state that cannot
 distinguish two different upstream events has already lost information by the time
-a caller sees it (PRD sections 5.2 and 9.1).
+a caller sees it.
 """
 
 from collections.abc import Callable, Mapping
@@ -125,7 +125,7 @@ FORWARDABLE_METADATA_KEYS: frozenset[str] = frozenset()
 
 It is empty: no feature consumes metadata today, so no metadata reaches a model
 or a provider, and a key belongs here only once the feature that consumes it has
-its own specification. PRD section 5.1 defines ``metadata`` as request metadata,
+its own specification. ``metadata`` is request metadata,
 and treating it as a forwarding channel by default is what would turn it into a
 way to smuggle an unrepresentable semantic upstream.
 """
@@ -143,7 +143,7 @@ _OPTIONAL_TEXT = (
 
 
 class ResponseModality(StrEnum):
-    """The kind of output the caller asked for (PRD section 5.1)."""
+    """The kind of output the caller asked for."""
 
     TEXT = "text"
     IMAGE = "image"
@@ -151,7 +151,7 @@ class ResponseModality(StrEnum):
 
 
 class IdempotencyStatus(StrEnum):
-    """What the gateway did about a repeated invocation (PRD sections 5.2 and 12).
+    """What the gateway did about a repeated invocation.
 
     * ``NOT_APPLICABLE`` — the invocation carried no idempotency key, so
       deduplication was never in play.
@@ -161,8 +161,8 @@ class IdempotencyStatus(StrEnum):
       calling the provider again.
     * ``INDETERMINATE`` — the gateway cannot say whether the provider executed
       the request. That is the honest answer after a timeout against a provider
-      with no idempotency support, and PRD section 12 forbids claiming
-      exactly-once execution in that case.
+      with no idempotency support, and claiming exactly-once execution in that
+      case is forbidden.
 
     A key reused with a different payload is not a replay: the fingerprint differs,
     so the second request is served as ``NEW`` and the provider is called again,
@@ -179,23 +179,23 @@ class IdempotencyStatus(StrEnum):
 
 @dataclass(frozen=True)
 class InvocationRequest:
-    """One canonical inference invocation (PRD sections 4.4, 5.1 and 12).
+    """One canonical inference invocation.
 
     ``model`` is the public model ID, never an upstream model name: callers name
     one of the gateway's fixed logical models and the route resolver decides
-    which upstream serves it (PRD section 10). Caller-supplied model names must
+    which upstream serves it. Caller-supplied model names must
     not be able to reach an unconfigured endpoint, so the canonical request
     carries the public ID and nothing else.
 
-    ``system_instruction`` is the invocation-level instruction of PRD section
-    5.1. A ``Role.SYSTEM`` message inside ``messages`` is the conversation-level
+    ``system_instruction`` is the invocation-level instruction.
+    A ``Role.SYSTEM`` message inside ``messages`` is the conversation-level
     equivalent, and the two are not interchangeable: the gateway forwards both
     and merges neither, because silently folding one into the other would change
-    what the provider sees (PRD section 9.1).
+    what the provider sees.
 
     ``fallback_models`` names the public model IDs the caller permits as
     fallbacks. An empty tuple means the caller imposes no restriction and the
-    configured route order applies (PRD section 11.2).
+    configured route order applies.
 
     ``metadata`` is non-sensitive request metadata and nothing more. It is
     arbitrary JSON held as an immutable mapping, so a validated request cannot
@@ -204,7 +204,7 @@ class InvocationRequest:
     Two rules bound what it may carry. Both are enforced here rather than left as
     prose, because a semantic parked in metadata is a semantic the gateway
     neither represents nor forwards, and it would disappear between the caller
-    and the provider exactly as a dropped parameter does (PRD section 9.1):
+    and the provider exactly as a dropped parameter does:
 
     * It is never forwarded to the model or the provider unless a separately
       specified feature consumes a key. No feature does today, so the binding
@@ -346,16 +346,15 @@ class InvocationRequest:
 
 @dataclass(frozen=True)
 class InvocationResponse:
-    """The canonical result of one invocation (PRD sections 4.4, 5.2 and 13).
+    """The canonical result of one invocation.
 
     ``model`` is the public model ID the caller asked for, and ``upstream_model``
     is the route's own model ID — the one that actually served the request. The
     two are reported separately because a fallback may have served it, and a
     caller that cannot tell which upstream answered cannot reconcile its own
-    accounting (PRD sections 5.2 and 11.2). ``upstream_model`` is the route's
+    accounting. ``upstream_model`` is the route's
     configured model ID, not the provider-prefixed ``<format>/<model_id>`` string
-    the binding builds, because the provider format is a binding detail
-    (PRD section 9.6).
+    the binding builds, because the provider format is a binding detail.
 
     ``content`` is the model's answer as an ordered sequence of output items, and
     it is the only place the answer is stored. Text, images, refusals and tool
@@ -382,12 +381,11 @@ class InvocationResponse:
     route was anything other than the first configured one", which was also
     true whenever capability routing passed the primary over. Capability
     routing can never set this flag: the registry advertises the primary route's
-    capabilities as the public model's own (PRD section 4.3), so a request the
-    primary cannot honour is refused rather than routed elsewhere (PRD section
-    9.5).
+    capabilities as the public model's own, so a request the
+    primary cannot honour is refused rather than routed elsewhere.
 
     ``estimated_cost`` and ``cost_currency`` come from configured pricing data
-    (PRD section 13) and are ``None`` when cost tracking is off or no price is
+    and are ``None`` when cost tracking is off or no price is
     configured for the route; ``None`` never means zero. An amount is always
     reported with the currency it is denominated in, so a figure is never
     ambiguous.
@@ -528,7 +526,7 @@ class InvocationResponse:
 
 
 def _check_tool_choice(tool_choice: ToolChoice | None, tools: tuple[ToolDefinition, ...]) -> None:
-    """Refuse a tool choice the declared tools cannot satisfy (PRD section 9.5)."""
+    """Refuse a tool choice the declared tools cannot satisfy."""
     if tool_choice is None or tool_choice.mode in (ToolChoiceMode.AUTO, ToolChoiceMode.NONE):
         return
     if not tools:
@@ -550,7 +548,7 @@ def _as_finish_reason(value: object) -> FinishReason:
 
     A provider reason the gateway does not know is not an error: it is mapped to
     ``UNKNOWN`` so the field still says something true, rather than being dropped
-    or turned into a failure (PRD section 5.2). A value that is not a string at
+    or turned into a failure. A value that is not a string at
     all is malformed input, and is refused.
     """
     if isinstance(value, FinishReason):
@@ -566,7 +564,7 @@ def _as_raw_finish_reason(value: object) -> str | None:
     The value is kept exactly as the provider supplied it, including an empty
     string. The difference between "the provider said nothing" and "the provider
     said something the gateway could not classify" is the whole reason for
-    keeping it, and a verbatim record is not something to tidy up (PRD 5.2).
+    keeping it, and a verbatim record is not something to tidy up.
     """
     if value is None:
         return None
@@ -581,7 +579,7 @@ def _check_finish_reason(finish_reason: FinishReason, raw: str | None) -> None:
     which of the two to believe. A raw reason the vocabulary does not recognise
     is left to the binding's own judgement — including ``UNKNOWN``, which is the
     honest answer when the gateway has not been taught the reason — and ``None``
-    means the provider supplied none (PRD section 5.2).
+    means the provider supplied none.
     """
     if raw is None:
         return
@@ -595,7 +593,7 @@ def _check_finish_reason(finish_reason: FinishReason, raw: str | None) -> None:
 
 
 def _check_metadata_keys(metadata: Mapping[str, JsonValue]) -> None:
-    """Refuse metadata that names a canonical field (PRD section 9.1).
+    """Refuse metadata that names a canonical field.
 
     Metadata is non-inference-semantic. A key that spells a canonical invocation
     or generation parameter is an attempt to carry a model parameter outside the
@@ -607,8 +605,7 @@ def _check_metadata_keys(metadata: Mapping[str, JsonValue]) -> None:
         raise ValueError(
             f"metadata key {reserved[0]!r} is a canonical invocation field name; metadata is "
             f"non-inference-semantic and is never forwarded to a model or provider, so a model "
-            f"parameter parked there is a semantic the gateway neither represents nor sends "
-            f"(PRD section 9.1)"
+            f"parameter parked there is a semantic the gateway neither represents nor sends"
         )
 
 

@@ -1,11 +1,11 @@
-"""Canonical, vendor-neutral domain types (PRD sections 4, 5, 9.3, 9.4 and 13).
+"""Canonical, vendor-neutral domain types.
 
 This package is the gateway's own representation of an inference invocation: the
 request, the response, the conversation they carry, and the accounting they
 produce. It is deliberately independent of every provider wire format — no field
 here is named after a vendor, and nothing here knows how a provider spells a
 role, a content block or a finish reason. Translating between this
-representation and a provider's is the LiteLLM binding's work (PRD section 9),
+representation and a provider's is the LiteLLM binding's work,
 and this package must stay out of it.
 
 Three properties hold for every type here.
@@ -26,12 +26,12 @@ shape is pinned rather than implied, and ``from_dict`` accepts exactly that
 shape. The fixtures under ``tests/fixtures/canonical/`` pin a representative
 request and response to that shape.
 
-**Explicit about what it cannot represent (PRD section 9.1).** A key the
+**Explicit about what it cannot represent.** A key the
 canonical type does not define, a value of the wrong JSON type, a content part
 with an unknown discriminator, a message role outside the canonical vocabulary,
 an image part carrying neither data nor a URL, a structured-output mode without
 the schema it requires, a value JSON cannot carry at all — each raises
-``ValueError`` instead of being ignored. The rule is the PRD's: *a feature the
+``ValueError`` instead of being ignored. The rule: *a feature the
 gateway cannot represent must fail explicitly rather than being silently
 dropped.* A parameter that quietly disappears between the caller and the
 provider is worse than a rejected request, because the caller is told the request
@@ -46,7 +46,7 @@ could not classify what it said" has already lost information.
 The one deliberate exception is ``FinishReason``: an unrecognised provider reason
 maps to ``FinishReason.UNKNOWN`` rather than failing, because the field must
 always carry a value and ``UNKNOWN`` states plainly that the gateway did not
-recognise the reason (PRD sections 5.2 and 9.1). The raw reason is preserved
+recognise the reason. The raw reason is preserved
 beside it, so ``UNKNOWN`` never means the gateway threw the reason away.
 
 The domain layer raises builtin ``ValueError`` and defines no error type of its

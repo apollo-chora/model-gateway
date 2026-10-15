@@ -1,10 +1,10 @@
-"""Canonical tool calling: declarations, calls, results and choice (PRD section 9.3).
+"""Canonical tool calling: declarations, calls, results and choice.
 
 The gateway declares tools and relays calls; it never executes one. A tool call
 is a request from the model, and the caller — or a trusted executor the caller
-registered — decides whether and how to run it (PRD section 9.3). Nothing in this
+registered — decides whether and how to run it. Nothing in this
 module has an opinion about how a provider spells a tool, which is LiteLLM's
-work (PRD section 9).
+work.
 
 A call's arguments are kept in the form the provider reported them: a parsed JSON
 object when they parsed, the raw string when they did not, and ``None`` when the
@@ -61,7 +61,7 @@ _CHOICE_KEYS = frozenset({"mode", "name"})
 
 
 class ToolChoiceMode(StrEnum):
-    """How the model may use the tools an invocation declares (PRD section 9.3)."""
+    """How the model may use the tools an invocation declares."""
 
     AUTO = "auto"
     NONE = "none"
@@ -71,7 +71,7 @@ class ToolChoiceMode(StrEnum):
 
 @dataclass(frozen=True)
 class ToolDefinition:
-    """A tool the caller declares for an invocation (PRD section 9.3).
+    """A tool the caller declares for an invocation.
 
     ``parameters`` is the JSON Schema for the tool's arguments, stored as the
     caller supplied it and never rewritten: a schema the gateway had filled in
@@ -79,7 +79,7 @@ class ToolDefinition:
     mapping means the tool takes no arguments.
 
     Declaring a tool authorises nothing. It tells the model what exists; the
-    gateway still must not execute what the model asks for (PRD section 9.3).
+    gateway still must not execute what the model asks for.
     """
 
     name: str
@@ -116,7 +116,7 @@ class ToolDefinition:
 
 @dataclass(frozen=True)
 class ToolCall:
-    """A call the model proposed (PRD section 9.3).
+    """A call the model proposed.
 
     ``arguments`` is the parsed JSON object when the provider supplied
     well-formed arguments, and the raw string when it did not: the gateway
@@ -125,7 +125,7 @@ class ToolCall:
     ``None`` means the provider reported no arguments at all, which is not the
     same as ``{}`` — the arguments of a tool that takes none.
 
-    The gateway does not execute this call (PRD section 9.3); it returns the call
+    The gateway does not execute this call; it returns the call
     so that the caller, or a trusted executor, can.
     """
 
@@ -163,7 +163,7 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class ToolResult:
-    """The outcome a tool call produced (PRD section 9.3).
+    """The outcome a tool call produced.
 
     ``content`` is an ordered sequence of content parts — the same
     representation a message carries — so a tool that returns an image, or text
@@ -171,8 +171,8 @@ class ToolResult:
     text. The gateway does not execute tools and so never produces this record
     itself; it exists so that a trusted executor's result has a canonical form,
     and widening it now costs nothing while leaving it as ``str`` would
-    knowingly require a migration as soon as a tool returns something else
-    (PRD section 9.4). A tool result cannot carry a refusal part: a tool that
+    knowingly require a migration as soon as a tool returns something else.
+    A tool result cannot carry a refusal part: a tool that
     failed says so through ``is_error``, and a tool cannot issue a model refusal.
 
     ``is_error`` records a failed execution as a result rather than as an
@@ -232,7 +232,7 @@ class ToolResult:
 
 @dataclass(frozen=True)
 class ToolChoice:
-    """The caller's tool-choice policy (PRD section 9.3).
+    """The caller's tool-choice policy.
 
     ``NONE`` means tools may be declared but must not be called. It is not the
     same as sending no choice at all, which is ``None`` on the invocation and
@@ -242,7 +242,7 @@ class ToolChoice:
 
     ``SPECIFIC`` names the one tool the model must call, and that name must be
     one of the tools the invocation declares — a choice naming an undeclared tool
-    is not a request any provider could honour (PRD section 9.5).
+    is not a request any provider could honour.
     """
 
     mode: ToolChoiceMode = ToolChoiceMode.AUTO

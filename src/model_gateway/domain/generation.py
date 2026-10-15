@@ -1,4 +1,4 @@
-"""Canonical generation parameters, output shape, finish reasons and usage (PRD 4.4, 5.1, 5.2, 13).
+"""Canonical generation parameters, output shape, finish reasons and usage.
 
 These are the things an invocation says about a model's behaviour rather than
 about its content: how it was asked to sample, what shape its answer must take,
@@ -56,14 +56,14 @@ _USAGE_COUNTS = ("input_tokens", "output_tokens", "total_tokens", "cached_tokens
 
 
 class FinishReason(StrEnum):
-    """Why generation stopped (PRD sections 4.4 and 5.2).
+    """Why generation stopped.
 
     The vocabulary is the gateway's own, not any provider's. A reason the gateway
     does not recognise — including a provider that reports none at all — becomes
     ``UNKNOWN``: the response always states a finish reason, and ``UNKNOWN``
     states plainly that the gateway could not classify it. Dropping the field
     instead would leave a caller unable to tell "the model finished" from "the
-    gateway lost the reason" (PRD section 9.1).
+    gateway lost the reason".
 
     ``UNKNOWN`` is a classification, not a record of absence. The provider's own
     reason is kept beside it as ``InvocationResponse.raw_finish_reason``, so
@@ -78,7 +78,7 @@ class FinishReason(StrEnum):
 
     @classmethod
     def coerce(cls, value: str | None) -> "FinishReason":
-        """Map a raw reason onto this vocabulary (PRD section 5.2).
+        """Map a raw reason onto this vocabulary.
 
         Matching is exact and case-sensitive, because inventing a mapping the
         gateway was never given is the provider translation this layer does not
@@ -95,7 +95,7 @@ class FinishReason(StrEnum):
 
 
 class ResponseFormatMode(StrEnum):
-    """The output shape a caller requires (PRD section 9.5).
+    """The output shape a caller requires.
 
     * ``TEXT`` — ordinary text; the provider's own default.
     * ``JSON_OBJECT`` — JSON, with no schema the provider must satisfy.
@@ -115,9 +115,9 @@ class ResponseFormatMode(StrEnum):
 
 @dataclass(frozen=True)
 class ResponseFormat:
-    """A structured-output requirement (PRD sections 5.1 and 9.5).
+    """A structured-output requirement.
 
-    PRD section 9.5 names structured-output requirements among the semantics the
+    Structured-output requirements are among the semantics the
     gateway must never discard, so the canonical request has to be able to state
     one. Without this type a caller's schema could not be represented at all, and
     the capability error that promises to refuse an unsupported structured-output
@@ -137,7 +137,7 @@ class ResponseFormat:
     ``name`` labels the schema for providers that require a name, and ``strict``
     asks the provider to enforce the schema rather than merely accept it. Both
     belong to ``JSON_SCHEMA`` alone; naming or enforcing a schema in a mode that
-    has none is not a request any provider could honour (PRD section 9.5).
+    has none is not a request any provider could honour.
     """
 
     mode: ResponseFormatMode = ResponseFormatMode.TEXT
@@ -207,7 +207,7 @@ class ResponseFormat:
 
 @dataclass(frozen=True)
 class GenerationConfig:
-    """Sampling parameters for one invocation (PRD sections 4.4 and 5.1).
+    """Sampling parameters for one invocation.
 
     Every field defaults to "not specified", and "not specified" means the
     gateway sends no value so that the provider's own default applies:
@@ -227,7 +227,7 @@ class GenerationConfig:
 
     The gateway deliberately substitutes no vendor default, such as a temperature
     of 1.0, because doing so would encode one vendor's behaviour in the
-    vendor-neutral core (PRD section 23). "Unset" and "zero" are different
+    vendor-neutral core. "Unset" and "zero" are different
     requests, and a caller that wants a temperature of 0 asks for it.
 
     Only provider-independent invariants are enforced here: a token ceiling of at
@@ -323,9 +323,9 @@ class GenerationConfig:
 
 
 class UsageSource(StrEnum):
-    """Whether one token count was reported by the provider or derived (PRD section 13).
+    """Whether one token count was reported by the provider or derived.
 
-    PRD section 13 requires the distinction because the two are not
+    The distinction matters because the two are not
     interchangeable: a provider-reported count is a fact about the upstream call,
     while an estimate is the gateway's own arithmetic and may be wrong.
 
@@ -342,7 +342,7 @@ class UsageSource(StrEnum):
 
 @dataclass(frozen=True)
 class Usage:
-    """Token counts for one invocation (PRD sections 4.4, 5.2 and 13).
+    """Token counts for one invocation.
 
     Every count is optional, and ``None`` means "not known", which is not the
     same as zero: a provider that does not report cached tokens has told the

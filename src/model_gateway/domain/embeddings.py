@@ -1,27 +1,26 @@
-"""Canonical embeddings request and response (PRD sections 4.7, 6.3, 9.6 and 13).
+"""Canonical embeddings request and response.
 
 An embeddings invocation is the third operation the gateway serves, and its
 canonical types follow the same rules as the text operation's: the request names
 a public model ID and carries the caller's parameters, the response reports the
 public ID beside the upstream model that served it, and both round-trip through
-``to_dict`` and ``from_dict`` with every field always emitted (PRD sections 4.7
-and 5.2).
+``to_dict`` and ``from_dict`` with every field always emitted.
 
 ``EmbeddingRequest.input`` is the texts to embed, in order, and
-``EmbeddingResponse.data`` is the vectors in the same order: PRD section 4.7
-requires the gateway to preserve input ordering, so the position of a vector in
+``EmbeddingResponse.data`` is the vectors in the same order: the gateway
+preserves input ordering, so the position of a vector in
 ``data`` is the position of its text in ``input`` and ``Embedding.index`` states
 it explicitly rather than leaving a consumer to infer it. A response whose
 vectors cannot be matched to their texts has already lost the ordering by the
 time a caller sees it.
 
-``EmbeddingResponse.usage`` is the token accounting of the call (PRD section 13).
+``EmbeddingResponse.usage`` is the token accounting of the call.
 Embedding requests carry no generation parameters, so the only limits the
 gateway enforces here are the ones the canonical representation itself cannot
 hold: a non-empty input, a positive ``dimensions`` when one is asked for, and an
 ``encoding_format`` from the documented set. A value outside that set is refused
 rather than dropped, because a parameter that quietly disappears between the
-caller and the provider is worse than a rejected request (PRD section 9.1).
+caller and the provider is worse than a rejected request.
 """
 
 from collections.abc import Mapping
@@ -59,28 +58,28 @@ _REQUEST_KEYS = frozenset(
 _RESPONSE_KEYS = frozenset({"model", "upstream_model", "data", "usage", "invocation_id"})
 
 ENCODING_FORMATS: frozenset[str] = frozenset({"float", "base64"})
-"""The wire encodings an embeddings request may ask for (PRD section 4.7).
+"""The wire encodings an embeddings request may ask for.
 
 The gateway's embeddings endpoint is OpenAI-compatible, and that API documents
 exactly two encodings: ``float``, the numbers themselves, and ``base64``, the
 same numbers as a base64 string. A request naming anything else is refused
 rather than silently answered in the gateway's own default, because a caller
 told its request was honoured while the gateway ignored the encoding it asked
-for cannot tell the two apart (PRD section 9.1). The canonical
+for cannot tell the two apart. The canonical
 :class:`EmbeddingResponse` carries the float form, which is the representation
-the gateway's own wire response uses (PRD section 4.7).
+the gateway's own wire response uses.
 """
 
 
 @dataclass(frozen=True)
 class Embedding:
-    """One embedding vector, positioned in the caller's input (PRD section 4.7).
+    """One embedding vector, positioned in the caller's input.
 
     ``index`` is the position of the text this vector embeds, so a consumer can
     match a vector to its text without relying on array order alone. ``values``
     is the vector itself, always non-empty and always finite: a vector with no
     components is not a vector, and a component that is not a finite number is
-    a value the canonical representation cannot carry (PRD section 9.1).
+    a value the canonical representation cannot carry.
     """
 
     index: int
@@ -109,12 +108,11 @@ class Embedding:
 
 @dataclass(frozen=True)
 class EmbeddingRequest:
-    """One canonical embeddings invocation (PRD sections 4.7 and 6.3).
+    """One canonical embeddings invocation.
 
     ``model`` is the public model ID, never an upstream model name, for the same
     reason as an invocation request: the route resolver decides which upstream
-    serves it and a caller-supplied name must not reach an unconfigured endpoint
-    (PRD section 10).
+    serves it and a caller-supplied name must not reach an unconfigured endpoint.
 
     ``input`` is the texts to embed, in order, and must carry at least one of
     them: an embedding request with nothing to embed has no canonical
@@ -126,13 +124,12 @@ class EmbeddingRequest:
     rather than silently embedding something the caller did not ask for.
 
     ``dimensions`` asks the route for vectors of that length and is honoured
-    only when the route enables it (PRD section 6.3); it is positive when set,
+    only when the route enables it; it is positive when set,
     because a vector of zero or negative length is not a request any provider
     could honour. ``encoding_format`` is the wire encoding the caller asks for,
     one of :data:`ENCODING_FORMATS`. ``user`` is the caller's stable end-user
     identifier, and ``metadata`` is non-sensitive request metadata held as an
-    immutable JSON object, never forwarded to the model or the provider
-    (PRD section 5.1).
+    immutable JSON object, never forwarded to the model or the provider.
     """
 
     model: str
@@ -190,16 +187,16 @@ class EmbeddingRequest:
 
 @dataclass(frozen=True)
 class EmbeddingResponse:
-    """The canonical result of one embeddings invocation (PRD sections 4.7 and 13).
+    """The canonical result of one embeddings invocation.
 
     ``model`` is the public model ID the caller asked for and ``upstream_model``
     the route's own model ID, reported separately because a fallback may have
-    served it (PRD section 5.2). ``data`` holds one vector per input text, in
+    served it. ``data`` holds one vector per input text, in
     input order, and ``Embedding.index`` states that position explicitly.
 
     ``usage`` is the token accounting of the call, and ``invocation_id`` the
     identifier of the invocation this response belongs to, so a caller can
-    reconcile the response with the request it sent (PRD section 13).
+    reconcile the response with the request it sent.
     """
 
     model: str
@@ -267,7 +264,7 @@ def _as_values(where: str, value: object) -> tuple[float, ...]:
     if not items:
         raise ValueError(
             f"{where} must carry at least one number; an embedding with no values is not a "
-            f"vector the gateway can return (PRD section 4.7)"
+            f"vector the gateway can return"
         )
     return tuple(_as_value(f"{where}[{index}]", item) for index, item in enumerate(items))
 
@@ -286,7 +283,7 @@ def _as_input(where: str, value: object) -> tuple[str, ...]:
     if not items:
         raise ValueError(
             f"{where} must carry at least one string; an embedding request with nothing to "
-            f"embed has no canonical representation (PRD section 4.7)"
+            f"embed has no canonical representation"
         )
     for index, item in enumerate(items):
         if not item.strip():
@@ -311,7 +308,7 @@ def _as_encoding_format(where: str, value: object) -> str | None:
             f"{where} must be one of {supported}; got {encoding!r}. An encoding outside the "
             f"documented set is refused rather than answered in the gateway's own default, "
             f"because a caller told its request was honoured while the gateway ignored the "
-            f"encoding it asked for cannot tell the two apart (PRD section 9.1)"
+            f"encoding it asked for cannot tell the two apart"
         )
     return encoding
 
