@@ -810,3 +810,50 @@ class TestTheCancellationSeam:
 
         assert [chunk.sequence for chunk in chunks] == [0, 1]
         assert chunks[-1].WhichOneof("payload") == "finish"
+
+
+# --------------------------------------------------------------------------- #
+# Idempotency on the streaming path
+# --------------------------------------------------------------------------- #
+
+IDEMPOTENCY_KEY = "trace-7"
+
+
+class TestIdempotency:
+    """A keyed request is still served as a stream, never as a replay (PRD 12).
+
+    Idempotency is a property of the non-streaming invocation: a replayed stream
+    would present an answer that was never produced token by token in this call as
+    one that was, which is the one thing the gateway never does. The key reaches
+    the invocation — it is a request field like any other — and the provider is
+    asked again on every call.
+    """
+
+    async def test_an_idempotency_key_reaches_the_invocation(self, serve):
+        provider = MockProvider(stream=MockStreamSpec(chunks=("Recursion",)))
+        stub = await serve(provider)
+
+        chunks = await collect(
+            stub, invoke_request(idempotency_key=IDEMPOTENCY_KEY), metadata=authorization()
+        )
+
+        _, request, _ = provider.stream_calls[0]
+        assert request.idempotency_key == IDEMPOTENCY_KEY
+        assert chunks[0].content_delta == "Recursion"
+
+    async def test_a_repeat_under_the_same_key_reaches_the_provider_again(self, serve):
+        # The second call is not answered from a record: the stream is produced
+        # again, so the provider is asked again and the caller watches the answer
+        # arrive as fragments rather than as a replay of one already given.
+        provider = MockProvider(stream=MockStreamSpec(chunks=("Recursion",)))
+        stub = await serve(provider)
+
+        await collect(
+            stub, invoke_request(idempotency_key=IDEMPOTENCY_KEY), metadata=authorization()
+        )
+        chunks = await collect(
+            stub, invoke_request(idempotency_key=IDEMPOTENCY_KEY), metadata=authorization()
+        )
+
+        assert len(provider.stream_calls) == 2
+        assert [chunk.content_delta for chunk in chunks] == ["Recursion", ""]

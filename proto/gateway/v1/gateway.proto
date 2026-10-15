@@ -75,8 +75,14 @@ message InvokeRequest {
   ResponseModality response_modality = 11;
   // Public model IDs the invocation may fall back to, in order.
   repeated string fallback_models = 12;
-  // Caller-supplied deduplication key.
-  string idempotency_key = 13;
+  // Caller-supplied deduplication key, as canonical-domain JSON text's namesake.
+  //
+  // Optional rather than a plain string: an absent key and an empty one are
+  // different facts, and the canonical record keeps them apart. Only a
+  // completed answer is recorded, so a repeat under the same key reaches the
+  // caller without reaching the provider, and the gateway claims no exactly-once
+  // upstream execution (PRD section 12).
+  optional string idempotency_key = 15;
   // Caller bookkeeping as canonical-domain JSON text, never forwarded to the model
   // or a provider. JSON bytes rather than a Struct because Struct types every
   // number as a double, so a JSON integer would arrive as a float and one beyond
@@ -238,7 +244,7 @@ message InvokeResponse {
   // Gateway attempts, which can exceed the upstream requests (PRD section 9.6).
   int32 attempt_count = 10;
   bool fallback_used = 11;
-  IdempotencyStatus idempotency_status = 12;
+  IdempotencyStatus idempotency_status = 13;
 }
 
 // OutputItem is one item of the answer: a content part or a tool call.
@@ -286,11 +292,15 @@ enum UsageField {
   USAGE_FIELD_CACHED_TOKENS = 4;
 }
 
+// The zero value is not a status: it marks a field that was never set, which is
+// different from a caller who sent an empty string. The mapping reads members by
+// the canonical status name, so only the four real statuses are ever written.
 enum IdempotencyStatus {
-  IDEMPOTENCY_STATUS_NOT_APPLICABLE = 0;
-  IDEMPOTENCY_STATUS_NEW = 1;
-  IDEMPOTENCY_STATUS_REPLAYED = 2;
-  IDEMPOTENCY_STATUS_INDETERMINATE = 3;
+  IDEMPOTENCY_STATUS_UNSPECIFIED = 0;
+  IDEMPOTENCY_STATUS_NOT_APPLICABLE = 1;
+  IDEMPOTENCY_STATUS_NEW = 2;
+  IDEMPOTENCY_STATUS_REPLAYED = 3;
+  IDEMPOTENCY_STATUS_INDETERMINATE = 4;
 }
 
 // InvokeChunk is one event of a streaming invocation.
