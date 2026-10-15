@@ -9,6 +9,7 @@ from model_gateway.capabilities import Capability
 from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import (
     FinishReason,
+    IdempotencyStatus,
     ImagePart,
     InvocationResponse,
     RefusalPart,
@@ -21,7 +22,7 @@ from model_gateway.domain import (
 )
 from model_gateway.errors import CapabilityError, UnavailableError
 from model_gateway.http.errors import register_error_handlers
-from model_gateway.http.responses import register_responses_routes
+from model_gateway.http.responses import ResponseObject, register_responses_routes
 from model_gateway.inference import InferenceService
 from model_gateway.registry import ModelRegistry
 
@@ -881,6 +882,84 @@ async def test_an_unknown_parameter_is_refused_naming_the_key(client, provider):
     assert (await response.json())["reason"] == "invalid_request"
     assert "verbosity" in (await response.json())["message"]
     assert provider.calls == []
+
+
+async def test_an_idempotency_key_reaches_the_provider(client, provider):
+    """The key the caller chose is the invocation's, so a repeat can be matched."""
+    response = await post(client, payload(idempotency_key="recursion-question"))
+
+    assert response.status == 200
+    _, invocation = provider.calls[0]
+    assert invocation.idempotency_key == "recursion-question"
+
+
+@pytest.mark.parametrize("overrides", [{}, {"idempotency_key": None}])
+async def test_a_request_without_an_idempotency_key_is_answered_not_applicable(
+    client, overrides
+):
+    """No key means deduplication was never in play, and the answer says so."""
+    response = await post(client, payload(**overrides))
+
+    assert response.status == 200
+    assert (await response.json())["idempotency_status"] == "not_applicable"
+
+
+async def test_a_repeated_idempotency_key_is_answered_from_the_gateway_record(
+    client, provider
+):
+    """A repeat is answered from the record, so the provider is asked once."""
+    first = await post(client, payload(idempotency_key="recursion-question"))
+    second = await post(client, payload(idempotency_key="recursion-question"))
+
+    assert first.status == second.status == 200
+    assert (await first.json())["idempotency_status"] == "new"
+    assert (await second.json())["idempotency_status"] == "replayed"
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.parametrize("key", [7, True, ["recursion-question"], {"key": "recursion"}])
+async def test_a_non_string_idempotency_key_is_refused_naming_the_field(
+    client, provider, key
+):
+    """The format defines the key as a string, so anything else is malformed input."""
+    response = await post(client, payload(idempotency_key=key))
+
+    assert response.status == 400
+    body = await response.json()
+    assert body["reason"] == "invalid_request"
+    assert "idempotency_key" in body["message"]
+    assert provider.calls == []
+
+
+async def test_an_empty_idempotency_key_is_refused_rather_than_read_as_absent(
+    client, provider
+):
+    """An empty string is no key at all, not a key that happens to be empty."""
+    response = await post(client, payload(idempotency_key=""))
+
+    assert response.status == 400
+    body = await response.json()
+    assert body["reason"] == "invalid_request"
+    assert "idempotency_key" in body["message"]
+    assert provider.calls == []
+
+
+@pytest.mark.parametrize(
+    ("status", "rendered"),
+    [
+        (IdempotencyStatus.NOT_APPLICABLE, "not_applicable"),
+        (IdempotencyStatus.NEW, "new"),
+        (IdempotencyStatus.REPLAYED, "replayed"),
+        (IdempotencyStatus.INDETERMINATE, "indeterminate"),
+    ],
+)
+def test_the_idempotency_status_is_rendered_as_the_openai_string(status, rendered):
+    """The four canonical statuses reach the caller as snake_case strings."""
+    body = ResponseObject.from_invocation(
+        answer(idempotency_status=status), response_id="resp_1", created_at=0
+    ).to_dict()
+
+    assert body["idempotency_status"] == rendered
 
 
 async def test_an_input_item_type_this_endpoint_does_not_carry_is_refused(client, provider):

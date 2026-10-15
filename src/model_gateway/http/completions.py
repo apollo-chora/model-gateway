@@ -28,6 +28,12 @@ this endpoint's own documented subset):
 * ``suffix`` asks the model to continue a suffix after the prompt, which the
   canonical request has no field for; ``suffix: null`` states nothing and is
   accepted, and a stated suffix is refused.
+* ``idempotency_key`` is the caller's own deduplication key, mapped onto the
+  invocation's so a repeat of the same request is answered from the gateway's
+  record of the first answer rather than by asking the provider again. It is a
+  plain string and optional; the response carries ``idempotency_status`` beside
+  ``id`` and ``model`` so a caller can tell whether the provider was reached
+  (PRD section 12).
 
 **A recognised parameter's wire type is checked before its value is judged.**
 Each parameter in that subset has one JSON type on the wire, and a value of
@@ -58,7 +64,8 @@ carrying any of those is refused with a capability error naming it rather than
 returned without it (PRD sections 9.1 and 9.5). The gateway's own accounting —
 the invocation identifier, the upstream model, the attempt count — is
 deliberately not in this payload, because the legacy shape has no field for it
-(PRD sections 5.2 and 13).
+(PRD sections 5.2 and 13). ``idempotency_status`` is the one piece of it the
+shape has a home for, and it is rendered beside ``id`` and ``model``.
 
 **Streaming is served as Server-Sent Events in the legacy chunk shape.** A
 request carrying ``stream: true`` is answered with an ``text/event-stream``
@@ -160,6 +167,7 @@ _REQUEST_KEYS = frozenset(
         "suffix",
         "best_of",
         "logprobs",
+        "idempotency_key",
     }
 )
 """The request fields ``POST /v1/completions`` recognises.
@@ -328,6 +336,9 @@ class CompletionRequest:
                 model=as_required_text(f"{where} 'model'", body.get("model")),
                 messages=(_user_message(f"{where} 'prompt'", body.get("prompt")),),
                 generation_config=_generation_config(body),
+                idempotency_key=_as_idempotency_key(
+                    f"{where} 'idempotency_key'", body.get("idempotency_key")
+                ),
             )
         except ValueError as error:
             raise InvalidArgumentError(f"invalid completion request: {error}") from error
@@ -371,14 +382,17 @@ class TextCompletion:
     """An OpenAI legacy text completion response.
 
     The gateway's own accounting — upstream model, attempt count, fallback use,
-    idempotency status, cost — is deliberately not in this payload: the legacy
-    completions shape has no field for it, and adding one would be a contract
-    the gateway invented. That accounting belongs to the gRPC contract and to
-    usage records (PRD sections 5.2 and 13).
+    cost — is deliberately not in this payload: the legacy completions shape has
+    no field for it, and adding one would be a contract the gateway invented.
+    That accounting belongs to the gRPC contract and to usage records (PRD
+    sections 5.2 and 13). ``idempotency_status`` is the one piece of it the shape
+    has a home for: it is rendered beside ``id`` and ``model`` so a caller
+    reading the answer can tell whether the provider was reached (PRD section 12).
     """
 
     id: str
     model: str
+    idempotency_status: str
     choices: tuple[TextCompletionChoice, ...]
     usage: Usage
     created: int
@@ -404,6 +418,7 @@ class TextCompletion:
         return cls(
             id=completion_id,
             model=response.model,
+            idempotency_status=response.idempotency_status.value,
             choices=(
                 TextCompletionChoice(
                     text=response.text,
@@ -421,6 +436,7 @@ class TextCompletion:
             "object": _OBJECT_TEXT_COMPLETION,
             "created": self.created,
             "model": self.model,
+            "idempotency_status": self.idempotency_status,
             "choices": [choice.to_dict() for choice in self.choices],
             "usage": _usage_payload(self.usage),
         }
@@ -800,6 +816,20 @@ def _user_message(where: str, value: object) -> Message:
         )
     text = _as_prompt_text(where, value)
     return Message(role=Role.USER, content=(TextPart(text),))
+
+
+def _as_idempotency_key(where: str, value: object) -> str | None:
+    """The caller's idempotency key, or ``None`` when the request carries none.
+
+    ``None`` is an optional parameter's wire default and asks for nothing. Any
+    other value must be a non-empty string: the format defines the key as one, so
+    a value of another type is malformed input naming the type that arrived, and
+    an empty string is no key at all rather than a key that happens to be empty
+    (PRD section 12).
+    """
+    if value is None:
+        return None
+    return as_required_text(where, value)
 
 
 def _as_prompt_text(where: str, value: object) -> str:

@@ -711,6 +711,7 @@ class TestChatCompletion:
             "object": "chat.completion",
             "created": 1700000000,
             "model": "text-default",
+            "idempotency_status": "not_applicable",
             "choices": [
                 {
                     "index": 0,
