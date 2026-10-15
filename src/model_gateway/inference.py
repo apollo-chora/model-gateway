@@ -145,12 +145,16 @@ capability is refused at startup by the application factory.
 """
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import TypeVar
 from uuid import uuid4
 
+import structlog
+
+from model_gateway.accounting import AccountingRecorder
 from model_gateway.capabilities import Capability
 from model_gateway.config.routes import Route
 from model_gateway.domain import (
@@ -251,6 +255,8 @@ terminal event, or that raises after one, must not be able to put anything —
 least of all a second terminal event — after the answer the caller was already
 told was over.
 """
+
+logger = structlog.get_logger(__name__)
 
 _DEFAULT_MAX_CONCURRENT_REQUESTS = 100
 """The concurrency bound a service is built with when no limiter is injected.
@@ -366,6 +372,8 @@ class InferenceService:
         max_concurrent_requests: int = _DEFAULT_MAX_CONCURRENT_REQUESTS,
         limiter: ConcurrencyLimiter | None = None,
         idempotency_store: IdempotencyStore | None = None,
+        accounting: AccountingRecorder | None = None,
+        accounting_enabled: bool = True,
     ) -> None:
         """Wire the service to the registry, the provider and the reliability policy.
 
@@ -447,6 +455,8 @@ class InferenceService:
         self._idempotency_store = (
             idempotency_store if idempotency_store is not None else MemoryIdempotencyStore()
         )
+        self._accounting = accounting
+        self._accounting_enabled = accounting_enabled
 
     async def invoke(
         self, request: InvocationRequest, *, namespace: str | None = None
@@ -502,9 +512,16 @@ class InferenceService:
         it is never recorded and reports ``NOT_APPLICABLE``.
         """
         routes = self._registry.routes_for(request.model)
+        # The plan's primary is its first route: the one the invocation would be
+        # served by if every attempt were on it, which is the route the record
+        # attributes the answer to.
+        route = routes[0]
+        started = time.monotonic()
         key = request.idempotency_key
         if key is None:
-            return await self._invoke_on(request, routes)
+            response = await self._invoke_on(request, routes)
+            self._record(request, response, route, namespace or "", started)
+            return response
 
         namespace = namespace or ""
         fingerprint = request_fingerprint(request)
@@ -518,6 +535,7 @@ class InferenceService:
             # coalesced caller "new" would report that its request reached the
             # provider, which is the accounting fact the field exists to carry.
             response = await settle(claim.future)
+            self._record(request, response, route, namespace, started)
             return replace(response, idempotency_status=IdempotencyStatus.REPLAYED)
 
         try:
@@ -527,7 +545,46 @@ class InferenceService:
             raise
         recorded = replace(response, idempotency_status=IdempotencyStatus.NEW)
         await self._idempotency_store.complete(key, namespace, recorded)
+        self._record(request, recorded, route, namespace, started)
         return recorded
+
+    def _record(
+        self,
+        request: InvocationRequest,
+        response: InvocationResponse,
+        route: Route,
+        namespace: str,
+        started: float,
+    ) -> None:
+        """Record one invocation's usage and cost, when accounting is enabled.
+
+        Only a completed answer is recorded, and only when the caller asked for
+        it: a deployment that disables accounting is not silently accounting. A
+        failure propagates the answer to no one and leaves no record, because
+        there is no answer to account for.
+
+        A recording failure must not fail the invocation. The answer has already
+        been produced and the caller is waiting on it; a store the operator
+        misconfigured is not a reason to withhold it, and swallowing the error
+        would turn accounting into a correctness problem. The failure is logged
+        for the operator instead.
+        """
+        if self._accounting is None or not self._accounting_enabled:
+            return
+        try:
+            self._accounting.record(
+                request,
+                response,
+                route,
+                namespace=namespace,
+                latency_ms=(time.monotonic() - started) * 1000,
+            )
+        except Exception as error:
+            logger.error(
+                "usage record could not be stored",
+                error_type=type(error).__name__,
+                invocation_id=response.invocation_id,
+            )
 
     async def invoke_stream(self, request: InvocationRequest) -> AsyncIterator[StreamEvent]:
         """Invoke the public model named by ``request.model``, streaming the answer.
