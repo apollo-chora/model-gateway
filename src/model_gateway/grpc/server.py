@@ -65,7 +65,11 @@ class GrpcServer:
         # The same bound the HTTP transport applies, in this transport's own unit:
         # gRPC bounds a message rather than a body, and reports one over the bound
         # as RESOURCE_EXHAUSTED — the status the taxonomy maps for this condition —
-        # so one configured value bounds both transports (PRD section 14).
+        # so one configured value bounds both transports (PRD section 14). The
+        # refusal a caller reads for an oversized message is the library's own
+        # rather than the gateway's: it shares that status but not the gateway's
+        # reason or payload, which is a property of where the bound is enforced
+        # rather than a choice, and the HTTP side is where the gateway states it.
         self._grpc = grpc.aio.server(
             options=[("grpc.max_receive_message_length", settings.max_request_body_bytes)]
         )
