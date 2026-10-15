@@ -77,6 +77,7 @@ from model_gateway.errors import GatewayError, InvalidArgumentError
 from model_gateway.http.auth import get_identity
 from model_gateway.http.dto import ChatCompletion, ChatRequest
 from model_gateway.security.authorization import reconcile_identity
+from model_gateway.security.identity import caller_namespace
 
 if TYPE_CHECKING:
     from model_gateway.inference import InferenceService
@@ -136,7 +137,9 @@ def create_chat_completion(service: InferenceService) -> ChatHandler:
         invocation = chat_request.to_invocation(invocation_id=invocation_id, identity=identity)
 
         if not chat_request.stream:
-            response = await service.invoke(invocation)
+            response = await service.invoke(
+                invocation, namespace=caller_namespace(identity)
+            )
             completion = ChatCompletion.from_invocation(
                 response,
                 completion_id=f"{_COMPLETION_ID_PREFIX}{response.invocation_id or invocation_id}",
