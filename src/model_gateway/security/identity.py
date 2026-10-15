@@ -82,6 +82,22 @@ class Identity:
     credential_id: str | None
     key_label: str | None
 
+    @property
+    def idempotency_namespace(self) -> str:
+        """The trusted principal namespace a caller's keys are scoped to (PRD section 12).
+
+        The credential identifier is the namespace: it is collision-resistant, it is
+        unique to one credential, and a credential already carries its tenant
+        binding, so two credentials never share a namespace whether or not either
+        has a tenant. A tenant-less credential is therefore isolated from every
+        other credential by its identifier alone.
+
+        This is derived from the credential, never from a request field: a tenant
+        is a property of the credential and can never be supplied by the caller
+        (PRD section 5.1).
+        """
+        return self.credential_id or ""
+
     def __post_init__(self) -> None:
         """Reject the two identity states that contradict what the fields mean.
 
@@ -108,3 +124,14 @@ class Identity:
                 "key label; an unauthenticated caller with a credential is not a state "
                 "the gateway can represent"
             )
+
+
+def caller_namespace(identity: Identity | None) -> str:
+    """The trusted principal namespace for a caller, empty when there is none.
+
+    The empty namespace is the one an unauthenticated caller shares, which is
+    deliberate: authentication is not required for idempotency, and an anonymous
+    caller's keys are scoped to that shared namespace rather than to nothing a
+    request field could reach.
+    """
+    return identity.idempotency_namespace if identity is not None else ""
