@@ -1432,6 +1432,42 @@ async def test_a_stream_cancelled_while_it_is_being_closed_is_still_recorded():
     assert sink.records[0].namespace == "cred-digest"
 
 
+async def test_a_stream_that_reported_only_usage_is_still_recorded():
+    """The accounting threshold is an emitted event, and a usage-only stream meets it.
+
+    That is a deliberate policy rather than a derivation: a usage report is the
+    provider stating it did work, so the gateway owes for it, and the threshold is
+    the same one that already forbids a fallback or retry after the first
+    delivered event. The consequence is that a record means the stream emitted
+    something, not that the caller received text — which is why the case is pinned
+    here rather than left to be discovered from a report.
+    """
+    sink = MemoryAccountingSink()
+    service = _streaming_service(
+        _ScriptedStreamProvider(
+            [
+                _event(
+                    StreamEventKind.USAGE,
+                    0,
+                    usage=Usage(input_tokens=9, output_tokens=1, total_tokens=10),
+                ),
+                _event(StreamEventKind.FINISH, 1, finish_reason=FinishReason.STOP),
+            ]
+        ),
+        sink,
+    )
+
+    await _drain(
+        service.invoke_stream(_request(invocation_id="inv-stream-1"), namespace="cred-digest")
+    )
+
+    assert len(sink.records) == 1
+    record = sink.records[0]
+    assert record.status == STATUS_COMPLETED
+    assert (record.input_tokens, record.output_tokens) == (9, 1)
+    assert record.route_model_id == "upstream-text"
+
+
 async def test_a_streamed_invocation_without_an_identifier_is_given_one():
     """The gateway mints the identifier, so the events and the record name one invocation."""
     sink = MemoryAccountingSink()
