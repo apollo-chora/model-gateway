@@ -210,6 +210,22 @@ def test_an_absent_pricing_value_is_an_empty_table():
     assert pricing_from_env({"COST_PRICING_JSON": ""}).prices == {}
 
 
+def test_a_table_built_by_hand_is_validated_too():
+    """The parser is a caller like any other: every table is one the gateway can price against.
+
+    A table assembled outside the environment path must not be able to carry a key
+    that is not a model ID or a value that is not a price, because `estimate` would
+    then reach a shape it cannot price and raise inside an invocation's accounting
+    rather than where the mistake was made.
+    """
+    with pytest.raises(ValueError):
+        PricingTable(prices={"text-default": {"input": 3.0}})
+    with pytest.raises(ValueError):
+        PricingTable(prices={"": _price("USD", {"input": 3.0})})
+    with pytest.raises(ValueError):
+        PricingTable(prices=[("text-default", _price("USD", {"input": 3.0}))])
+
+
 def _table(currency: str, tokens) -> PricingTable:
     """A one-model pricing table, for the estimate tests."""
     return PricingTable(prices={"text-default": _price(currency, tokens)})
