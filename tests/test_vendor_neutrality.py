@@ -1,13 +1,11 @@
-"""Vendor neutrality: the core names no provider (PRD sections 21 and 23).
+"""Vendor neutrality: the core names no provider.
 
-Acceptance criterion 19 is that no vendor-specific business logic lives outside the
-LiteLLM binding, and section 23 says the same thing structurally: the gateway core
-holds no provider-specific business logic, and the provider is chosen entirely by
-configuration. That is the property the whole design turns on — it is what makes a
-provider swap an environment change — and until this module existed nothing asserted
-it. Every other suite tests behaviour; a suite that only tests behaviour cannot tell
-whether the core grew a branch on a vendor name, because a branch on a vendor name
-can pass every behavioural test there is.
+The gateway core holds no provider-specific business logic, and the provider is
+chosen entirely by configuration. That is the property the whole design turns on —
+it is what makes a provider swap an environment change — and until this module
+existed nothing asserted it. Every other suite tests behaviour; a suite that only
+tests behaviour cannot tell whether the core grew a branch on a vendor name, because
+a branch on a vendor name can pass every behavioural test there is.
 
 **What is asserted, and why each half is needed.** A rule enforced by one check is a
 rule the other can be broken without. The first is that no core module imports a

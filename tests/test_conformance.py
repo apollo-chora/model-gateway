@@ -1,10 +1,10 @@
-"""Conformance: the public surface against the real binding (PRD sections 20 and 21).
+"""Conformance: the public surface against the real binding.
 
 Every other public-surface suite in this tree injects a fake *provider* at the
 binding boundary, so the real binding — its translation, its client injection,
 its error mapping — is never on the path a public endpoint takes. That is the
-gap this module closes, and it is the one PRD section 20 states directly: the
-stand-in belongs to the upstream, never to the gateway.
+gap this module closes: the stand-in belongs to the upstream, never to the
+gateway.
 
 **What is real here.** Configuration comes entirely from an environment mapping:
 ``Settings.from_env`` and ``ModelRegistry.from_env`` parse the same variables a
@@ -22,16 +22,16 @@ transport — and the resolver is pinned to a public address so the URL policy's
 own screen passes. No test here opens a connection, which is what "no real
 provider account" has to mean.
 
-**Why not a mock upstream server.** PRD section 20 asks for "deterministic mock
-upstream servers". Section 14.1 forbids the gateway from contacting any address
-class a same-host server would occupy — loopback, private, link-local, metadata,
+**Why not a mock upstream server.** A deterministic mock upstream server is the
+obvious stand-in, but the gateway is forbidden from contacting any address class
+a same-host server would occupy — loopback, private, link-local, metadata,
 unique-local — and the prohibition is enforced twice, at configuration time and
 again in ``pin_request`` before the socket is opened, with no opt-out. A mock
 server on this machine is therefore unreachable by construction, and weakening
 that control to make the tests easier would trade a security guarantee for test
 ergonomics. The stand-in is instead an ``httpx`` transport that speaks the
 provider's wire protocol — the same shape the embeddings and image suites already
-use — and it is placed where section 20 says the stand-in belongs.
+use — placed at the upstream's end of the binding, never inside the gateway.
 """
 
 import json
@@ -339,7 +339,7 @@ async def test_health_and_readiness_are_served_without_a_credential():
 
 
 async def test_metrics_are_published_and_require_a_credential():
-    """Section 17's endpoint is authenticated like every other path."""
+    """The metrics endpoint is authenticated like every other path."""
     wire = UpstreamWire()
 
     async with _running(wire) as client:
@@ -492,7 +492,10 @@ async def test_an_image_generation_is_served_by_the_real_binding():
     ],
 )
 async def test_no_answer_carries_the_provider_credential_or_the_upstream_model(path, payload):
-    """Acceptance criterion 12, on the wire the caller actually reads."""
+    """No answer carries the provider credential or the upstream model.
+
+    Checked on the wire the caller actually reads.
+    """
     wire = UpstreamWire()
 
     async with _running(wire) as client:
@@ -527,7 +530,7 @@ async def test_an_upstream_failure_becomes_the_gateways_own_error_contract(
     """A provider refusal is mapped, sanitised and answered with a status, not raised.
 
     The upstream's own message and code are not what the caller reads: the
-    gateway's taxonomy decides both the status and the payload (PRD section 5.4).
+    gateway's taxonomy decides both the status and the payload.
     """
     wire = UpstreamWire(status=upstream_status)
 
@@ -551,7 +554,7 @@ async def test_an_upstream_failure_becomes_the_gateways_own_error_contract(
 
 
 async def test_an_unknown_model_reaches_no_upstream():
-    """Acceptance criterion 13, on the public path."""
+    """An unknown model reaches no upstream, on the public path."""
     wire = UpstreamWire()
 
     async with _running(wire) as client:
@@ -623,7 +626,7 @@ def _chat(text: str) -> dict[str, object]:
 
 @pytest.mark.parametrize("primary", range(len(PROVIDERS)), ids=[p[1] for p in PROVIDERS])
 async def test_text_inference_is_served_through_each_configured_provider(primary):
-    """Acceptance criterion 2: text inference through at least four providers.
+    """Text inference through at least four providers.
 
     Each provider is made the primary in turn, so "works through" is proved for
     every one of them rather than for whichever happens to be first. What reaches
@@ -631,10 +634,10 @@ async def test_text_inference_is_served_through_each_configured_provider(primary
     endpoint authority, its own model ID and its own credential. A gateway that
     resolved all four to one provider would pass a status assertion and fail these.
 
-    This is acceptance criterion 3 as well. Nothing about the code changes between
-    the four cases — only the environment mapping does — which is what "providers can
-    be switched without recompilation" means, and it is the same claim a deployment
-    makes when it changes one environment variable.
+    The same walk proves that providers can be switched without recompilation.
+    Nothing about the code changes between the four cases — only the environment
+    mapping does — and it is the same claim a deployment makes when it changes one
+    environment variable.
     """
     wire = UpstreamWire()
 

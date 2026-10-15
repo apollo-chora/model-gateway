@@ -1,8 +1,8 @@
-"""The optional live-provider smoke test (PRD section 20).
+"""The optional live-provider smoke test.
 
-Section 20's end-to-end list ends with a request that no other test in this tree
-can satisfy: *"at least one optional live-provider smoke test should demonstrate
-switching providers through environment configuration alone."* Every other suite
+The end-to-end requirements close with a request that no other test in this tree
+can satisfy: at least one optional live-provider smoke test should demonstrate
+switching providers through environment configuration alone. Every other suite
 stands in for the upstream, which is what makes it deterministic and what keeps it
 from needing an account; this module is the one that does not, so it is the one that
 is **skipped by default**.
