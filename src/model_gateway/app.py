@@ -56,9 +56,11 @@ from model_gateway.http import (
 )
 from model_gateway.http.auth import create_auth_middleware
 from model_gateway.http.metrics import register_metrics_route
+from model_gateway.http.tracing import create_tracing_middleware
 from model_gateway.inference import InferenceService
 from model_gateway.limits import RateLimiter, TenantConcurrencyLimiter
 from model_gateway.metrics import Metrics
+from model_gateway.observability import SERVICE_NAME, configure_tracing
 from model_gateway.providers.litellm_image import ensure_supported_image_dialect
 from model_gateway.providers.litellm_provider import (
     LiteLLMProvider,
@@ -268,6 +270,13 @@ def create_app(
     # One registry for the process, shared by the service that counts into it and
     # the endpoint that publishes it: two would be two different sets of numbers.
     metrics = Metrics()
+    # Tracing is configured before the service is built, so a deployment that asked
+    # for it and gave it nowhere to send fails at startup rather than dropping
+    # every span it produces.
+    trace_provider = configure_tracing(settings)
+    tracer = (
+        trace_provider.get_tracer(SERVICE_NAME) if trace_provider is not None else None
+    )
 
     if service is None:
         _ensure_binding_can_run(registry)
@@ -284,6 +293,7 @@ def create_app(
             rate_limiter=rate_limiter,
             tenant_limiter=tenant_limiter,
             metrics=metrics,
+            tracer=tracer,
         )
 
     api_keys = ApiKeySet.from_settings(settings)
@@ -300,6 +310,10 @@ def create_app(
     )
 
     app = Application()
+    # Appended before the auth middleware so it is the outer one: a refusal raised
+    # by authentication is then still inside the caller's trace, which is what an
+    # operator wants to see when the refusals are the thing under investigation.
+    app.middlewares.append(create_tracing_middleware())
     app.middlewares.append(
         create_auth_middleware(
             api_keys,
@@ -334,5 +348,10 @@ def create_app(
         logger.info("model-gateway stopped")
         if grpc_server is not None:
             await grpc_server.stop()
+        if trace_provider is not None:
+            # A batch processor holds spans until it exports them, so a process that
+            # stops without this loses its last batch — which is the one covering
+            # the shutdown an operator is most likely to be looking at.
+            trace_provider.shutdown()
 
     return app

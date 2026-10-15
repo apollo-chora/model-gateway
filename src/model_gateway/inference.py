@@ -147,13 +147,14 @@ capability is refused at startup by the application factory.
 import asyncio
 import functools
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TypeVar
 from uuid import uuid4
 
 import structlog
+from opentelemetry.trace import Tracer
 
 from model_gateway.accounting import (
     STATUS_COMPLETED,
@@ -446,6 +447,50 @@ def _counted_stream(method):
     return counted
 
 
+def _traced_invocation(name: str):
+    """A decorator factory: one span around an operation, named for it.
+
+    A decorator rather than a wrapper written into each operation, for the reason
+    :func:`_counted_invocation` gives. The name is a parameter because a span name
+    is what a trace backend groups by, and four operations sharing one would make a
+    trace unreadable.
+    """
+
+    def decorate(method):
+        @functools.wraps(method)
+        async def traced(self, request, **kwargs):
+            with self._span(name, request):
+                return await method(self, request, **kwargs)
+
+        return traced
+
+    return decorate
+
+
+def _traced_stream(name: str):
+    """The streaming counterpart of :func:`_traced_invocation`.
+
+    The span covers the stream's whole life, as the counting does: an invocation is
+    in flight while its answer is arriving, and a span that ended at the first
+    event would report a fraction of the work it stands for.
+    """
+
+    def decorate(method):
+        @functools.wraps(method)
+        async def traced(self, request, **kwargs):
+            with self._span(name, request):
+                inner = method(self, request, **kwargs)
+                try:
+                    async for event in inner:
+                        yield event
+                finally:
+                    await inner.aclose()
+
+        return traced
+
+    return decorate
+
+
 class InferenceService:
     """Policy for one inference invocation: resolve, select, call, normalise.
 
@@ -475,6 +520,7 @@ class InferenceService:
         rate_limiter: RateLimiter | None = None,
         tenant_limiter: TenantConcurrencyLimiter | None = None,
         metrics: Metrics | None = None,
+        tracer: Tracer | None = None,
     ) -> None:
         """Wire the service to the registry, the provider and the reliability policy.
 
@@ -563,6 +609,10 @@ class InferenceService:
         boundary rather than in the transports because both transports reach the
         same operations here: an HTTP request and a gRPC call for one invocation
         would otherwise be counted twice, or counted differently by each.
+
+        ``tracer`` is where the invocation's span goes, or ``None`` for a deployment
+        that does not trace. It is a tracer rather than a provider because the
+        provider is the process's and the tracer names this component within it.
         """
         if attempt_timeout is not None and not _is_usable_budget(attempt_timeout):
             raise ValueError(
@@ -587,6 +637,25 @@ class InferenceService:
         self._rate_limiter = rate_limiter
         self._tenant_limiter = tenant_limiter
         self._metrics = metrics
+        self._tracer = tracer
+
+    @contextmanager
+    def _span(self, name: str, request: object) -> Iterator[object]:
+        """One invocation's span, or nothing when the deployment does not trace.
+
+        The public model is recorded as an attribute because it is the one fact a
+        caller of a trace needs to group spans by, and it is the gateway's own
+        vocabulary rather than anything the caller supplied as content — the same
+        distinction the log redaction draws (PRD section 17).
+        """
+        if self._tracer is None:
+            yield None
+            return
+        with self._tracer.start_as_current_span(name) as span:
+            model = getattr(request, "model", None)
+            if model is not None:
+                span.set_attribute("gateway.model", str(model))
+            yield span
 
     @asynccontextmanager
     async def _counted(self) -> AsyncIterator[None]:
@@ -723,6 +792,7 @@ class InferenceService:
             raise
 
     @_counted_invocation
+    @_traced_invocation("invoke")
     async def invoke(
         self,
         request: InvocationRequest,
@@ -962,6 +1032,7 @@ class InferenceService:
         )
 
     @_counted_stream
+    @_traced_stream("invoke_stream")
     async def invoke_stream(
         self,
         request: InvocationRequest,
@@ -1080,6 +1151,7 @@ class InferenceService:
                 self._record_stream(request, facts, namespace or "", started)
 
     @_counted_invocation
+    @_traced_invocation("embed")
     async def embed(
         self,
         request: EmbeddingRequest,
@@ -1219,6 +1291,7 @@ class InferenceService:
             return result
 
     @_counted_invocation
+    @_traced_invocation("generate")
     async def generate(
         self,
         request: ImageRequest,
