@@ -321,10 +321,12 @@ class MemoryIdempotencyStore:
 def _resolve_future(future: asyncio.Future[Any], outcome: Any) -> None:
     """Resolve a claim's future with its outcome, tolerating one already resolved.
 
-    A waiter may have been cancelled while waiting, which cancels the future it is
-    holding; the owner then has nothing to resolve, and that is a normal outcome
-    rather than an error. The future is resolved by the owner alone, never by a
-    waiter, so a waiter going away can never cancel the invocation.
+    The future is resolved by the owner alone, never by a waiter, so a waiter
+    going away can never cancel the invocation. Defensive rather than preventive:
+    a waiter shields its wait rather than cancelling the shared future, so the
+    owner is the only thing that resolves it, and the tolerance is for a future
+    completed some other way — a second completion of the same key, or a claim
+    released after its answer had already been recorded.
     """
     if future.done():
         return
