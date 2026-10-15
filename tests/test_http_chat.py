@@ -154,6 +154,46 @@ def build_app(provider: FakeTextProvider) -> Application:
     return app
 
 
+CREDENTIAL_A = "sk-gateway-credential-a"
+CREDENTIAL_B = "sk-gateway-credential-b"
+
+
+def build_authenticated_app(provider: FakeTextProvider) -> Application:
+    """The same application with two credentials, each bound to its own tenant.
+
+    The store is shared by both, so this is the only way to prove the namespace
+    separates them: with one credential, a repeated key replays, and nothing about
+    the isolation of two credentials can be seen.
+    """
+    from model_gateway.http.auth import create_auth_middleware
+    from model_gateway.security.api_keys import ApiKeySet
+
+    registry = make_registry()
+    app = Application(router=Router())
+    app.middlewares.append(
+        create_auth_middleware(
+            ApiKeySet.from_settings(
+                _settings(GATEWAY_API_KEYS=f"{CREDENTIAL_A}:tenant-a,{CREDENTIAL_B}:tenant-b")
+            ),
+            auth_enabled=True,
+            allow_anonymous_health=False,
+        )
+    )
+    register_error_handlers(app)
+    register_chat_routes(app.router, InferenceService(registry, provider))
+    return app
+
+
+def _settings(**values):
+    """Settings with the given values layered over the process environment."""
+    import os
+
+    from model_gateway.config import Settings
+
+    layered = {**os.environ, **values}
+    return Settings.from_env(layered)
+
+
 @pytest.fixture
 async def provider():
     return FakeTextProvider()
@@ -178,8 +218,10 @@ def payload(**overrides):
     return body
 
 
-async def post(client, body):
-    return await client.post("/v1/chat/completions", content=JSONContent(body))
+async def post(client, body, *, headers=None):
+    return await client.post(
+        "/v1/chat/completions", content=JSONContent(body), headers=headers
+    )
 
 
 async def test_happy_path_returns_the_documented_response_shape(client):
@@ -770,3 +812,38 @@ async def test_no_response_body_carries_upstream_configuration(client):
         assert SECRET_KEY not in body
         assert UPSTREAM_ENDPOINT not in body
         assert "upstream-text" not in body
+
+
+async def test_two_credentials_sharing_a_key_are_two_independent_operations(client, provider):
+    """The same key under two credentials is two operations, not one.
+
+    Credential A and credential B are separate trusted principals, so a key each
+    uses names an operation of its own. Neither may replay the other's answer, and
+    a repeat by A replays A's own.
+    """
+    app = build_authenticated_app(provider)
+    await app.start()
+    try:
+        a_client = TestClient(app)
+        b_client = TestClient(app)
+
+        headers_a = {"Authorization": f"Bearer {CREDENTIAL_A}"}
+        headers_b = {"Authorization": f"Bearer {CREDENTIAL_B}"}
+
+        first = await post(
+            a_client, payload(idempotency_key="shared-key"), headers=headers_a
+        )
+        second = await post(
+            b_client, payload(idempotency_key="shared-key"), headers=headers_b
+        )
+        repeat = await post(
+            a_client, payload(idempotency_key="shared-key"), headers=headers_a
+        )
+
+        assert first.status == second.status == repeat.status == 200
+        assert (await first.json())["idempotency_status"] == "new"
+        assert (await second.json())["idempotency_status"] == "new"
+        assert (await repeat.json())["idempotency_status"] == "replayed"
+        assert len(provider.calls) == 2
+    finally:
+        await app.stop()
