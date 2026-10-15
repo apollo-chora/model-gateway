@@ -272,3 +272,51 @@ async def test_a_store_failure_surfaces_rather_than_being_swallowed() -> None:
         await gateway.invoke(request())
 
     assert provider.calls == []
+
+
+async def test_a_waiter_joining_an_inflight_invocation_reports_replayed():
+    """A coalesced waiter reports ``replayed``, because it never initiated the call.
+
+    The owner's provider is held open on an event the test controls, so the waiter
+    is guaranteed to join while the invocation is in flight rather than after it
+    completed — the distinction the status exists to make.
+    """
+    gate = asyncio.Event()
+    release = asyncio.Event()
+
+    class GatedProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete(self, route, request, context):
+            self.calls += 1
+            gate.set()
+            await release.wait()
+            from model_gateway.domain import FinishReason, InvocationResponse, TextPart
+
+            return InvocationResponse(
+                model=request.model,
+                upstream_model=route.model_id,
+                content=(TextPart("sunny in Paris"),),
+                finish_reason=FinishReason.STOP,
+            )
+
+    gated = GatedProvider()
+    store = MemoryIdempotencyStore()
+    gateway = InferenceService(registry(), gated, idempotency_store=store)
+
+    async def invoke():
+        return await gateway.invoke(request(), namespace="acme:cred-a")
+
+    owner = asyncio.create_task(invoke())
+    await gate.wait()
+
+    waiter = asyncio.create_task(invoke())
+    await asyncio.sleep(0)
+    release.set()
+
+    first, second = await asyncio.gather(owner, waiter)
+
+    assert first.idempotency_status is IdempotencyStatus.NEW
+    assert second.idempotency_status is IdempotencyStatus.REPLAYED
+    assert gated.calls == 1
