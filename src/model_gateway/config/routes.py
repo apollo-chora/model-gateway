@@ -1,17 +1,17 @@
-"""Configured inference routes: one operation block per capability (PRD sections 6, 7, 8, 11, 18).
+"""Configured inference routes: one operation block per capability.
 
 Each environment block — ``TEXT_LLM_*``, ``IMAGE_GEN_*``, ``EMBEDDINGS_*`` —
 describes one operation. The block's singleton variables define the primary
 route, and ``<BLOCK>_ROUTES_JSON`` appends additional routes in array order.
-Route order is fallback order (PRD section 11.2).
+Route order is fallback order.
 
 A ``<BLOCK>_ROUTES_JSON`` entry is self-contained: no field is inherited from
 the singleton block, because a fallback route may point at a different origin
-and must carry its own credentials (PRD section 7). Precedence between routes is
+and must carry its own credentials. Precedence between routes is
 positional, never field-merged.
 
 Configuration that cannot be read unambiguously is rejected rather than resolved
-by guessing (PRD section 11.1): a partially configured block, a setting left
+by guessing: a partially configured block, a setting left
 behind in a block that has no endpoint, model ID or format, an unknown
 capability or authentication type, an explicitly supplied but empty capability
 list, a reserved authentication header supplied as an extra header, an absolute
@@ -54,7 +54,7 @@ __all__ = ["Operation", "Route", "parse_routes"]
 
 
 class Operation(StrEnum):
-    """The upstream operation a configured route performs (PRD sections 6 and 10)."""
+    """The upstream operation a configured route performs."""
 
     TEXT = "text"
     IMAGE = "image"
@@ -63,22 +63,22 @@ class Operation(StrEnum):
 
 @dataclass(frozen=True)
 class Route:
-    """One configured inference target, validated at startup (PRD sections 6, 7, 8, 11).
+    """One configured inference target, validated at startup.
 
     ``endpoint`` is the base URL exactly as configured and ``base_url`` is that
     endpoint resolved under the URL policy, which is the value handed to the
-    inference binding as its base URL (PRD sections 8 and 9.6). ``api_key`` is the
-    route's credential and ``auth_type`` its authentication override: ``None``
+    inference binding as its base URL. ``api_key`` is the route's credential and
+    ``auth_type`` its authentication override: ``None``
     means the provider's native authentication, which is the default and the only
     honest reading of a route such as ``vertex_ai`` that authenticates through
     ambient credentials, while an explicit member means the route was configured
-    with a non-native header (PRD section 7). ``extra_headers`` holds only
+    with a non-native header. ``extra_headers`` holds only
     non-authentication headers, because a reserved authentication header is
     refused at parse time, and it is immutable so that a validated route cannot
     acquire one afterwards.
 
     ``dimensions`` and ``supports_dimensions_param`` are the embeddings
-    operation's own route properties (PRD sections 4.7, 6.3 and 9.6):
+    operation's own route properties:
     ``dimensions`` is the vector dimensionality the route declares — ``None``
     when the deployment declared none, which checks nothing rather than checking
     zero — and ``supports_dimensions_param`` states whether the route accepts a
@@ -104,12 +104,12 @@ class Route:
 
     @property
     def litellm_model(self) -> str:
-        """The provider-prefixed model string handed to LiteLLM (PRD section 9.6)."""
+        """The provider-prefixed model string handed to LiteLLM."""
         return f"{self.format}/{self.model_id}"
 
 
 class _ImmutableHeaders(dict[str, str]):
-    """A route's extra headers, frozen once the route has been validated (PRD section 7).
+    """A route's extra headers, frozen once the route has been validated.
 
     A plain ``dict`` inside a frozen dataclass is only a shallow freeze: assigning
     to it would let a validated route acquire a reserved authentication header the
@@ -210,7 +210,7 @@ def parse_routes(
     Routes come back in a deterministic order: by operation (text, image,
     embeddings) and, within an operation, by route index — the singleton block's
     primary route first, then ``<BLOCK>_ROUTES_JSON`` entries in array order.
-    That order is the fallback order of PRD section 11.2.
+    That order is the fallback order.
 
     ``resolver`` resolves hostnames for the URL policy and exists so that tests
     can validate routes without DNS; deployments use the system resolver.
@@ -218,7 +218,7 @@ def parse_routes(
     ``GATEWAY_ALLOWED_UPSTREAM_HOSTS`` is read from the same environment, because the
     allowlist restricts which endpoints may be *configured* and this is where routes
     are configured: a route outside it fails the start, naming the variable that
-    produced it, rather than being discovered in a bill (PRD section 14).
+    produced it, rather than being discovered in a bill.
     """
     source = os.environ if env is None else env
     _reject_indexed_form(source)
@@ -512,10 +512,10 @@ def _singleton_capabilities(block: _Block, raw: str) -> frozenset[Capability]:
 def _singleton_dimensions(block: _Block, raw: str) -> int | None:
     """The block's declared embedding dimensionality: ``None`` when undeclared.
 
-    A declared dimensionality must be a positive integer (PRD section 6.3): a
+    A declared dimensionality must be a positive integer: a
     vector of zero or negative length is not a dimensionality any model has, and
     a value the gateway cannot read is a configuration error rather than
-    something to guess at (PRD section 11.1).
+    something to guess at.
     """
     variable = _variable(block, _DIMENSIONS)
     if not raw:
@@ -589,10 +589,10 @@ def _capability(where: str, token: str) -> Capability:
 def _parse_auth_type(where: str, raw: str) -> AuthType | None:
     """Parse an authentication override; ``None`` means the provider's native scheme.
 
-    An absent value is not the same as ``bearer``: PRD section 7 makes native
-    provider authentication the default and scopes ``*_AUTH_TYPE`` to custom
-    endpoints, so collapsing the two would tell the credential rules that a
-    ``vertex_ai`` route presents a bearer token when it actually uses ADC.
+    An absent value is not the same as ``bearer``: native provider authentication
+    is the default and ``*_AUTH_TYPE`` is scoped to custom endpoints, so
+    collapsing the two would tell the credential rules that a ``vertex_ai``
+    route presents a bearer token when it actually uses ADC.
     """
     if not raw:
         return None

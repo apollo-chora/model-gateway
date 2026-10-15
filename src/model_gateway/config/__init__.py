@@ -1,4 +1,4 @@
-"""Deployment configuration for the gateway (PRD sections 6, 7, 18)."""
+"""Deployment configuration for the gateway."""
 
 from model_gateway.config.settings import (
     ConfigurationError,

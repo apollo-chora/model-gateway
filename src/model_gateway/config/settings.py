@@ -1,4 +1,4 @@
-"""Deployment settings loaded and validated at startup (PRD sections 6, 7, 15, 18).
+"""Deployment settings loaded and validated at startup.
 
 Environment variables are the authoritative deployment configuration. Every
 value a deployment can set is described once, in ``_FIELDS``, and parsed by the
@@ -24,7 +24,7 @@ _MAX_PORT = 65535
 
 
 class Environment(StrEnum):
-    """Deployment environment, which selects the security policy (PRD section 7)."""
+    """Deployment environment, which selects the security policy."""
 
     DEVELOPMENT = "development"
     TEST = "test"
@@ -32,7 +32,7 @@ class Environment(StrEnum):
 
 
 class UsageStorage(StrEnum):
-    """Where usage and cost records are persisted (PRD section 13)."""
+    """Where usage and cost records are persisted."""
 
     NONE = "none"
     MEMORY = "memory"
