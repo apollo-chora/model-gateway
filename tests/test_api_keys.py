@@ -1,4 +1,4 @@
-"""Inbound API-key parsing, verification and identity (PRD section 7).
+"""Inbound API-key parsing, verification and identity.
 
 Every test is hermetic: settings are built from an explicit environment
 mapping, no real environment is read. The secrets used here are meaningless

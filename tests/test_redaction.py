@@ -1,6 +1,6 @@
-"""Log redaction: what the gateway must not write down (PRD sections 14 and 17).
+"""Log redaction: what the gateway must not write down.
 
-Section 17 requires that prompts, responses, credentials and private tool arguments
+Prompts, responses, credentials and private tool arguments
 are not logged by default. These tests prove the rule is *enforced* rather than
 merely observed — today nothing logs those things, and the point of the processor
 is that the next change cannot start to.
@@ -104,7 +104,7 @@ def test_the_gateways_own_vocabulary_is_not_redacted():
 
 
 def test_the_keys_the_rule_names_are_all_in_the_set():
-    """The four things section 17 names, each with a key that names it."""
+    """The four sensitive categories, each with a key that names it."""
     named = (
         "prompt",
         "messages",

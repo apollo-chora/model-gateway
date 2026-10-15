@@ -1,4 +1,4 @@
-"""Unit tests for the transport-independent tenant reconciliation (PRD section 5.1).
+"""Unit tests for the transport-independent tenant reconciliation.
 
 :func:`reconcile_identity` is the policy both transports call, so it is tested
 here on its own rather than through one wire format. The HTTP surface's use of

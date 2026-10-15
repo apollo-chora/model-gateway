@@ -1,6 +1,6 @@
-"""The inbound body-size limit (PRD section 14).
+"""The inbound body-size limit.
 
-Section 14 requires request-body size limits, and this is the suite for the one the
+The gateway requires request-body size limits, and this is the suite for the one the
 HTTP transport applies. Three things are worth proving separately: that the bound
 is configuration and a deployment cannot configure it away, that a request which
 *states* an oversized length is refused without the gateway buffering a byte of it,
@@ -59,7 +59,7 @@ deterministic. The bound is what this suite is about; the route only has to pars
 
 
 def test_the_deployment_that_configures_nothing_still_gets_a_bound():
-    """Section 14's rule that production must not silently fall back to insecure.
+    """The rule that production must not silently fall back to insecure.
 
     A body limit that only exists when someone remembers to set it is not a limit:
     the deployment that never thought about it is the one that needs it, and it is
@@ -77,7 +77,7 @@ def test_a_bound_that_is_not_a_positive_whole_number_is_refused_at_startup(value
     """Zero is refused rather than read as "no limit".
 
     A limit of zero bytes refuses every request and a limit that is absent is the
-    behaviour section 14 requires the gateway not to have, so neither is a
+    behaviour the gateway is required not to have, so neither is a
     configuration a deployment may state: the setting tunes the bound rather than
     removing it.
     """

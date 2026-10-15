@@ -1,4 +1,4 @@
-"""Unit tests for the trusted-identity invariants (PRD sections 5.1 and 7).
+"""Unit tests for the trusted-identity invariants.
 
 :class:`Identity` is the transport-neutral principal both the HTTP and gRPC
 layers construct, so the two states its fields can hold are enforced here at

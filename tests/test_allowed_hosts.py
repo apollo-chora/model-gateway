@@ -1,7 +1,7 @@
-"""The optional upstream hostname allowlist (PRD section 14).
+"""The optional upstream hostname allowlist.
 
-Section 14 lists an upstream hostname allowlist among the controls the gateway must
-implement, with configuring one optional. Two properties make it worth having and
+An upstream hostname allowlist is one of the controls the gateway implements, with
+configuring one optional. Two properties make it worth having and
 both are asserted here: it **restricts what may be configured**, so a route added
 later that reaches an unlisted provider fails the start rather than being discovered
 in a bill; and it **narrows and never widens**, so a host on the allowlist still has
