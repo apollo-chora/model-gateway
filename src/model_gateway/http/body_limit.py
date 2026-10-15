@@ -31,6 +31,17 @@ reads the body, so the order is a statement about what an unidentified caller is
 told: that it is unidentified, rather than something about the gateway's
 configuration. With authentication disabled the size check is the only one that
 runs, which is the deployment that needs it most.
+
+**What the measured path bounds, and what it does not.** It bounds what the gateway
+*accepts*: a body over the bound is never handed to a handler, so no request
+validation, routing or provider work happens on it. It does not bound what the
+server spent receiving that body, because a middleware is given a body the server
+has already read. Framing guarantees — that a message ends where its declared
+length says, that a chunked body is well formed, and that an edge proxy and this
+server agree on both — belong to the server and to whatever sits in front of it,
+and a middleware cannot repair a disagreement about where a request ends after the
+fact. The declared-length path is the cheap refusal either way, because it never
+asks for the body at all.
 """
 
 from collections.abc import Awaitable, Callable

@@ -6,6 +6,18 @@ is configuration and a deployment cannot configure it away, that a request which
 *states* an oversized length is refused without the gateway buffering a byte of it,
 and that a request which states no length is measured rather than waved through —
 because a bound a caller evades by declining to state a size is not a bound.
+
+**What this suite proves and what it does not.** It proves the limit's decisions
+once a request is available to a middleware: an oversized declared length is
+refused without the body being read, a body that declares no length is measured,
+and the gRPC listener refuses an oversized message. It does **not** establish when
+the HTTP server begins buffering a real network body, because the requests here are
+constructed rather than received: a middleware is given a body the server has
+already read, so what the limit bounds is what the gateway accepts and processes,
+not the cost of receiving it. Framing guarantees — where a message ends, whether a
+chunked body is well formed, and whether a proxy in front agrees — are the server's
+and the deployment's, and no middleware can repair a disagreement about them after
+the fact.
 """
 
 import grpc
