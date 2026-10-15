@@ -99,6 +99,7 @@ from model_gateway.domain import (
     InvocationResponse,
     Message,
     OutputItem,
+    RefusalPart,
     ResponseFormat,
     ResponseFormatMode,
     Role,
@@ -602,17 +603,59 @@ def _raw_finish_reason(choice: Choices | StreamingChoices) -> str:
 def _output(message: LiteLLMMessage) -> tuple[OutputItem, ...]:
     """The message's answer as an ordered sequence of canonical output items.
 
-    Text, then images, then tool calls: the order the upstream shape preserves.
-    LiteLLM's ``Message`` records content, images and tool calls in separate
-    fields, so the relative order of a tool call and the text around it is not
-    something the upstream kept, and this fixed order loses nothing it did.
+    Text, then a refusal, then images, then tool calls: the order the upstream
+    shape preserves. LiteLLM's ``Message`` records content, images and tool calls
+    in separate fields, so the relative order of a tool call and the text around
+    it is not something the upstream kept, and this fixed order loses nothing it
+    did.
+
+    A refusal is mapped rather than refused, because the canonical model carries
+    one as a part of its own (PRD sections 5.2 and 9.1). The two are mutually
+    exclusive in practice — a provider that declines sends no content — so the
+    position relative to text is a stated convention rather than a reconstruction.
     """
     items: list[OutputItem] = []
     if message.content is not None:
         items.append(TextPart(text=message.content))
+    refusal = _refusal_text(message)
+    if refusal is not None:
+        items.append(RefusalPart(text=refusal))
     items.extend(_output_image(entry) for entry in getattr(message, "images", None) or ())
     items.extend(_incoming_tool_call(call) for call in message.tool_calls or ())
     return tuple(items)
+
+
+def _refusal_text(message: LiteLLMMessage) -> str | None:
+    """The provider's refusal text, wherever the library recorded it, or ``None``.
+
+    The library records a refusal in one of two places depending on the path it
+    took to the answer: on the message as ``refusal``, or inside
+    ``provider_specific_fields``. Both are read, because which one a dialect uses
+    is the library's business and the binding must not depend on it.
+
+    ``None`` is the ordinary case rather than a refusal. Every OpenAI response
+    carries the field, with ``null`` when the model did not decline, so treating a
+    present-but-null value as a refusal would invent one for every answer — and
+    treating it as an unrepresentable provider field, which is what the binding
+    used to do, refuses every answer instead.
+
+    A refusal that is not text is refused rather than coerced, for the reason the
+    delta side gives: the canonical part carries the provider's words, and a value
+    that is not a string is a shape the gateway would be inventing.
+    """
+    for source in (
+        getattr(message, "refusal", None),
+        (getattr(message, "provider_specific_fields", None) or {}).get("refusal"),
+    ):
+        if source is None:
+            continue
+        if not isinstance(source, str):
+            raise InternalError(
+                f"the upstream refusal is {type(source).__name__} rather than text, and the "
+                f"canonical refusal part carries the provider's words"
+            )
+        return source
+    return None
 
 def _output_image(entry: Mapping[str, object]) -> ImagePart:
     """An upstream image entry as a canonical image part (PRD 9.4)."""
@@ -926,10 +969,15 @@ def _reject_unmappable(response: ModelResponse, choice: Choices, message: LiteLL
 
     Each check names the field it refuses, so a drop cannot pass undetected:
     a response the canonical model cannot fully represent is rejected as
-    unsupported rather than silently trimmed (PRD section 9.1). The one
-    response-level field the binding inspects, ``system_fingerprint``, is
-    deliberately not here: it is classified non-semantic operational metadata
-    and ignored, from :data:`_NON_SEMANTIC_RESPONSE_FIELDS`.
+    unsupported rather than silently trimmed (PRD section 9.1). Two fields are
+    deliberately not here. The response-level ``system_fingerprint`` is
+    classified non-semantic operational metadata and ignored, from
+    :data:`_NON_SEMANTIC_RESPONSE_FIELDS`. The message-level ``refusal`` is
+    allowlisted because it is a canonical semantic the binding *reads* rather
+    than drops — :func:`_refusal_text` maps it to a canonical refusal part — and
+    the library records it in this field on the OpenAI SDK path, with ``null``
+    for every answer the model did not decline. Refusing the field instead is
+    what made every OpenAI-compatible answer an internal error.
     """
     if getattr(choice, "logprobs", None) is not None:
         raise InternalError(
@@ -942,7 +990,9 @@ def _reject_unmappable(response: ModelResponse, choice: Choices, message: LiteLL
         frozenset({"native_finish_reason"}),
     )
     _reject_extra_provider_fields(
-        getattr(message, "provider_specific_fields", None), "message", frozenset()
+        getattr(message, "provider_specific_fields", None),
+        "message",
+        frozenset({"refusal"}),
     )
     if getattr(message, "reasoning_content", None) is not None:
         raise InternalError(
@@ -1056,6 +1106,14 @@ def _reject_unmappable_delta(delta: Delta) -> None:
     rather than refused — but only in its function-call form, which is the form
     the canonical delta represents (PRD section 9.3).
 
+    A **refusal** is refused here even though the response side maps it, and the
+    asymmetry is the point: the canonical *model* carries a refusal part, so a
+    whole answer's refusal is representable, while the canonical *stream* has no
+    refusal event, so a streamed one is not. Dropping it would end the stream with
+    no event for the provider's decision and tell the caller the answer was
+    delivered. A ``None`` refusal is the ordinary case and is not refused, because
+    every OpenAI delta carries the field.
+
     Provider-specific fields on a delta are refused entirely, with nothing
     allowlisted: unlike a choice, a delta has no field the gateway reads from
     there, so any entry is an annotation it would otherwise be dropping.
@@ -1090,6 +1148,12 @@ def _reject_unmappable_delta(delta: Delta) -> None:
         raise InternalError(
             "the upstream chunk carries a legacy function call, which the canonical tool call "
             "delta cannot carry"
+        )
+    if getattr(delta, "refusal", None) is not None:
+        raise InternalError(
+            "the upstream chunk carries a refusal, which the canonical stream cannot carry: the "
+            "event vocabulary has no refusal event, and an empty stream would tell the caller the "
+            "answer was delivered"
         )
     _reject_extra_provider_fields(
         getattr(delta, "provider_specific_fields", None), "chunk delta", frozenset()
