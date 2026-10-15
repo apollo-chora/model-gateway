@@ -60,6 +60,8 @@ from model_gateway.domain.serialization import (
     reject_unknown_keys,
 )
 from model_gateway.errors import InvalidArgumentError
+from model_gateway.http.auth import get_identity
+from model_gateway.security.identity import caller_namespace
 
 if TYPE_CHECKING:
     from model_gateway.inference import InferenceService
@@ -152,7 +154,8 @@ def create_image_generations(service: InferenceService) -> ImagesHandler:
 
     async def image_generations(request: Request) -> Response:
         image_request = image_generation_request_from_payload(await _read_json_body(request))
-        response = await service.generate(image_request)
+        identity = get_identity(request)
+        response = await service.generate(image_request, namespace=caller_namespace(identity))
         return json(ImageGenerationResponse.from_image_response(response).to_dict())
 
     return image_generations
