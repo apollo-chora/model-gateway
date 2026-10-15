@@ -30,10 +30,18 @@ import structlog
 from blacksheep import Application
 from blacksheep.settings.json import json_settings
 
+from model_gateway.accounting import (
+    AccountingRecorder,
+    AccountingSink,
+    MemoryAccountingSink,
+    NullAccountingSink,
+    pricing_from_env,
+)
 from model_gateway.app_logging import configure_logging
 from model_gateway.capabilities import Capability
 from model_gateway.config import ConfigurationError, Settings
 from model_gateway.config.routes import Operation
+from model_gateway.config.settings import UsageStorage
 from model_gateway.errors import FailedPreconditionError
 from model_gateway.grpc.server import GrpcServer
 from model_gateway.health import healthz, readyz
@@ -131,6 +139,52 @@ def _ensure_editing_is_not_advertised(registry: ModelRegistry) -> None:
                 )
 
 
+_DEFAULT_CAPACITY = 100_000
+
+
+def sink_for(storage: UsageStorage) -> AccountingSink:
+    """The sink a storage mode names.
+
+    ``none`` discards records: a deployment that does not want usage or cost
+    accounting gets a sink that does not hold anything, rather than an
+    in-memory store no one reads. ``memory`` holds them in process, which is
+    the default standalone deployment and is sufficient for one instance.
+
+    The durable modes are named by the settings vocabulary but not
+    implemented here: they need configured persistence (§13), which this slice
+    does not presume. An unrecognised mode is a configuration error, not a
+    silent fall-back to memory, because a deployment that asks for durable
+    records and loses them on restart is worse than one that refuses to start.
+    """
+    if storage is UsageStorage.NONE:
+        return NullAccountingSink()
+    if storage is UsageStorage.MEMORY:
+        return MemoryAccountingSink()
+    raise ConfigurationError(
+        f"USAGE_STORAGE is {storage.value!r}, which requires configured persistence "
+        "that this deployment does not provide; use memory or none"
+    )
+
+
+def _accounting(settings: Settings) -> AccountingRecorder | None:
+    """The accounting the deployment configured, or none when it tracks nothing.
+
+    Both settings must be on for records to exist: usage tracking with no
+    pricing data would record counts no one can cost, and cost tracking with
+    no usage data would price nothing. A deployment that wants usage but not
+    cost — or the reverse — says so by turning one off, and the other is
+    ignored rather than silently dropped.
+
+    An unconfigured pricing table is not an error: usage is still recorded,
+    with no cost, which is the honest state of a deployment that has not said
+    what its models cost. Cost estimation is optional; usage is not.
+    """
+    if not settings.usage_tracking_enabled:
+        return None
+    pricing = pricing_from_env() if settings.cost_tracking_enabled else None
+    return AccountingRecorder(sink_for(settings.usage_storage), pricing)
+
+
 def _orjson_dumps(obj) -> str:
     return orjson.dumps(obj).decode("utf-8")
 
@@ -189,6 +243,7 @@ def create_app(
             retry_count=settings.provider_retry_count,
             retry_backoff_ms=settings.provider_retry_backoff_ms,
             limiter=ConcurrencyLimiter(settings.provider_max_concurrent_requests),
+            accounting=_accounting(settings),
         )
 
     api_keys = ApiKeySet.from_settings(settings)
