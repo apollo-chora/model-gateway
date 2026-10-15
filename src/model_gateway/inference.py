@@ -61,6 +61,23 @@ section 9's boundary, and this module is the policy side of it:
   attempt's, which is the most informative one; a deadline that ran out before
   another attempt could begin is reported as a deadline error instead.
 
+**An idempotency key is answered from the gateway's own record.** A
+non-streaming invocation may carry one, and a repeat of the same request is
+answered from the record of the first answer rather than by asking the provider
+again — the provider is called once and every equivalent repeat is served from
+the record, which is what prevents duplicate accounting (PRD section 12). The
+record is keyed by the caller's key and matched against a fingerprint of the
+request, so a key reused for a different body is a second request and is served
+as one rather than answered from the wrong answer; the gateway-minted invocation
+identifier is not part of the fingerprint, so a retry carrying a freshly minted
+one is still the same request. Only a completed answer is recorded, so a retry
+after a transient failure is allowed to retry and the gateway claims no
+exactly-once upstream execution. The record is consulted after the model is
+resolved and before any provider is called, so an unknown model is still a
+model-not-found error even when the key has a cached record. Streaming is
+deliberately excluded: a replayed stream would present an answer that was never
+produced token by token in this call as a stream, which the gateway does not do.
+
 The provider performs one gateway attempt and owns protocol translation and
 execution and nothing else (:mod:`model_gateway.providers.base`); one attempt
 may carry more than one wire request, because a provider's library can retry
@@ -137,6 +154,7 @@ from uuid import uuid4
 from model_gateway.capabilities import Capability
 from model_gateway.config.routes import Route
 from model_gateway.domain import (
+    IdempotencyStatus,
     ImagePart,
     InvocationRequest,
     InvocationResponse,
@@ -155,6 +173,11 @@ from model_gateway.errors import (
     GatewayError,
     MalformedResponseError,
     normalise_exception,
+)
+from model_gateway.idempotency import (
+    IdempotencyStore,
+    MemoryIdempotencyStore,
+    request_fingerprint,
 )
 from model_gateway.providers.base import (
     AttemptContext,
@@ -341,6 +364,7 @@ class InferenceService:
         retry_backoff_ms: int = 0,
         max_concurrent_requests: int = _DEFAULT_MAX_CONCURRENT_REQUESTS,
         limiter: ConcurrencyLimiter | None = None,
+        idempotency_store: IdempotencyStore | None = None,
     ) -> None:
         """Wire the service to the registry, the provider and the reliability policy.
 
@@ -393,6 +417,16 @@ class InferenceService:
         request arrives: a provider that cannot generate is a usable text and
         embeddings provider, and an image request it cannot serve is refused
         rather than handed to it (PRD sections 4.6 and 9.5).
+
+        ``idempotency_store`` is where the answers to keyed invocations are
+        recorded, so a repeat of the same request is answered from the record
+        rather than by asking the provider again (PRD section 12). It defaults to
+        an in-memory store, which is sufficient for a single-instance deployment;
+        a deployment that needs its records to survive a restart or to be shared
+        between instances configures a store of its own and passes it here. A
+        store that fails is a gateway defect and surfaces as one: it is never
+        swallowed into a re-run, because silently asking the provider again is
+        exactly the duplicate accounting the key exists to prevent.
         """
         if attempt_timeout is not None and not _is_usable_budget(attempt_timeout):
             raise ValueError(
@@ -408,6 +442,9 @@ class InferenceService:
         self._retry_backoff_ms = retry_backoff_ms
         self._limiter = (
             limiter if limiter is not None else ConcurrencyLimiter(max_concurrent_requests)
+        )
+        self._idempotency_store = (
+            idempotency_store if idempotency_store is not None else MemoryIdempotencyStore()
         )
 
     async def invoke(self, request: InvocationRequest) -> InvocationResponse:
@@ -430,9 +467,41 @@ class InferenceService:
         The returned ``attempt_count`` counts the gateway's own attempts and is
         not a count of upstream requests: the inference library can issue more
         than one request inside a single attempt (PRD section 11.3).
+
+        **An idempotency key is answered from the gateway's own record.** A
+        request carrying one is deduplicated here rather than upstream: a repeat
+        whose key *and* payload match a recorded answer is answered from that
+        record with :attr:`~model_gateway.domain.IdempotencyStatus.REPLAYED`, and
+        the provider is not called again — one provider call, and every
+        equivalent repeat served from the record, which is what prevents
+        duplicate accounting (PRD section 12). The match is on a fingerprint of
+        the request rather than on the key alone, so a key reused for a different
+        body is a second request and is served as one, never answered from the
+        wrong answer; the gateway-minted invocation identifier is not part of the
+        fingerprint, so a retry carrying a freshly minted one is still the same
+        request. Only a completed answer is recorded: a failure propagates and
+        leaves no record, so a retry after a transient failure is allowed to
+        retry, and the gateway claims no exactly-once upstream execution. The
+        record is consulted after the model is resolved and before any provider
+        is called, so an unknown model is a
+        :class:`~model_gateway.errors.ModelNotFoundError` even when the key has
+        a cached record. A request without a key is unaffected by all of this:
+        it is never recorded and reports ``NOT_APPLICABLE``.
         """
         routes = self._registry.routes_for(request.model)
-        return await self._invoke_on(request, routes)
+        key = request.idempotency_key
+        if key is None:
+            return await self._invoke_on(request, routes)
+
+        fingerprint = request_fingerprint(request)
+        record = self._idempotency_store.get(key)
+        if record is not None and record.fingerprint.digest == fingerprint.digest:
+            return replace(record.response, idempotency_status=IdempotencyStatus.REPLAYED)
+
+        response = await self._invoke_on(request, routes)
+        recorded = replace(response, idempotency_status=IdempotencyStatus.NEW)
+        self._idempotency_store.put(key, fingerprint, recorded)
+        return recorded
 
     async def invoke_stream(self, request: InvocationRequest) -> AsyncIterator[StreamEvent]:
         """Invoke the public model named by ``request.model``, streaming the answer.
@@ -474,6 +543,13 @@ class InferenceService:
         authoritative and the exception is control-flow metadata: both describe
         the same single failure, so the exception must not be read as a second
         one.
+
+        **Idempotency does not apply here, deliberately.** A replayed stream would
+        be a synthetic stream of an answer that was never produced token by token
+        in this call, which contradicts the gateway's standing rule that it never
+        presents a non-streamed answer as streaming. A request that carries an
+        idempotency key is therefore served as a stream like any other, and its
+        ``idempotency_status`` stays ``NOT_APPLICABLE``.
         """
         routes = self._registry.routes_for(request.model)
         if not isinstance(self._provider, StreamingTextProvider):
