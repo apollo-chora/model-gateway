@@ -512,7 +512,13 @@ class InferenceService:
         if claim.kind == "completed":
             return replace(claim.record.response, idempotency_status=IdempotencyStatus.REPLAYED)
         if claim.kind == "waiter":
-            return await settle(claim.future)
+            # A waiter did not initiate provider execution, and the status names
+            # this request's handling rather than the invocation's. The owner's
+            # answer is what it is handed, but the stamp is its own: telling a
+            # coalesced caller "new" would report that its request reached the
+            # provider, which is the accounting fact the field exists to carry.
+            response = await settle(claim.future)
+            return replace(response, idempotency_status=IdempotencyStatus.REPLAYED)
 
         try:
             response = await self._invoke_on(request, routes)
