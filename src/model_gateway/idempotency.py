@@ -56,7 +56,7 @@ from model_gateway.domain import (
     InvocationResponse,
 )
 from model_gateway.domain.serialization import as_int, as_required_text
-from model_gateway.errors import IdempotencyConflictError
+from model_gateway.errors import IdempotencyConflictError, UnavailableError
 
 __all__ = [
     "IdempotencyRecord",
@@ -328,6 +328,19 @@ def _resolve_future(future: asyncio.Future[Any], outcome: Any) -> None:
     """
     if future.done():
         return
+    if isinstance(outcome, asyncio.CancelledError):
+        # The owner's own caller went away. That produced no answer and is not a
+        # failure the taxonomy owns, but a waiter still needs a defined failure
+        # rather than a CancelledError object presented as a response — a
+        # CancelledError is a BaseException, so it would otherwise be installed as
+        # the future's *result*.
+        future.set_exception(
+            UnavailableError(
+                "the invocation's owning caller was cancelled before it completed, so no "
+                "answer was produced; a repeat will run again"
+            )
+        )
+        return
     if isinstance(outcome, Exception):
         future.set_exception(outcome)
         return
@@ -337,8 +350,13 @@ def _resolve_future(future: asyncio.Future[Any], outcome: Any) -> None:
 async def settle(future: asyncio.Future[Any]) -> Any:
     """The outcome of a claim a caller is waiting on: the answer, or the failure.
 
+    The future is *shielded*, because it is shared by every waiter. Awaiting a bare
+    future propagates a waiter's own cancellation into it, so one caller going away
+    would cancel the claim for every other waiter and for the owner too. Shielding
+    means a waiter cancels only its own wait.
+
     A cancellation of the caller's own request propagates rather than being reported
     as the invocation's failure: the caller went away, and that is not a fact about
     the invocation.
     """
-    return await future
+    return await asyncio.shield(future)
