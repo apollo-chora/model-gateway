@@ -1,5 +1,5 @@
 """Reliability primitives: the policy the gateway's retry, fallback and
-concurrency loop is built from (PRD sections 11.3 and 15).
+concurrency loop is built from.
 
 This module is pure policy. It imports the gateway's own error taxonomy, the
 standard library's clock and its random source, and nothing else: no HTTP, no
@@ -26,8 +26,8 @@ and codes against the names this module exports.
   attempts and the number of callers queued for one, so an overload is shed
   instead of buffered in process memory.
 
-PRD section 15 gives the gateway one deadline per invocation and requires that
-a retry must not exceed the caller's remaining deadline. These primitives are
+The gateway gives one deadline per invocation and requires that a
+retry must not exceed the caller's remaining deadline. These primitives are
 how that is enforced: time is subtracted, never reset, and a wait that would
 consume the last of the budget is refused rather than slept.
 """
@@ -63,7 +63,7 @@ __all__ = [
 # schedule would outlast any invocation budget, and with the deployment's
 # default 110 second provider timeout a 30 second delay still leaves room for
 # the attempt itself. The schedule is exponential in the attempt count, so the
-# ceiling is what keeps "retries must be bounded" (PRD 11.2) true for every
+# ceiling is what keeps "retries must be bounded" true for every
 # retry count a deployment configures. It caps the jittered delay, so it is a
 # bound on the wait itself and not merely on the schedule underneath it.
 BACKOFF_CEILING_SECONDS = 30.0
@@ -102,7 +102,7 @@ def _usable_seconds(value: object) -> bool:
 
 @dataclass(frozen=True)
 class Deadline:
-    """One invocation budget covering every attempt, retry and fallback (PRD 15).
+    """One invocation budget covering every attempt, retry and fallback.
 
     The gateway enforces a single total deadline per invocation, and this
     object is that deadline as a value: provider timeouts, connect timeouts,
@@ -242,8 +242,7 @@ def is_retryable(error: BaseException, *, remaining: float | None = None) -> boo
 
     * :class:`~model_gateway.errors.UnavailableError` — no provider could serve
       the request (``PROVIDER_UNAVAILABLE``). A provider being down is
-      transient: the retry may reach it after it recovers, and PRD section 11.2
-      names connection failures a retry trigger.
+      transient: the retry may reach it after it recovers.
     * :class:`~model_gateway.errors.DeadlineExceededError` — a deadline expired,
       retryable only while the invocation deadline still has budget left.
       ``remaining`` is the seconds left in the invocation's :class:`Deadline`,
@@ -252,9 +251,8 @@ def is_retryable(error: BaseException, *, remaining: float | None = None) -> boo
       attempt may fit inside it. Once the budget is gone (``remaining`` is zero)
       there is nothing left to fit an attempt into. ``remaining=None`` means the
       gateway set no invocation deadline at all, so a provider timeout consumes
-      no gateway budget and stays retryable while the retry count allows — PRD
-      section 11.2 lists timeouts a retry trigger, and with no deadline the
-      retry count is the only bound.
+      no gateway budget and stays retryable while the retry count allows — timeouts
+      are a retry trigger, and with no deadline the retry count is the only bound.
 
     Not retryable on the same route, even though the category is transient:
 
@@ -281,8 +279,8 @@ def is_retryable(error: BaseException, *, remaining: float | None = None) -> boo
     *answer* — a route that just answered wrongly is unlikely to answer
     differently immediately, so a same-route retry is not worth making even
     though the invocation may walk to another route; and an internal error is a
-    gateway defect, which PRD section 15 classes as a deterministic error
-    category — deterministic failures are reported, not retried into.
+    gateway defect, which is a deterministic error category — deterministic
+    failures are reported, not retried into.
     """
     if isinstance(error, DeadlineExceededError):
         return remaining is None or remaining > 0
@@ -321,8 +319,8 @@ def is_fallback_eligible(error: BaseException, *, remaining: float | None = None
       belongs to the route that answered it that another eligible route can
       serve the same request correctly, so the invocation walks — while the
       route that just answered wrongly is not worth retrying immediately (see
-      :func:`is_retryable`). PRD section 11.2 keeps the two decisions separate
-      for exactly this kind of failure.
+      :func:`is_retryable`). Keeping the two decisions separate matters for
+      exactly this kind of failure.
 
     Everything else is not eligible: the failure describes the request or the
     caller and would repeat on any route, or it is a gateway defect.
@@ -399,7 +397,7 @@ def backoff_seconds(
     shortened. Pass ``remaining`` — the seconds left in the invocation's
     :class:`Deadline`, as ``deadline.remaining()`` — and a positive delay that
     is not strictly less than it raises
-    :class:`~model_gateway.errors.DeadlineExceededError`. PRD section 15
+    :class:`~model_gateway.errors.DeadlineExceededError`. The gateway
     requires that a retry must not exceed the caller's remaining deadline, and
     clamping the delay to what was left would sleep until the deadline expired
     and then fail anyway, having knowingly waited for a retry that could never

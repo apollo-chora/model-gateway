@@ -1,9 +1,10 @@
-"""The gateway's operational metrics (PRD section 17).
+"""The gateway's operational metrics.
 
-Eleven metrics, named by the PRD, rendered in the Prometheus text exposition
+Eleven metrics rendered in the Prometheus text exposition
 format. The gateway carries its own small registry rather than taking a metrics
 client dependency, and the reason is the format rather than the arithmetic: the
-PRD fixes the metric names, so what has to be exactly right is the wire text —
+The metric names are fixed public names, so what has to be exactly right is the
+wire text —
 the ``# HELP`` and ``# TYPE`` lines, the escaping rules and the histogram's
 bucket series — and that is a stable public format this module pins with golden
 tests rather than a library's version-sensitive API.
@@ -13,13 +14,13 @@ is incremented at the place the fact is known — a request arriving, an attempt
 being made, a token count being recorded — and read once, when the exposition is
 rendered. Nothing here samples, aggregates or interprets: a counter that is never
 incremented is a counter that has nothing to say, which is why every metric the
-PRD names is wired where its fact is decided and the exposition shows zero for the
+each metric is wired where its fact is decided and the exposition shows zero for the
 ones a given deployment never reaches.
 
-**Labels are deliberately absent.** The PRD names each metric without labels, and
-a label set is a claim about which dimensions the gateway publishes and therefore
+**Labels are deliberately absent.** The gateway names each metric without labels,
+and a label set is a claim about which dimensions the gateway publishes and therefore
 about the cardinality an operator's metrics backend must hold. Adding one is a
-contract decision the PRD does not settle, so this registry renders one series per
+contract decision this gateway does not settle, so this registry renders one series per
 metric; a revision that settles the dimensions adds them here and to the golden
 tests together.
 
@@ -160,10 +161,10 @@ class Histogram:
 
 
 class Metrics:
-    """The gateway's metrics, one of each the PRD names.
+    """The gateway's metrics, one of each.
 
-    Every field is a metric with the name the PRD gives it, so a reader can match
-    this class against section 17's list line for line. The names are attributes
+    Every field is a metric with a fixed, published name, so a reader can match
+    this class against ``METRIC_NAMES`` line for line. The names are attributes
     rather than a dictionary because they are fixed: a deployment cannot add,
     rename or remove one, and an operator's dashboard is written against them.
     """
@@ -217,7 +218,7 @@ class Metrics:
         )
 
     def all(self) -> tuple[Counter | Gauge | Histogram, ...]:
-        """Every metric, in the order the PRD lists them."""
+        """Every metric, in a fixed order."""
         return (
             self.requests_total,
             self.request_duration_seconds,
@@ -234,7 +235,7 @@ class Metrics:
 
 
 METRIC_NAMES: tuple[str, ...] = tuple(metric.name for metric in Metrics().all())
-"""The metric names, as section 17 lists them, for tests and operators to check against."""
+"""The metric names, for tests and operators to check against."""
 
 
 def _render_metric(metric: Counter | Gauge | Histogram) -> list[str]:
