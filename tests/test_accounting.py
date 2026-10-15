@@ -1,20 +1,28 @@
 """Usage and cost accounting: the record, the pricing, the sinks (PRD section 13).
 
-These tests prove the two rules the module is built on: a token count is either
-reported or estimated and the difference travels with it, and cost comes from
-configured pricing rather than from a vendor name. They also prove the service
-records a completed answer under the deployment's accounting setting, and that a
-recording failure is surfaced rather than swallowed.
+These tests prove the rules the module is built on: a token count is either
+reported or estimated and the difference travels with it, cost comes from
+configured pricing rather than from a vendor name, and a cost is reported only
+when every category the deployment priced is known — an incomplete sum is not
+reported as a cost. They also prove the service records a completed answer under
+the deployment's accounting setting, that a recording failure is logged rather
+than swallowed or propagated, and that the projection of a record covers every
+field the record declares.
 """
+
+import dataclasses
+from datetime import UTC
 
 import orjson
 import pytest
+from structlog.testing import capture_logs
 
 from model_gateway.accounting import (
     AccountingRecorder,
     MemoryAccountingSink,
     NullAccountingSink,
     PricingTable,
+    UsageRecord,
     pricing_from_env,
 )
 from model_gateway.capabilities import Capability
@@ -107,26 +115,104 @@ def test_a_model_with_no_configured_price_records_usage_and_no_cost():
     assert (cost, currency) == (None, None)
 
 
-def test_a_count_the_provider_never_reported_is_not_priced():
-    """An unreported count contributes no cost: zero would report a cost not incurred."""
-    pricing = pricing_from_env(
-        {
-            "COST_PRICING_JSON": orjson.dumps(
-                {"text-default": {"currency": "USD", "tokens": {"input": 3.0, "output": 15.0}}}
-            ).decode()
-        }
+def test_a_priced_category_the_provider_never_reported_makes_the_cost_unknown():
+    """A partial sum is not a cost.
+
+    The entry prices output tokens, so the deployment has said what output costs.
+    A provider that reported no output tokens has left a charge the gateway cannot
+    see, and reporting the input half as *the* cost would understate spend while
+    looking like a complete figure.
+    """
+    cost, currency = _table("USD", {"input": 3.0, "output": 15.0}).estimate(
+        Usage(input_tokens=1_000_000, output_tokens=None), "text-default"
     )
 
-    cost, _ = pricing.estimate(Usage(input_tokens=1_000_000, output_tokens=None), "text-default")
+    assert (cost, currency) == (None, None)
+
+
+def test_a_category_the_entry_does_not_price_is_not_a_missing_charge():
+    """An operator who priced only input tokens has said what input tokens cost."""
+    cost, currency = _table("USD", {"input": 3.0}).estimate(
+        Usage(input_tokens=1_000_000, output_tokens=None), "text-default"
+    )
 
     assert cost == pytest.approx(3.0)
+    assert currency == "USD"
 
 
-def test_malformed_pricing_configuration_is_refused_at_startup():
-    """A deployment that misconfigures its prices learns now, not after a month of bad bills."""
-    for raw in ("not json", "[]", '{"text-default": "expensive"}'):
-        with pytest.raises(ConfigurationError):
-            pricing_from_env({"COST_PRICING_JSON": raw})
+def test_no_known_billable_count_is_not_a_cost_of_zero():
+    """Zero would read as evidence of a free invocation, which nothing established."""
+    cost, currency = _table("USD", {"input": 3.0}).estimate(Usage(), "text-default")
+
+    assert (cost, currency) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("not json", id="not JSON at all"),
+        pytest.param("[]", id="a JSON array"),
+        pytest.param('{"text-default": "expensive"}', id="a scalar entry"),
+        pytest.param('{"": {"currency": "USD", "tokens": {"input": 3.0}}}', id="an empty model id"),
+        pytest.param(
+            '{"text-default": {"tokens": {"input": 3.0}}}', id="an entry with no currency"
+        ),
+        pytest.param('{"text-default": {"currency": "USD"}}', id="an entry with no tokens"),
+        pytest.param(
+            '{"text-default": {"currency": "  ", "tokens": {"input": 3.0}}}',
+            id="an empty currency",
+        ),
+        pytest.param(
+            '{"text-default": {"currency": "USD", "tokens": {"input": 3.0}, "note": "hi"}}',
+            id="an unknown entry key",
+        ),
+        pytest.param(
+            '{"text-default": {"currency": "USD", "tokens": {}}}', id="an entry that prices nothing"
+        ),
+        pytest.param(
+            '{"text-default": {"currency": "USD", "tokens": {"prompt": 3.0}}}',
+            id="an unknown token category",
+        ),
+        pytest.param(
+            '{"text-default": {"currency": "USD", "tokens": {"input": "3.0"}}}',
+            id="a string price",
+        ),
+        pytest.param(
+            '{"text-default": {"currency": "USD", "tokens": {"input": true}}}',
+            id="a boolean price",
+        ),
+        pytest.param(
+            '{"text-default": {"currency": "USD", "tokens": {"input": -3.0}}}',
+            id="a negative price",
+        ),
+    ],
+)
+def test_a_malformed_pricing_value_is_refused_at_startup(raw):
+    """A deployment that misconfigures its prices learns now, not after a month of bad bills.
+
+    Each case is a value that would otherwise reach a cost calculation and produce
+    a number the gateway could not stand behind.
+    """
+    with pytest.raises(ConfigurationError):
+        pricing_from_env({"COST_PRICING_JSON": raw})
+
+
+def test_a_non_finite_price_is_refused():
+    """JSON cannot carry one, but the value object is reachable without JSON."""
+    for bad in (float("inf"), float("nan"), float("-inf")):
+        with pytest.raises(ValueError):
+            _price("USD", {"input": bad})
+
+
+def test_an_absent_pricing_value_is_an_empty_table():
+    """A deployment that configures no prices is not a misconfiguration."""
+    assert pricing_from_env({}).prices == {}
+    assert pricing_from_env({"COST_PRICING_JSON": ""}).prices == {}
+
+
+def _table(currency: str, tokens) -> PricingTable:
+    """A one-model pricing table, for the estimate tests."""
+    return PricingTable(prices={"text-default": _price(currency, tokens)})
 
 
 # --------------------------------------------------------------------------- #
@@ -134,30 +220,82 @@ def test_malformed_pricing_configuration_is_refused_at_startup():
 # --------------------------------------------------------------------------- #
 
 
+_RECORD_KEYS = frozenset(
+    {
+        "invocation_id",
+        "timestamp",
+        "namespace",
+        "tenant",
+        "public_model",
+        "route_model_id",
+        "operation",
+        "capabilities",
+        "upstream_model",
+        "status",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "total_tokens",
+        "estimated_tokens",
+        "latency_ms",
+        "attempts",
+        "fallback_used",
+        "error_reason",
+        "estimated_cost",
+        "cost_currency",
+    }
+)
+"""Every field a record carries, and therefore every key its projection must have."""
+
+
+def test_the_projection_is_exhaustive_over_the_record():
+    """A field added to the record cannot be silently absent from what operators export.
+
+    The check is made against the dataclass rather than against a hand-written list,
+    so it is the *record* that defines the schema: a new field with no projection
+    fails here, and a projection key with no field fails here too.
+    """
+    assert {field.name for field in dataclasses.fields(UsageRecord)} == _RECORD_KEYS
+    assert set(_record().to_dict()) == _RECORD_KEYS
+
+
 def test_a_record_carries_every_fact_section_13_asks_for():
     record = _record()
+    projected = record.to_dict()
 
     assert record.status == "completed"
+    assert record.timestamp.tzinfo is UTC
     assert record.namespace == "cred-digest"
     assert record.tenant == "tenant-a"
     assert record.public_model == "text-default"
+    assert record.route_model_id == "upstream-text"
     assert record.operation is Operation.TEXT
     assert record.capabilities == frozenset({"chat"})
     assert record.upstream_model == "upstream-text"
-    assert (record.input_tokens, record.output_tokens, record.cached_tokens) == (10, 5, 2)
+    assert (
+        record.input_tokens,
+        record.output_tokens,
+        record.cached_tokens,
+        record.total_tokens,
+    ) == (10, 5, 2, 15)
     assert record.attempts == 2
     assert record.fallback_used is True
     assert record.error_reason is None
     assert record.latency_ms > 0
-    assert record.to_dict()["invocation_id"] == "inv-accounting-1"
+
+    assert projected["invocation_id"] == "inv-accounting-1"
+    assert projected["route_model_id"] == "upstream-text"
+    assert projected["operation"] == "text"
+    assert projected["capabilities"] == ["chat"]
+    assert projected["total_tokens"] == 15
+    assert projected["timestamp"] == record.timestamp.isoformat()
 
 
 def test_a_record_separates_reported_counts_from_derived_ones():
     """Provenance travels with the record, so a derived count is never a reported one."""
-    pricing = PricingTable(
-        prices={"text-default": _price("USD", {"input": 3.0, "output": 15.0, "cached": 0.3})}
+    recorder = AccountingRecorder(
+        MemoryAccountingSink(), _table("USD", {"input": 3.0, "cached": 0.3})
     )
-    recorder = AccountingRecorder(MemoryAccountingSink(), pricing)
 
     usage = Usage(input_tokens=10, output_tokens=None, cached_tokens=2)
     record = recorder.record(
@@ -175,8 +313,54 @@ def test_a_record_separates_reported_counts_from_derived_ones():
     assert record.cached_tokens == 2
     # Nothing was derived here: the provider reported every count it gave.
     assert record.estimated_tokens == frozenset()
-    # And every count it gave is priced, reported or not.
+    # And the cost covers exactly the categories the entry prices, all of them known.
     assert record.estimated_cost == pytest.approx(3.06e-05)
+
+
+def test_a_derived_count_is_marked_estimated_in_the_record():
+    """A count the gateway computed is never recorded as one the provider reported."""
+    recorder = AccountingRecorder(MemoryAccountingSink(), None)
+
+    usage = Usage(
+        input_tokens=10,
+        total_tokens=10,
+        estimated_fields=frozenset({"total_tokens"}),
+    )
+    record = recorder.record(
+        _request(),
+        response(usage=usage),
+        route(),
+        namespace="cred-digest",
+        latency_ms=1.0,
+        attempts=1,
+        fallback_used=False,
+    )
+
+    assert record.total_tokens == 10
+    assert record.estimated_tokens == frozenset({"total_tokens"})
+    assert record.to_dict()["estimated_tokens"] == ["total_tokens"]
+
+
+def test_a_record_refuses_a_route_of_another_operation():
+    """The route is an audit fact, so a mismatched pairing is refused rather than recorded.
+
+    A caller that handed the recorder the wrong route would produce a record that
+    looks valid and is not, and nothing downstream compares the two. The pairing is
+    known only where the record is built, so it is checked there rather than
+    trusted.
+    """
+    recorder = AccountingRecorder(MemoryAccountingSink(), None)
+
+    with pytest.raises(ValueError, match="embeddings"):
+        recorder.record(
+            _request(),
+            response(),
+            route(operation=Operation.EMBEDDINGS, capabilities=frozenset({Capability.EMBEDDINGS})),
+            namespace="cred-digest",
+            latency_ms=1.0,
+            attempts=1,
+            fallback_used=False,
+        )
 
 
 def _price(currency: str, tokens):
@@ -198,7 +382,7 @@ def test_a_null_sink_discards_records():
     assert len(sink) == 0
 
 
-async def test_a_memory_sink_holds_records_and_is_bounded():
+def test_a_memory_sink_holds_records_and_drops_the_oldest():
     """Eviction drops the oldest once full, so the newest records survive."""
     sink = MemoryAccountingSink(capacity=2)
     first = _record()
@@ -210,6 +394,37 @@ async def test_a_memory_sink_holds_records_and_is_bounded():
     sink.record(third)
 
     assert sink.records == (second, third)
+
+
+def test_a_memory_sink_of_capacity_one_holds_only_the_newest_record():
+    """The bound is a bound at every capacity, including the smallest one."""
+    sink = MemoryAccountingSink(capacity=1)
+
+    sink.record(_record())
+    newest = _record()
+    sink.record(newest)
+
+    assert sink.records == (newest,)
+    assert len(sink) == 1
+
+
+def test_a_memory_sink_never_exceeds_its_capacity():
+    """Many insertions past the bound leave exactly the newest records, in order."""
+    sink = MemoryAccountingSink(capacity=3)
+    records = [_record() for _ in range(20)]
+
+    for record in records:
+        sink.record(record)
+
+    assert sink.records == tuple(records[-3:])
+    assert len(sink) == 3
+
+
+def test_a_memory_sink_refuses_a_capacity_that_is_not_a_positive_integer():
+    """A bound that is not a bound is a configuration mistake, not a sink."""
+    for bad in (0, -1, True, 1.5, "3", None):
+        with pytest.raises(ValueError):
+            MemoryAccountingSink(capacity=bad)
 
 
 # --------------------------------------------------------------------------- #
@@ -247,7 +462,12 @@ async def test_the_service_does_not_record_when_accounting_is_disabled():
 
 
 async def test_a_recording_failure_is_logged_and_does_not_fail_the_invocation():
-    """A broken store must not withhold an answer the caller is waiting on."""
+    """A broken store must not withhold an answer the caller is waiting on.
+
+    Surviving is only half the contract: the failure must also reach the operator,
+    because a silently swallowed one would turn a broken store into a month of
+    unaccounted usage. The log is therefore asserted, not assumed.
+    """
     sink = _ExplodingSink()
     service = InferenceService(
         _one_route_registry(),
@@ -255,10 +475,47 @@ async def test_a_recording_failure_is_logged_and_does_not_fail_the_invocation():
         accounting=AccountingRecorder(sink, PricingTable()),
     )
 
-    answered = await service.invoke(_request(), namespace="cred-digest")
+    with capture_logs() as logs:
+        answered = await service.invoke(_request(), namespace="cred-digest")
 
     assert answered.text == "hello"
     assert sink.attempts == 1
+    reported = _storage_failures(logs)
+    assert len(reported) == 1
+    assert reported[0]["error_type"] == "RuntimeError"
+    assert reported[0]["invocation_id"] == answered.invocation_id
+
+
+async def test_a_recorder_defect_does_not_fail_the_invocation():
+    """The service's guard covers a recorder that fails before it reaches the sink.
+
+    Wrapping only the final write would leave a defect in record construction or
+    cost estimation able to replace the caller's answer with an error. The service
+    wraps the whole call, and this proves that boundary rather than the sink's.
+    """
+
+    class _BrokenPricing:
+        def estimate(self, usage, model):
+            raise RuntimeError("the pricing table is broken")
+
+    sink = MemoryAccountingSink()
+    service = InferenceService(
+        _one_route_registry(),
+        _EchoProvider(),
+        accounting=AccountingRecorder(sink, _BrokenPricing()),
+    )
+
+    with capture_logs() as logs:
+        answered = await service.invoke(_request(), namespace="cred-digest")
+
+    assert answered.text == "hello"
+    assert len(sink) == 0
+    assert len(_storage_failures(logs)) == 1
+
+
+def _storage_failures(logs):
+    """The log entries reporting that a usage record could not be stored."""
+    return [entry for entry in logs if entry["event"] == "usage record could not be stored"]
 
 
 class _ExplodingSink:
