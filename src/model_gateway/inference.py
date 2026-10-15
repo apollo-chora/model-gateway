@@ -191,6 +191,7 @@ from model_gateway.idempotency import (
     request_fingerprint,
     settle,
 )
+from model_gateway.limits import RateLimiter, TenantConcurrencyLimiter
 from model_gateway.providers.base import (
     AttemptContext,
     EmbeddingProvider,
@@ -421,6 +422,8 @@ class InferenceService:
         idempotency_store: IdempotencyStore | None = None,
         accounting: AccountingRecorder | None = None,
         accounting_enabled: bool = True,
+        rate_limiter: RateLimiter | None = None,
+        tenant_limiter: TenantConcurrencyLimiter | None = None,
     ) -> None:
         """Wire the service to the registry, the provider and the reliability policy.
 
@@ -483,6 +486,26 @@ class InferenceService:
         store that fails is a gateway defect and surfaces as one: it is never
         swallowed into a re-run, because silently asking the provider again is
         exactly the duplicate accounting the key exists to prevent.
+
+        ``rate_limiter`` and ``tenant_limiter`` are the two admission decisions of
+        PRD section 14, and both default to ``None``, which is a deployment that
+        configured neither. They are taken at each operation's entry, before the
+        model is resolved and before any provider is called, and that placement is
+        load-bearing rather than tidy: the walk treats a ``RATE_LIMITED`` failure
+        as route-local and therefore fallback-eligible (PRD section 11.2), because
+        an *upstream's* rate limit belongs to the route that answered it. The
+        gateway's own limit belongs to the caller and to no route, so raising it
+        inside the walk would make the gateway walk a request from one provider to
+        the next trying to escape a limit that follows the caller, spending every
+        configured provider's capacity on the way.
+
+        ``rate_limiter`` bounds a caller's request rate and ``tenant_limiter``
+        bounds the invocations one tenant may have in flight at once. The two are
+        keyed differently on purpose: the rate is per *caller*, because one
+        credential's burst must not consume what the others are entitled to, while
+        the concurrency bound is per *tenant*, because it exists to share the
+        gateway's upstream pool fairly between tenants and a single global bound
+        cannot do that without knowing who is asking.
         """
         if attempt_timeout is not None and not _is_usable_budget(attempt_timeout):
             raise ValueError(
@@ -504,9 +527,51 @@ class InferenceService:
         )
         self._accounting = accounting
         self._accounting_enabled = accounting_enabled
+        self._rate_limiter = rate_limiter
+        self._tenant_limiter = tenant_limiter
+
+    def _admit(self, namespace: str, tenant: str | None) -> None:
+        """Take the admission decisions that can be answered without waiting.
+
+        The request rate is checked here, at the operation's entry, and a caller
+        over its rate is refused before the model is resolved and before a tenant
+        slot is asked for — the cheapest decision first, and the one a caller that
+        cannot be served at all should learn about rather than queue behind.
+
+        The rate limit is keyed on ``namespace``, which is the credential
+        identifier the rest of the gateway already keys policy on, and never on
+        anything a request carries (PRD sections 7 and 14.2).
+        """
+        if self._rate_limiter is not None:
+            self._rate_limiter.check(namespace)
+
+    def _tenant_slot(self, namespace: str, tenant: str | None):
+        """The per-tenant concurrency slot an invocation holds for its whole duration.
+
+        Keyed on the tenant the credential is bound to, or on the credential
+        identifier when it is bound to none. A tenant-less credential is its own
+        principal (PRD section 14.2), so falling back to the identifier keeps one
+        of them from consuming the bound the others are entitled to — which a
+        shared empty key would do.
+
+        The wait for a slot is bounded by the invocation's own budget, the same
+        number that becomes its deadline inside the walk: an invocation that cannot
+        be admitted within the time it has fails promptly rather than staying
+        resident holding its payload.
+
+        A deployment that configured no bound gets a slot that holds nothing,
+        rather than a ``None`` each call site has to remember to test.
+        """
+        if self._tenant_limiter is None:
+            return _unbounded_slot()
+        return self._tenant_limiter.slot(tenant or namespace, self._attempt_timeout)
 
     async def invoke(
-        self, request: InvocationRequest, *, namespace: str | None = None
+        self,
+        request: InvocationRequest,
+        *,
+        namespace: str | None = None,
+        tenant: str | None = None,
     ) -> InvocationResponse:
         """Invoke the public model named by ``request.model``.
 
@@ -560,6 +625,25 @@ class InferenceService:
         """
         routes = self._registry.routes_for(request.model)
         started = time.monotonic()
+        self._admit(namespace or "", tenant)
+        async with self._tenant_slot(namespace or "", tenant):
+            return await self._invoke_admitted(request, routes, namespace or "", started)
+
+    async def _invoke_admitted(
+        self,
+        request: InvocationRequest,
+        routes: tuple[Route, ...],
+        namespace: str,
+        started: float,
+    ) -> InvocationResponse:
+        """Serve an invocation that has been admitted, under the idempotency policy.
+
+        Separate from :meth:`invoke` so that the admission decisions wrap exactly
+        one body: an admitted invocation holds its tenant slot for everything that
+        follows — including the wait on another caller's idempotency claim, which is
+        work this invocation is resident for — and the serving code does not have to
+        be re-indented to say so.
+        """
         key = request.idempotency_key
         if key is None:
             response, route, state = await self._invoke_on(request, routes)
@@ -567,10 +651,9 @@ class InferenceService:
             # request did not already carry one: the record must name the
             # invocation the caller was told about, not a second one.
             answer = replace(response, invocation_id=request.invocation_id or uuid4().hex)
-            self._record(request, _outcome_of(answer), route, state, namespace or "", started)
+            self._record(request, _outcome_of(answer), route, state, namespace, started)
             return answer
 
-        namespace = namespace or ""
         fingerprint = request_fingerprint(request)
         claim = await self._idempotency_store.acquire(key, fingerprint, namespace)
         if claim.kind == "completed":
@@ -711,7 +794,11 @@ class InferenceService:
         )
 
     async def invoke_stream(
-        self, request: InvocationRequest, *, namespace: str | None = None
+        self,
+        request: InvocationRequest,
+        *,
+        namespace: str | None = None,
+        tenant: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Invoke the public model named by ``request.model``, streaming the answer.
 
@@ -787,6 +874,13 @@ class InferenceService:
         :meth:`invoke` mints it for an answer. The canonical stream event types its
         identifier as required text, so a request without one could not be served
         at all, and the record would name no invocation.
+
+        **The tenant slot is held for the stream's whole life**, and the record is
+        written before it is released: an invocation is in flight for as long as its
+        answer is arriving, and it is still in flight at the moment its usage is
+        accounted for. A stream refused a slot is refused before any event is
+        produced, so the refusal reaches the caller as an ordinary error response
+        rather than as a stream that failed (PRD section 16).
         """
         routes = self._registry.routes_for(request.model)
         if not isinstance(self._provider, StreamingTextProvider):
@@ -797,20 +891,26 @@ class InferenceService:
             )
         if request.invocation_id is None:
             request = replace(request, invocation_id=uuid4().hex)
-        facts = _StreamFacts()
+        self._admit(namespace or "", tenant)
         started = time.monotonic()
-        stream = self._invoke_stream_on(request, routes, facts)
-        try:
+        async with self._tenant_slot(namespace or "", tenant):
+            facts = _StreamFacts()
+            stream = self._invoke_stream_on(request, routes, facts)
             try:
-                async for event in stream:
-                    yield event
+                try:
+                    async for event in stream:
+                        yield event
+                finally:
+                    await stream.aclose()
             finally:
-                await stream.aclose()
-        finally:
-            self._record_stream(request, facts, namespace or "", started)
+                self._record_stream(request, facts, namespace or "", started)
 
     async def embed(
-        self, request: EmbeddingRequest, *, namespace: str | None = None
+        self,
+        request: EmbeddingRequest,
+        *,
+        namespace: str | None = None,
+        tenant: str | None = None,
     ) -> EmbeddingResponse:
         """Embed the texts named by ``request`` through the public model's routes.
 
@@ -915,24 +1015,33 @@ class InferenceService:
             caller_dimension=request.dimensions is not None,
         )
         _reject_unsupported_dimension(request, plan.primary)
-        invocation_id = uuid4().hex
+        self._admit(namespace or "", tenant)
         started = time.monotonic()
 
-        async def serve(
-            route: Route, state: InvocationState, deadline: Deadline
-        ) -> tuple[EmbeddingResponse, Route]:
-            response = await self._embed_attempt(route, request, state, deadline, invocation_id)
-            return (
-                _normalise_embeddings(route, request, response, invocation_id=invocation_id),
-                route,
-            )
+        async with self._tenant_slot(namespace or "", tenant):
+            invocation_id = uuid4().hex
 
-        result, route, state = await self._walk(request.model, plan, serve)
-        self._record(request, _outcome_of(result), route, state, namespace or "", started)
-        return result
+            async def serve(
+                route: Route, state: InvocationState, deadline: Deadline
+            ) -> tuple[EmbeddingResponse, Route]:
+                response = await self._embed_attempt(
+                    route, request, state, deadline, invocation_id
+                )
+                return (
+                    _normalise_embeddings(route, request, response, invocation_id=invocation_id),
+                    route,
+                )
+
+            result, route, state = await self._walk(request.model, plan, serve)
+            self._record(request, _outcome_of(result), route, state, namespace or "", started)
+            return result
 
     async def generate(
-        self, request: ImageRequest, *, namespace: str | None = None
+        self,
+        request: ImageRequest,
+        *,
+        namespace: str | None = None,
+        tenant: str | None = None,
     ) -> ImageResponse:
         """Generate the images the prompt names through the public model's routes.
 
@@ -1002,23 +1111,26 @@ class InferenceService:
         routes = self._registry.routes_for(request.model)
         _require_image_provider(self._provider)
         plan = _select_routes_for(routes, request.model, (Capability.GENERATION,))
-        invocation_id = uuid4().hex
+        self._admit(namespace or "", tenant)
         started = time.monotonic()
 
-        async def serve(
-            route: Route, state: InvocationState, deadline: Deadline
-        ) -> tuple[ImageResponse, Route]:
-            response = await self._image_attempt(
-                route, request, state, deadline, invocation_id
-            )
-            return (
-                _normalise_images(route, request, response, invocation_id=invocation_id),
-                route,
-            )
+        async with self._tenant_slot(namespace or "", tenant):
+            invocation_id = uuid4().hex
 
-        result, route, state = await self._walk(request.model, plan, serve)
-        self._record(request, _outcome_of(result), route, state, namespace or "", started)
-        return result
+            async def serve(
+                route: Route, state: InvocationState, deadline: Deadline
+            ) -> tuple[ImageResponse, Route]:
+                response = await self._image_attempt(
+                    route, request, state, deadline, invocation_id
+                )
+                return (
+                    _normalise_images(route, request, response, invocation_id=invocation_id),
+                    route,
+                )
+
+            result, route, state = await self._walk(request.model, plan, serve)
+            self._record(request, _outcome_of(result), route, state, namespace or "", started)
+            return result
 
     async def _invoke_on(
         self, request: InvocationRequest, routes: tuple[Route, ...]
@@ -1469,6 +1581,17 @@ class InferenceService:
                     yield event
             finally:
                 await upstream.aclose()
+
+
+@asynccontextmanager
+async def _unbounded_slot() -> AsyncIterator[None]:
+    """A slot a deployment that configured no per-tenant bound holds and nothing more.
+
+    It exists so the entry points can take a slot unconditionally: a bound that was
+    not configured is then not a special case each of them has to remember to test,
+    and the ``async with`` that holds it is the same statement either way.
+    """
+    yield
 
 
 def _require_count(name: str, value: int) -> None:
