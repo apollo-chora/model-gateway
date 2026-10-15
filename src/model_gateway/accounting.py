@@ -1,11 +1,11 @@
 """Usage and cost accounting (PRD section 13).
 
-Every invocation leaves a record naming what was asked, what answered, how long it
-took and what it cost. The record is the gateway's own: the public payloads
-deliberately omit it, because none of the wire shapes has a field for it (§5.2,
-§13).
+Every invocation that produces an answer leaves a record naming what was asked,
+what answered, how long it took and what it cost. The record is the gateway's own:
+the public payloads deliberately omit it, because none of the wire shapes has a
+field for it (§5.2, §13).
 
-Two rules shape the module.
+Three rules shape the module.
 
 **A token count is either reported or estimated, and the difference is carried.**
 The canonical :class:`~model_gateway.domain.Usage` already types its counts as
@@ -14,10 +14,7 @@ copies both. Rendering an unreported count as zero — which the HTTP and gRPC u
 shapes must do, because they type their counters as integers — would turn an
 unknown quantity into an asserted one, and a caller reading a usage object could
 not tell a provider that reported no tokens from one that reported none at all.
-The wire layers make that trade-off and state it; the record does not. A count the
-provider never reported is not priced: `estimated_cost` is an estimate of *known*
-usage, and `estimated_tokens` preserves the estimate rather than letting it vanish
-behind zeros a caller cannot distinguish from a real measurement.
+The wire layers make that trade-off and state it; the record does not.
 
 **Cost comes from configured pricing, never from a vendor name.** A route names an
 upstream and a dialect, but what a million tokens costs is the operator's
@@ -25,6 +22,16 @@ configuration, not a property of the provider. A deployment that does not
 configure prices records usage and no cost; a hardcoded per-vendor price table
 would embed a claim the gateway cannot stand behind and go stale the moment a
 provider changes its prices.
+
+**A cost is reported only when it is complete.** The deployment's price entry
+declares which token categories it covers, and a category whose count the provider
+never reported leaves a charge the gateway cannot see: reporting the remaining sum
+as *the* cost would understate spend while looking like a finished figure, which
+is the one failure a cost estimate must not have. `estimated_cost` is therefore
+`None` whenever any priced category is unknown, and the price itself is validated
+where it is read — a negative, non-finite, boolean or non-numeric amount, an
+unknown token category and an unknown entry key are all refused at startup rather
+than multiplied into a number the gateway would then stand behind.
 
 Storage is in memory by default, which is the honest scope for a single-instance
 deployment: records are lost when the process stops, and a deployment that needs
@@ -34,9 +41,12 @@ separate concern requiring configured persistence (§13).
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from math import isfinite
+from numbers import Real
 from typing import Protocol
 
 import orjson
@@ -70,33 +80,110 @@ _DEFAULT_CAPACITY = 100_000
 _STATUS_COMPLETED = "completed"
 _STATUS_FAILED = "failed"
 
+_PRICED_CATEGORIES = frozenset({"input", "output", "cached"})
+"""The token categories a price entry may quote.
+
+``total_tokens`` is deliberately not one of them. A provider's total is a fact
+about the answer and is recorded, because the canonical usage model keeps it and
+the record must not silently drop a count a provider reported — but it is not
+priced: charging it beside the input and output counts would bill the same tokens
+twice.
+"""
+
+_PRICE_ENTRY_KEYS = frozenset({"currency", "tokens"})
+"""The only keys a price entry may carry; an unknown one is a misconfiguration."""
+
 
 @dataclass(frozen=True)
 class ModelPrice:
-    """One model's token prices and the currency they are quoted in."""
+    """One model's token prices, the currency they are quoted in, and what they cover.
+
+    ``tokens`` declares *which* categories the model is priced for, and that
+    declaration is load-bearing rather than cosmetic. A category the operator did
+    not price is not a category priced at zero, and
+    :meth:`PricingTable.estimate` refuses to report a number when a category the
+    entry *does* price has a count the provider never reported. Reading a missing
+    category as free — the obvious consequence of defaulting it to zero — would
+    under-report spend while looking like a complete figure, which is the one
+    failure mode a cost estimate must not have.
+
+    The value object validates itself rather than trusting its caller, because a
+    price is configuration: a negative, non-finite, boolean or non-numeric price
+    is a mistake to refuse where it is read, not one to multiply into a cost the
+    gateway then stands behind.
+    """
 
     currency: str
     tokens: Mapping[str, float]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.currency, str) or not self.currency.strip():
+            raise ValueError(
+                f"a price entry must carry a non-empty currency, got {self.currency!r}"
+            )
+        if not isinstance(self.tokens, Mapping):
+            raise ValueError(
+                "a price entry's tokens must be a mapping from token category to price"
+            )
+        if not self.tokens:
+            raise ValueError(
+                "a price entry must price at least one token category; an entry that "
+                "prices none says nothing about what the model costs"
+            )
+        for kind, price in self.tokens.items():
+            if kind not in _PRICED_CATEGORIES:
+                raise ValueError(
+                    f"{kind!r} is not a priced token category; the priced categories are "
+                    f"{', '.join(sorted(_PRICED_CATEGORIES))}"
+                )
+            _require_price(kind, price)
+
+
+def _require_price(kind: str, price: object) -> None:
+    """Refuse a price that is not a finite, non-negative real number.
+
+    A boolean is refused explicitly: ``True`` is an ``int`` in Python, so a price
+    written as ``true`` would otherwise be read as a price of one. A string price
+    would raise deep inside a later multiplication rather than here, and a
+    negative or non-finite price would produce a cost the gateway cannot stand
+    behind.
+    """
+    if isinstance(price, bool) or not isinstance(price, Real):
+        raise ValueError(f"the {kind} price must be a number, got {price!r}")
+    if not isfinite(price):
+        raise ValueError(f"the {kind} price must be finite, got {price!r}")
+    if price < 0:
+        raise ValueError(f"the {kind} price must not be negative, got {price!r}")
 
 
 @dataclass(frozen=True)
 class PricingTable:
     """What one million tokens of each kind costs, per public model ID.
 
-    ``prices`` maps a public model ID to a currency and up to three prices: input
-    tokens, output tokens and cached input tokens. A model absent from the table
-    has no configured price, so its usage is recorded with no cost rather than
-    with an invented one.
+    ``prices`` maps a public model ID to a currency and the token categories that
+    model is priced for: input tokens, output tokens and cached input tokens. A
+    model absent from the table has no configured price, so its usage is recorded
+    with no cost rather than with an invented one.
     """
 
     prices: Mapping[str, ModelPrice] = field(default_factory=dict)
 
     def estimate(self, usage: Usage, model: str) -> tuple[float | None, str | None]:
-        """The cost of one usage report, or ``(None, None)`` when none is configured.
+        """The cost of one usage report, or ``(None, None)`` when none can be stated.
 
-        A count the provider never reported is not priced: multiplying zero would
-        report a cost the caller did not incur, and the estimate is only ever as
-        good as the counts behind it.
+        ``(None, None)`` answers three situations, and they are deliberately one
+        answer because a caller can act on none of the differences: the model has
+        no configured price; the price covers a category whose count the provider
+        never reported, so a sum would silently omit a charge the caller did
+        incur; and no billable count is known at all, where a total of zero would
+        read as evidence of a free invocation. Reporting a number in any of them
+        would present an incomplete estimate as a cost, and under-reporting spend
+        is the one failure a cost estimate must not have.
+
+        A category the entry does not price contributes nothing and is not a
+        reason to refuse: an operator who priced only input tokens has said what
+        input tokens cost, and the estimate is complete with respect to what they
+        priced.
         """
         configured = self.prices.get(model)
         if configured is None:
@@ -107,9 +194,11 @@ class PricingTable:
             ("output", usage.output_tokens),
             ("cached", usage.cached_tokens),
         ):
-            if count is None:
+            if kind not in configured.tokens:
                 continue
-            total += configured.tokens.get(kind, 0.0) * count / _PRICE_SCALE
+            if count is None:
+                return None, None
+            total += configured.tokens[kind] * count / _PRICE_SCALE
         return total, configured.currency
 
 
@@ -121,10 +210,20 @@ def pricing_from_env(env: Mapping[str, str] | None = None) -> PricingTable:
         COST_PRICING_JSON={"text-default": {"currency": "USD", "tokens":
         {"input": 3.0, "output": 15.0, "cached": 0.3}}}
 
-    Prices are per million tokens, the unit providers quote. A value that is not
-    valid JSON, or whose shapes do not match, is refused as a configuration error
-    rather than partially applied: a deployment that misconfigures its prices
-    should learn at startup, not bill wrong amounts for a month.
+    Prices are per million tokens, the unit providers quote. The whole value is
+    validated here and refused as a configuration error rather than partially
+    applied: a deployment that misconfigures its prices should learn at startup,
+    not bill wrong amounts for a month. Each rejection below is a value that would
+    otherwise reach a cost calculation and produce a number the gateway could not
+    stand behind — an unknown category silently ignored, a string or boolean price
+    raising deep inside a multiplication, a negative or non-finite price producing
+    a negative or non-finite cost.
+
+    A currency must be a non-empty string and is not otherwise checked: the
+    gateway does not validate it against a currency registry, so an operator who
+    writes a code no one uses gets a cost denominated in it rather than a refusal.
+    That limit is stated rather than hidden, because inventing a registry the
+    gateway does not consult would be a stronger claim than the code supports.
     """
     import os
 
@@ -139,22 +238,45 @@ def pricing_from_env(env: Mapping[str, str] | None = None) -> PricingTable:
         raise ConfigurationError(
             f"{_PRICING_VARIABLE} must be a JSON object keyed by public model ID"
         )
-    prices: dict[str, ModelPrice] = {}
-    for model, value in payload.items():
-        try:
-            currency = value["currency"]
-            tokens = value["tokens"]
-        except (TypeError, KeyError) as error:
-            raise ConfigurationError(
-                f"{_PRICING_VARIABLE} entry {model!r} must carry a currency and a "
-                f"tokens object"
-            ) from error
-        if not isinstance(tokens, Mapping):
-            raise ConfigurationError(
-                f"{_PRICING_VARIABLE} entry {model!r} tokens must be an object"
-            )
-        prices[model] = ModelPrice(currency=currency, tokens=dict(tokens))
-    return PricingTable(prices=prices)
+    return PricingTable(
+        prices={model: _price_from_entry(model, value) for model, value in payload.items()}
+    )
+
+
+def _price_from_entry(model: object, value: object) -> ModelPrice:
+    """One price entry, validated, or a configuration error naming what was wrong.
+
+    ``model`` is validated here rather than in :class:`ModelPrice`, because it is
+    the table's key rather than a field of the price and so never reaches the
+    value object.
+    """
+    if not isinstance(model, str) or not model.strip():
+        raise ConfigurationError(
+            f"{_PRICING_VARIABLE} keys must be non-empty public model IDs, got {model!r}"
+        )
+    if not isinstance(value, Mapping):
+        raise ConfigurationError(
+            f"{_PRICING_VARIABLE} entry {model!r} must be an object carrying a currency "
+            f"and a tokens object"
+        )
+    unknown = set(value) - _PRICE_ENTRY_KEYS
+    if unknown:
+        names = ", ".join(sorted(map(repr, unknown)))
+        known = ", ".join(sorted(_PRICE_ENTRY_KEYS))
+        raise ConfigurationError(
+            f"{_PRICING_VARIABLE} entry {model!r} carries unknown {names}; an entry holds "
+            f"only {known}"
+        )
+    missing = _PRICE_ENTRY_KEYS - set(value)
+    if missing:
+        raise ConfigurationError(
+            f"{_PRICING_VARIABLE} entry {model!r} is missing "
+            f"{', '.join(sorted(missing))}"
+        )
+    try:
+        return ModelPrice(currency=value["currency"], tokens=value["tokens"])
+    except (TypeError, ValueError) as error:
+        raise ConfigurationError(f"{_PRICING_VARIABLE} entry {model!r}: {error}") from error
 
 
 @dataclass(frozen=True)
@@ -183,6 +305,21 @@ class UsageRecord:
     upstream model is what answered — and §13 asks for both. Keeping them apart
     means a route that later names its upstream differently does not silently
     change what either field means.
+
+    ``input_tokens``, ``output_tokens``, ``cached_tokens`` and ``total_tokens``
+    are the canonical usage model's four counts, each carried as the provider
+    reported it or as the gateway derived it, with ``None`` for a count that was
+    never reported and never a zero. ``total_tokens`` is carried although it is
+    not priced: the canonical model keeps a provider's own total distinct from a
+    sum the gateway could compute, and a record that dropped the count could not
+    preserve that distinction.
+
+    ``status`` is ``completed`` today on every record the gateway writes, because
+    it records invocations that produced an answer and a failure produces none;
+    ``error_reason`` is therefore always ``None``. The vocabulary exists because
+    §13 asks for a request status and a streamed answer that fails after it has
+    begun is the shape that would use it, not because a failure record is written
+    now.
     """
 
     invocation_id: str
@@ -198,6 +335,7 @@ class UsageRecord:
     input_tokens: int | None
     output_tokens: int | None
     cached_tokens: int | None
+    total_tokens: int | None
     estimated_tokens: frozenset[str]
     latency_ms: float
     attempts: int
@@ -207,13 +345,22 @@ class UsageRecord:
     cost_currency: str | None
 
     def to_dict(self) -> dict[str, object]:
-        """The record as a JSON-ready mapping, for tests and operators."""
+        """The record as a JSON-ready mapping, for tests and operators.
+
+        The projection is exhaustive: every field of the record appears under its
+        own name, so a field added to the record cannot be silently absent from
+        what an operator exports. Three fields are rendered rather than copied —
+        ``timestamp`` as an ISO-8601 string, ``operation`` as its value and the
+        two frozensets as sorted lists — because those are the JSON-ready forms of
+        the same facts, and sorting them makes the projection stable.
+        """
         return {
             "invocation_id": self.invocation_id,
             "timestamp": self.timestamp.isoformat(),
             "namespace": self.namespace,
             "tenant": self.tenant,
             "public_model": self.public_model,
+            "route_model_id": self.route_model_id,
             "operation": self.operation.value,
             "capabilities": sorted(self.capabilities),
             "upstream_model": self.upstream_model,
@@ -221,6 +368,7 @@ class UsageRecord:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cached_tokens": self.cached_tokens,
+            "total_tokens": self.total_tokens,
             "estimated_tokens": sorted(self.estimated_tokens),
             "latency_ms": self.latency_ms,
             "attempts": self.attempts,
@@ -264,17 +412,26 @@ class MemoryAccountingSink:
     costs a timestamp write on every record and the bound's purpose is to stop
     unbounded growth, not to keep the hottest records — a deployment that needs
     that configures durable storage.
+
+    The bound is a ``deque`` with a ``maxlen``, so an insertion into a full sink
+    drops the oldest record in constant time. The obvious list-and-``pop(0)``
+    implementation shifts every remaining record on each insert, which turns a
+    sustained-traffic accounting path into quadratic work while looking correct to
+    every test a single-process deployment would write.
+
+    The sink is **not thread-safe**. It is written from the event loop, where a
+    synchronous ``record`` call cannot interleave with another, and read the same
+    way; a deployment that records from worker threads needs a sink of its own
+    rather than this one.
     """
 
     def __init__(self, *, capacity: int = _DEFAULT_CAPACITY) -> None:
         self._capacity = as_int("accounting sink 'capacity'", capacity, minimum=1)
-        self._records: list[UsageRecord] = []
+        self._records: deque[UsageRecord] = deque(maxlen=self._capacity)
 
     def record(self, record: UsageRecord) -> None:
-        """Append the record, evicting the oldest once the sink is full."""
+        """Append the record, dropping the oldest once the sink is at capacity."""
         self._records.append(record)
-        while len(self._records) > self._capacity:
-            self._records.pop(0)
 
     @property
     def records(self) -> tuple[UsageRecord, ...]:
@@ -286,6 +443,41 @@ class MemoryAccountingSink:
 
     def __repr__(self) -> str:
         return f"MemoryAccountingSink(records={len(self._records)}, capacity={self._capacity})"
+
+
+_OPERATION_FOR_REQUEST: Mapping[type, Operation] = {
+    InvocationRequest: Operation.TEXT,
+    EmbeddingRequest: Operation.EMBEDDINGS,
+    ImageRequest: Operation.IMAGE,
+}
+"""The operation each canonical request type is an invocation of."""
+
+
+def _require_matching_operation(
+    request: InvocationRequest | EmbeddingRequest | ImageRequest, route: Route
+) -> None:
+    """Refuse a request and a route that describe different operations.
+
+    The route is an audit fact: the record states which configured route served
+    the invocation and what that route advertises. A caller that handed the
+    recorder the wrong route — an embeddings route for a text answer, say — would
+    produce a record that looks valid and is not, and nothing downstream compares
+    the two, so the mistake would never surface. The pairing is known only here,
+    and the check is cheap, so it is made here rather than trusted.
+
+    A mismatch is a programming defect rather than a caller error, so it raises
+    :exc:`ValueError`. The invocation itself is unaffected: the service records
+    best-effort and logs what it could not record, so a defect in the recorder
+    cannot withhold an answer the caller is waiting on.
+    """
+    for request_type, operation in _OPERATION_FOR_REQUEST.items():
+        if isinstance(request, request_type):
+            if route.operation is not operation:
+                raise ValueError(
+                    f"a {request_type.__name__} is a {operation.value} invocation, but the "
+                    f"route handed to the recorder is a {route.operation.value} route"
+                )
+            return
 
 
 class AccountingRecorder:
@@ -322,7 +514,9 @@ class AccountingRecorder:
         ``route`` is the route that *served* the invocation, which is where the
         operation and the advertised capabilities come from — the request carries
         a public model ID, not a route, and the route that answered may be a
-        fallback rather than the primary one.
+        fallback rather than the primary one. It must be the route of the same
+        operation as the request, which :func:`_require_matching_operation`
+        enforces rather than assumes.
 
         ``attempts`` and ``fallback_used`` are supplied by the caller rather than
         read off ``response``, because only the text answer carries them: the
@@ -336,7 +530,15 @@ class AccountingRecorder:
         field, because the tenant an invocation acts under is the credential's
         (PRD section 5.1). It is therefore ``None`` for those operations rather
         than borrowed from somewhere it was never stated.
+
+        ``latency_ms`` is the invocation's elapsed time as the service measured
+        it, from the call that began the invocation to the moment this record was
+        built. It therefore includes route walking, retries, fallbacks and any
+        wait for a concurrency slot — it is *not* time spent inside the provider
+        alone, and the field is named for what it measures rather than for the
+        narrower quantity §13's list calls provider latency.
         """
+        _require_matching_operation(request, route)
         usage = response.usage
         cost, currency = (
             self._pricing.estimate(usage, request.model)
@@ -357,6 +559,7 @@ class AccountingRecorder:
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             cached_tokens=usage.cached_tokens,
+            total_tokens=usage.total_tokens,
             estimated_tokens=frozenset(usage.estimated_fields),
             latency_ms=latency_ms,
             attempts=attempts,
