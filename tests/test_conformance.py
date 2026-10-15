@@ -163,6 +163,8 @@ class UpstreamWire(httpx.AsyncBaseTransport):
     def __init__(self, *, status: int | None = None) -> None:
         self.requests: list[httpx.Request] = []
         self.status = status
+        self.refuse_hosts: set[str] = set()
+        """Authorities this upstream refuses, so a test can drive a fallback walk."""
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -185,6 +187,12 @@ class UpstreamWire(httpx.AsyncBaseTransport):
                 request=request,
             )
         path = request.url.path
+        if request.headers.get("host") in self.refuse_hosts:
+            return httpx.Response(
+                503,
+                json={"error": {"message": "this upstream is unavailable", "type": "server_error"}},
+                request=request,
+            )
         if path.endswith("/chat/completions"):
             if self._wants_stream(request):
                 return httpx.Response(
@@ -222,6 +230,10 @@ class UpstreamWire(httpx.AsyncBaseTransport):
         """The JSON body of the last request, as the upstream received it."""
         return json.loads(self.requests[-1].content or b"{}")
 
+    def last_headers(self) -> dict[str, str]:
+        """The headers of the last request, as the upstream received them."""
+        return {key.lower(): value for key, value in self.requests[-1].headers.items()}
+
 
 # --------------------------------------------------------------------------- #
 # The gateway, built from environment variables alone
@@ -251,16 +263,17 @@ ENVIRONMENT = {
 AUTHORIZATION = {"Authorization": f"Bearer {GATEWAY_KEY}"}
 
 
-def gateway(wire: UpstreamWire):
+def gateway(wire: UpstreamWire, environment: dict[str, str] | None = None):
     """The production application over the real binding and the given upstream.
 
-    The registry and the settings are parsed from ``ENVIRONMENT`` exactly as a
-    deployment's are, so the routes under test are the ones the parser builds.
-    Only the binding's I/O transport is supplied, because a socket is the one
-    thing a conformance test may not open.
+    The registry and the settings are parsed from the environment exactly as a
+    deployment's are, so the routes under test are the ones the parser builds. Only
+    the binding's I/O transport is supplied, because a socket is the one thing a
+    conformance test may not open.
     """
-    settings = Settings.from_env(dict(ENVIRONMENT))
-    registry = ModelRegistry.from_env(dict(ENVIRONMENT))
+    source = dict(ENVIRONMENT if environment is None else environment)
+    settings = Settings.from_env(dict(source))
+    registry = ModelRegistry.from_env(dict(source))
     binding = LiteLLMProvider(resolver=_public_resolver, inner_factory=lambda: wire)
     service = InferenceService(registry, binding)
     return create_app(settings, registry=registry, service=service)
@@ -284,8 +297,8 @@ class _Running:
         await self.app.stop()
 
 
-def _running(wire: UpstreamWire) -> _Running:
-    return _Running(gateway(wire))
+def _running(wire: UpstreamWire, environment: dict[str, str] | None = None) -> _Running:
+    return _Running(gateway(wire, environment))
 
 
 async def _json(response) -> Any:
@@ -552,3 +565,115 @@ async def test_an_unknown_model_reaches_no_upstream():
 
     assert response.status == 404
     assert wire.paths() == []
+
+
+# --------------------------------------------------------------------------- #
+# Four configured providers, and switching between them by configuration alone
+# --------------------------------------------------------------------------- #
+
+PROVIDERS = (
+    ("93.184.216.34:8443", "upstream-alpha", "sk-alpha-secret"),
+    ("93.184.216.34:8444", "upstream-beta", "sk-beta-secret"),
+    ("93.184.216.34:8445", "upstream-gamma", "sk-gamma-secret"),
+    ("93.184.216.34:8446", "upstream-delta", "sk-delta-secret"),
+)
+"""Four providers, each with its own endpoint, model and credential.
+
+Four *ports on one address* rather than four hostnames, because the registry screens
+an endpoint's host through the system resolver at configuration time and a test that
+needs DNS is not deterministic. What is being proved is that the four are configured
+independently — a distinct authority, model ID and credential each — and the port is
+as much a part of the endpoint as the hostname is.
+"""
+
+
+def _provider_environment(primary: int) -> dict[str, str]:
+    """An environment where provider ``primary`` is the primary route.
+
+    The other three become fallbacks, so each of the four is configured in every
+    environment and the only thing that changes is which one answers first.
+    """
+    host, model, key = PROVIDERS[primary]
+    return {
+        **ENVIRONMENT,
+        # One attempt per route, so the requests an upstream records are the routes
+        # the walk reached rather than the retries it spent on the first of them.
+        "PROVIDER_RETRY_COUNT": "0",
+        "TEXT_LLM_ENDPOINT": f"https://{host}/v1",
+        "TEXT_LLM_MODEL_ID": model,
+        "TEXT_LLM_API_KEY": key,
+        "TEXT_LLM_ROUTES_JSON": json.dumps(
+            [
+                {
+                    "endpoint": f"https://{other_host}/v1",
+                    "model_id": other_model,
+                    "api_key": other_key,
+                    "format": "openai",
+                }
+                for index, (other_host, other_model, other_key) in enumerate(PROVIDERS)
+                if index != primary
+            ]
+        ),
+    }
+
+
+def _chat(text: str) -> dict[str, object]:
+    return {"model": "text-default", "messages": [{"role": "user", "content": text}]}
+
+
+@pytest.mark.parametrize("primary", range(len(PROVIDERS)), ids=[p[1] for p in PROVIDERS])
+async def test_text_inference_is_served_through_each_configured_provider(primary):
+    """Acceptance criterion 2: text inference through at least four providers.
+
+    Each provider is made the primary in turn, so "works through" is proved for
+    every one of them rather than for whichever happens to be first. What reaches
+    the upstream is asserted, not merely that a request succeeded: the route's own
+    endpoint authority, its own model ID and its own credential. A gateway that
+    resolved all four to one provider would pass a status assertion and fail these.
+
+    This is acceptance criterion 3 as well. Nothing about the code changes between
+    the four cases — only the environment mapping does — which is what "providers can
+    be switched without recompilation" means, and it is the same claim a deployment
+    makes when it changes one environment variable.
+    """
+    wire = UpstreamWire()
+
+    async with _running(wire, _provider_environment(primary)) as client:
+        response = await client.post(
+            "/v1/chat/completions", content=JSONContent(_chat("hi")), headers=AUTHORIZATION
+        )
+
+    host, model, key = PROVIDERS[primary]
+    assert response.status == 200
+    assert (await _json(response))["choices"][0]["message"]["content"] == CHAT_TEXT
+
+    assert wire.paths() == ["/v1/chat/completions"]
+    assert wire.last_body()["model"] == model
+    assert wire.last_headers()["authorization"] == f"Bearer {key}"
+    assert wire.last_headers()["host"] == host
+
+
+async def test_the_configured_providers_are_all_reachable_in_one_walk():
+    """The four are configured together, and the walk reaches the one that answers.
+
+    The test above changes which provider is primary; this one holds the
+    configuration still and makes the first three refuse, so the answer is served by
+    the fourth. Together they show the four are four routes the gateway will actually
+    use, rather than one route configured four ways.
+    """
+    wire = UpstreamWire()
+    wire.refuse_hosts = {host for host, _, _ in PROVIDERS[:3]}
+
+    async with _running(wire, _provider_environment(0)) as client:
+        response = await client.post(
+            "/v1/chat/completions", content=JSONContent(_chat("hi")), headers=AUTHORIZATION
+        )
+
+    assert response.status == 200
+    host, model, key = PROVIDERS[3]
+    assert wire.last_body()["model"] == model
+    assert wire.last_headers()["authorization"] == f"Bearer {key}"
+    assert wire.last_headers()["host"] == host
+    assert [request.headers["host"] for request in wire.requests] == [
+        provider[0] for provider in PROVIDERS
+    ]
