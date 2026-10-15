@@ -128,3 +128,28 @@ curl -fsS -H "Authorization: Bearer $KEY" http://localhost:8080/v1/models
 
 The gRPC surface answers the standard health protocol on the same port, and
 `/metrics` requires the same credential as the rest of the API.
+
+### The live-provider smoke test
+
+The test suite needs no provider account and opens no socket to any provider. The
+one test that does is skipped by default, and it is the check to run before trusting
+a new provider configuration:
+
+```sh
+GATEWAY_LIVE_TEXT_ENDPOINT=https://api.example.com/v1 \
+GATEWAY_LIVE_TEXT_MODEL_ID=some-model \
+GATEWAY_LIVE_TEXT_API_KEY=... \
+GATEWAY_LIVE_TEXT_FORMAT=openai \
+uv run pytest -m live
+```
+
+It reads those variables from the environment rather than from a fixture, because
+the claim it tests is that the environment is the only configuration path: it builds
+the application with `create_app` and nothing injected, and asks it one real
+question. Adding `_2` to each variable configures a second provider, and the second
+test then demonstrates switching between them — the same code, a different
+environment.
+
+What it does not do is establish that the gateway is correct. That is what the
+deterministic suite is for; this establishes that configuration reaches a real
+provider, which is a different question and usually the first one an operator asks.
