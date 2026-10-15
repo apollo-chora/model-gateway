@@ -547,3 +547,35 @@ async def test_the_responses_endpoint_is_installed():
     assert payload["output"]
     assert payload["usage"]["total_tokens"] == 67
     assert provider.calls == 1
+
+
+# --------------------------------------------------------------------------------------
+# The router the factory builds by default
+# --------------------------------------------------------------------------------------
+
+
+def test_two_applications_built_from_one_call_site_do_not_share_a_router():
+    """The factory's default router must be the application's own.
+
+    The framework keys applications by their router's identity and its default
+    router is a module-level singleton, so two applications built on it are taken
+    for one application being reloaded: the second resets the first's routes, and a
+    later request is then served by an earlier application's handlers — with the
+    earlier application's provider answering — while every status code still looks
+    right. A caller that builds more than one application in a process is the one
+    this protects, and a test suite is the caller that does.
+    """
+    first = _build_an_application()
+    second = _build_an_application()
+
+    assert first.router is not second.router
+
+
+def _build_an_application():
+    """One application, built from the same call site as the next one."""
+    models = registry()
+    return create_app(
+        Settings.from_env({}),
+        registry=models,
+        service=InferenceService(models, FakeTextProvider()),
+    )
