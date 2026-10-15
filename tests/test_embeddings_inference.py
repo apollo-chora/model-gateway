@@ -1,5 +1,4 @@
-"""The inference service's embeddings path: the same policy, a different operation
-(PRD 4.7, 6.3, 9.5, 10, 11.2 and 15).
+"""The inference service's embeddings path: the same policy, a different operation.
 
 The embeddings entry point is the non-streaming text entry point applied to a
 different operation, so these tests are about the two things that differ and the
@@ -657,7 +656,7 @@ class TestTheReliabilityLoop:
         The contrast with a malformed upstream answer: that fault lies in one
         route's answer, so the invocation walks to an eligible fallback, while
         a defect in the gateway's own code is neither retried on the route nor
-        walked to the next (PRD section 11.2).
+        walked to the next.
         """
         provider = FakeEmbeddingProvider(
             InternalError("the gateway could not read its own answer")

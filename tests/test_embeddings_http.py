@@ -1,4 +1,4 @@
-"""Tests for the embeddings endpoint: ``POST /v1/embeddings`` (PRD sections 4.7, 9.5 and 10).
+"""Tests for the embeddings endpoint: ``POST /v1/embeddings``.
 
 The handler is exercised through a real BlackSheep application, so what is tested
 is the route, the wire translation and the error mapping together. Nothing
@@ -171,7 +171,7 @@ async def post(client, body: object):
 
 
 class TestTheHappyPath:
-    """The documented request and the documented response (PRD section 4.7)."""
+    """The documented request and the documented response."""
 
     async def test_a_list_of_texts_is_embedded(self, client, provider) -> None:
         response = await post(client, payload())
@@ -285,7 +285,7 @@ class TestTheHappyPath:
 
 
 class TestTheRequestBoundary:
-    """A parameter the gateway does not understand is refused, never ignored (PRD 4)."""
+    """A parameter the gateway does not understand is refused, never ignored."""
 
     async def test_an_unknown_parameter_is_refused(self, client) -> None:
         response = await post(client, payload(truncate="END"))

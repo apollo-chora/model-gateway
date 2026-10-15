@@ -1,5 +1,4 @@
-"""The embeddings path of the LiteLLM provider: one attempt through the binding
-(PRD 4.7, 6.3, 9.6, 11.3, 14.1).
+"""The embeddings path of the LiteLLM provider: one attempt through the binding.
 
 No test reaches the network: ``litellm.aembedding`` is monkeypatched with a
 recording stand-in, so the real per-dialect client is built and closed around a
@@ -321,7 +320,7 @@ class TestTheCall:
         assert "encoding_format" not in embedding.calls[0]
 
     async def test_the_callers_user_and_metadata_are_not_forwarded(self, wire) -> None:
-        """PRD section 5.1: caller bookkeeping never reaches the model or the provider."""
+        """Caller bookkeeping never reaches the model or the provider."""
         provider, embedding = wire(response_from(embedding_payload()))
 
         await provider.embed(
@@ -414,7 +413,7 @@ class TestTheCall:
         them apart. Within that limit the binding reports what it can hold to
         the upstream: every count of the placeholder is recorded as unknown,
         because presenting the placeholder as a reported fact is the one error
-        this boundary must not make (PRD section 13).
+        this boundary must not make.
         """
         payload = embedding_payload()
         payload.pop("usage")
@@ -469,8 +468,7 @@ class TestTheCall:
 
         The gateway core refuses an answer with no vector per input, which is a
         gateway error a caller can act on; a ``TypeError`` escaping the binding
-        would reach the same caller as an unclassified internal failure instead
-        (PRD section 5.4).
+        would reach the same caller as an unclassified internal failure instead.
         """
         payload = embedding_payload(data=None)
         provider, _ = wire(response_from(payload))
@@ -486,7 +484,7 @@ class TestTheCall:
 
 
 class TestFailures:
-    """Every failure the embeddings call raises is mapped onto the taxonomy (PRD 5.4, 9)."""
+    """Every failure the embeddings call raises is mapped onto the taxonomy."""
 
     @pytest.mark.parametrize(
         ("error", "category", "reason"),

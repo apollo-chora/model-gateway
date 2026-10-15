@@ -1,13 +1,12 @@
-"""Canonical embeddings types and the embeddings model ID (PRD sections 4.7, 6.3, 10, 13).
+"""Canonical embeddings types and the embeddings model ID.
 
 Two contracts meet here. The first is the canonical representation: an
 embeddings request and response round-trip through ``to_dict`` and ``from_dict``
 with every field emitted, and every state the representation cannot hold is
-refused rather than dropped (PRD sections 4.7 and 9.1). The second is the public
-model ID ``embedding-default``, which resolves onto the configured embeddings
-routes exactly as ``text-default`` and ``image-default`` resolve onto theirs,
-and appears in the model listing with the dimensions the deployment configured
-(PRD sections 4.3 and 10).
+refused rather than dropped. The second is the public model ID
+``embedding-default``, which resolves onto the configured embeddings routes
+exactly as ``text-default`` and ``image-default`` resolve onto theirs, and
+appears in the model listing with the dimensions the deployment configured.
 
 Nothing here reaches the network: every endpoint is an IP literal and every
 request is built by hand.
