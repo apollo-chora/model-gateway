@@ -311,6 +311,7 @@ async def test_the_factory_gives_the_built_service_the_configured_attempt_budget
             accounting=None,
             rate_limiter=None,
             tenant_limiter=None,
+            metrics=None,
         ):
             captured["attempt_timeout"] = attempt_timeout
 
@@ -348,6 +349,7 @@ async def test_the_factory_gives_the_built_service_every_configured_reliability_
             accounting=None,
             rate_limiter=None,
             tenant_limiter=None,
+            metrics=None,
         ):
             captured.update(
                 attempt_timeout=attempt_timeout,
@@ -402,6 +404,7 @@ async def test_the_factory_gives_the_built_service_the_configured_limits(monkeyp
             accounting=None,
             rate_limiter=None,
             tenant_limiter=None,
+            metrics=None,
         ):
             captured.update(rate_limiter=rate_limiter, tenant_limiter=tenant_limiter)
 
@@ -442,6 +445,7 @@ async def test_a_deployment_that_configures_no_limits_is_given_none(monkeypatch)
             accounting=None,
             rate_limiter=None,
             tenant_limiter=None,
+            metrics=None,
         ):
             captured.update(rate_limiter=rate_limiter, tenant_limiter=tenant_limiter)
 

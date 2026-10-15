@@ -55,8 +55,10 @@ from model_gateway.http import (
     register_responses_routes,
 )
 from model_gateway.http.auth import create_auth_middleware
+from model_gateway.http.metrics import register_metrics_route
 from model_gateway.inference import InferenceService
 from model_gateway.limits import RateLimiter, TenantConcurrencyLimiter
+from model_gateway.metrics import Metrics
 from model_gateway.providers.litellm_image import ensure_supported_image_dialect
 from model_gateway.providers.litellm_provider import (
     LiteLLMProvider,
@@ -263,6 +265,9 @@ def create_app(
     configure_json()
 
     registry = registry or ModelRegistry.from_env()
+    # One registry for the process, shared by the service that counts into it and
+    # the endpoint that publishes it: two would be two different sets of numbers.
+    metrics = Metrics()
 
     if service is None:
         _ensure_binding_can_run(registry)
@@ -278,6 +283,7 @@ def create_app(
             accounting=_accounting(settings),
             rate_limiter=rate_limiter,
             tenant_limiter=tenant_limiter,
+            metrics=metrics,
         )
 
     api_keys = ApiKeySet.from_settings(settings)
@@ -303,6 +309,7 @@ def create_app(
     )
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/readyz", readyz)
+    register_metrics_route(app.router, metrics)
     register_model_routes(app.router, registry)
     register_chat_routes(app.router, service)
     register_completions_routes(app.router, service)
