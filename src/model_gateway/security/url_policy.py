@@ -50,6 +50,36 @@ _DEFAULT_PORTS = {_INSECURE_SCHEME: 80, _SECURE_SCHEME: 443}
 
 RESERVED_AUTH_HEADERS: frozenset[str] = frozenset({"authorization", "x-api-key", "api-key"})
 
+ALLOWED_HOSTS_VARIABLE = "GATEWAY_ALLOWED_UPSTREAM_HOSTS"
+"""The variable naming the upstream hosts a deployment permits (PRD section 14)."""
+
+
+def parse_allowed_hosts(raw: str | None) -> frozenset[str]:
+    """The hostnames an allowlist setting names, or an empty set for none.
+
+    Empty is not "allow nothing": it is "no allowlist is configured", which is the
+    behaviour every deployment had before this setting existed. A deployment that
+    wants the restriction states one, and only the hosts it names may then be
+    configured as an endpoint.
+
+    An entry is a **hostname** and not an authority, so a scheme, a port, a path,
+    userinfo, an IPv6 literal and whitespace are each **refused** rather than
+    ignored: an entry the gateway silently ignored would be an operator believing a
+    host was permitted or refused when it was not. Matching is case-insensitive,
+    because hostnames are.
+    """
+    if raw is None:
+        return frozenset()
+    hosts = {entry.strip().lower() for entry in raw.split(",")}
+    hosts.discard("")
+    for host in sorted(hosts):
+        if any(character in host for character in "/@:[] \t"):
+            raise UrlPolicyError(
+                f"an entry in {ALLOWED_HOSTS_VARIABLE} is not a hostname; a scheme, a port, a "
+                f"path, userinfo and an IPv6 literal are not accepted here"
+            )
+    return frozenset(hosts)
+
 
 class UrlPolicyError(ValueError):
     """An upstream URL violates the gateway's URL policy.
@@ -120,6 +150,31 @@ def check_host(host: str, *, resolver: Resolver = system_resolver) -> None:
             blocked.append(f"{address} ({reason})")
     if blocked:
         raise UrlPolicyError(f"host {text!r} resolves to a blocked address: {', '.join(blocked)}")
+
+
+def check_allowed_host(host: str, allowed_hosts: frozenset[str]) -> None:
+    """Reject a host an allowlist does not name (PRD section 14).
+
+    **The allowlist narrows and never widens.** A host it names still has to pass
+    every other check in this module, including the address screen, so configuring
+    one cannot make a blocked address reachable — it is a second, operator-owned
+    statement about which upstreams this deployment talks to, not an exemption from
+    the first. That is the property that makes it worth having: an operator who wants
+    the gateway to reach exactly two providers can say so, and a route added later
+    that reaches a third fails the start rather than being discovered in a bill or an
+    incident.
+
+    An empty allowlist is no allowlist: every host the rest of this module permits
+    stays permitted.
+    """
+    if not allowed_hosts:
+        return
+    if host.strip().strip("[]").lower() not in allowed_hosts:
+        raise UrlPolicyError(
+            f"the endpoint host {host!r} is not one this deployment permits; "
+            f"{ALLOWED_HOSTS_VARIABLE} names {len(allowed_hosts)} host(s) and this is not one "
+            f"of them"
+        )
 
 
 def join_endpoint(
@@ -193,12 +248,15 @@ def resolve_endpoint(
     *,
     allow_absolute_path_url: bool = False,
     allow_insecure_transport: bool = False,
+    allowed_hosts: frozenset[str] = frozenset(),
     resolver: Resolver = system_resolver,
 ) -> str:
     """Join a route's endpoint and validate it before it is handed to LiteLLM.
 
     This is the entry point configuration validation and the LiteLLM binding
-    use: the result is the ``api_base`` value of PRD section 9.6.
+    use: the result is the ``api_base`` value of PRD section 9.6. ``allowed_hosts``
+    is the deployment's optional allowlist, applied to the joined endpoint so an
+    absolute-path override is checked against it too (PRD section 14).
     """
     endpoint = join_endpoint(base_url, path, allow_absolute_path_url=allow_absolute_path_url)
     validate_upstream_url(
@@ -206,6 +264,7 @@ def resolve_endpoint(
         allow_insecure_transport=allow_insecure_transport,
         resolver=resolver,
     )
+    check_allowed_host(urlsplit(endpoint).hostname or "", allowed_hosts)
     return endpoint
 
 
