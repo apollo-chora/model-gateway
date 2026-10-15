@@ -14,6 +14,7 @@ from model_gateway.errors import (
     FailedPreconditionError,
     GatewayError,
     GrpcStatus,
+    IdempotencyConflictError,
     InternalError,
     InvalidArgumentError,
     MalformedResponseError,
@@ -30,6 +31,12 @@ from model_gateway.errors import (
 # Every category in PRD section 5.4, the malformed-response category of PRD
 # 11.2, plus the capability category of PRD 9.5.
 CATEGORY_TABLE = (
+    (
+        IdempotencyConflictError,
+        409,
+        GrpcStatus.ALREADY_EXISTS,
+        ErrorReason.IDEMPOTENCY_CONFLICT,
+    ),
     (InvalidArgumentError, 400, GrpcStatus.INVALID_ARGUMENT, ErrorReason.INVALID_REQUEST),
     (UnauthenticatedError, 401, GrpcStatus.UNAUTHENTICATED, ErrorReason.AUTHENTICATION_REQUIRED),
     (PermissionDeniedError, 403, GrpcStatus.PERMISSION_DENIED, ErrorReason.PERMISSION_DENIED),
@@ -51,6 +58,7 @@ CATEGORY_IDS = [error_class.__name__ for error_class, *_ in CATEGORY_TABLE]
 # arrived with. UnauthenticatedError and ResourceExhaustedError each permit two
 # reasons; every other category permits one.
 CATEGORY_REASONS = {
+    IdempotencyConflictError: (ErrorReason.IDEMPOTENCY_CONFLICT,),
     InvalidArgumentError: (ErrorReason.INVALID_REQUEST,),
     UnauthenticatedError: (ErrorReason.AUTHENTICATION_REQUIRED, ErrorReason.INVALID_CREDENTIALS),
     PermissionDeniedError: (ErrorReason.PERMISSION_DENIED,),
@@ -72,6 +80,7 @@ REASON_CATEGORIES = list(CATEGORY_REASONS)
 # rather than a silent break of the machine-readable contract.
 STABLE_REASON_VALUES = frozenset(
     {
+        "idempotency_conflict",
         "invalid_request",
         "authentication_required",
         "invalid_credentials",
@@ -92,6 +101,7 @@ STABLE_REASON_VALUES = frozenset(
 GRPC_STATUS_NAMES = frozenset(
     {
         "INVALID_ARGUMENT",
+        "ALREADY_EXISTS",
         "UNAUTHENTICATED",
         "PERMISSION_DENIED",
         "NOT_FOUND",

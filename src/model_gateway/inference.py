@@ -178,6 +178,7 @@ from model_gateway.idempotency import (
     IdempotencyStore,
     MemoryIdempotencyStore,
     request_fingerprint,
+    settle,
 )
 from model_gateway.providers.base import (
     AttemptContext,
@@ -447,7 +448,9 @@ class InferenceService:
             idempotency_store if idempotency_store is not None else MemoryIdempotencyStore()
         )
 
-    async def invoke(self, request: InvocationRequest) -> InvocationResponse:
+    async def invoke(
+        self, request: InvocationRequest, *, namespace: str | None = None
+    ) -> InvocationResponse:
         """Invoke the public model named by ``request.model``.
 
         Resolves the ID to its configured routes, validates the request against
@@ -470,20 +473,30 @@ class InferenceService:
 
         **An idempotency key is answered from the gateway's own record.** A
         request carrying one is deduplicated here rather than upstream: a repeat
-        whose key *and* payload match a recorded answer is answered from that
-        record with :attr:`~model_gateway.domain.IdempotencyStatus.REPLAYED`, and
-        the provider is not called again — one provider call, and every
-        equivalent repeat served from the record, which is what prevents
-        duplicate accounting (PRD section 12). The match is on a fingerprint of
-        the request rather than on the key alone, so a key reused for a different
-        body is a second request and is served as one, never answered from the
-        wrong answer; the gateway-minted invocation identifier is not part of the
-        fingerprint, so a retry carrying a freshly minted one is still the same
-        request. Only a completed answer is recorded: a failure propagates and
-        leaves no record, so a retry after a transient failure is allowed to
-        retry, and the gateway claims no exactly-once upstream execution. The
-        record is consulted after the model is resolved and before any provider
-        is called, so an unknown model is a
+        whose fingerprint matches a recorded answer is answered from that record
+        with :attr:`~model_gateway.domain.IdempotencyStatus.REPLAYED`, and the
+        provider is not called again — one provider call, and every equivalent
+        repeat served from the record, which is what prevents duplicate
+        accounting (PRD section 12). The key is namespaced by the trusted
+        principal, so two credentials using the same key are two operations and
+        cannot overwrite each other's records.
+
+        The coordination is atomic, because simultaneous identical requests are
+        the situation idempotency exists to handle: the first caller claims the
+        key, and every later caller with the same fingerprint waits on that
+        claim's outcome rather than starting a second invocation. A waiter
+        going away does not cancel the invocation it is waiting on. A repeat
+        whose fingerprint differs is refused with an
+        :class:`~model_gateway.errors.IdempotencyConflictError`, because a key
+        names one operation and executing the second would both run a request
+        the caller never made and overwrite the record the key already holds.
+
+        Only a completed answer is recorded: a failure propagates, releases the
+        claim so a later caller may retry, and gives every waiter that failure
+        rather than starting another provider attempt inside the same request. The
+        gateway therefore claims no exactly-once upstream execution. The claim
+        is consulted after the model is resolved and before any provider is
+        called, so an unknown model is a
         :class:`~model_gateway.errors.ModelNotFoundError` even when the key has
         a cached record. A request without a key is unaffected by all of this:
         it is never recorded and reports ``NOT_APPLICABLE``.
@@ -493,14 +506,21 @@ class InferenceService:
         if key is None:
             return await self._invoke_on(request, routes)
 
+        namespace = namespace or ""
         fingerprint = request_fingerprint(request)
-        record = self._idempotency_store.get(key)
-        if record is not None and record.fingerprint.digest == fingerprint.digest:
-            return replace(record.response, idempotency_status=IdempotencyStatus.REPLAYED)
+        claim = await self._idempotency_store.acquire(key, fingerprint, namespace)
+        if claim.kind == "completed":
+            return replace(claim.record.response, idempotency_status=IdempotencyStatus.REPLAYED)
+        if claim.kind == "waiter":
+            return await settle(claim.future)
 
-        response = await self._invoke_on(request, routes)
+        try:
+            response = await self._invoke_on(request, routes)
+        except BaseException as error:
+            await self._idempotency_store.fail(key, namespace, error)
+            raise
         recorded = replace(response, idempotency_status=IdempotencyStatus.NEW)
-        self._idempotency_store.put(key, fingerprint, recorded)
+        await self._idempotency_store.complete(key, namespace, recorded)
         return recorded
 
     async def invoke_stream(self, request: InvocationRequest) -> AsyncIterator[StreamEvent]:

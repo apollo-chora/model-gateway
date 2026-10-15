@@ -72,6 +72,7 @@ __all__ = [
     "FailedPreconditionError",
     "GatewayError",
     "GrpcStatus",
+    "IdempotencyConflictError",
     "InternalError",
     "InvalidArgumentError",
     "MalformedResponseError",
@@ -116,6 +117,7 @@ class ErrorReason(StrEnum):
     """
 
     INVALID_REQUEST = "invalid_request"
+    IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     AUTHENTICATION_REQUIRED = "authentication_required"
     INVALID_CREDENTIALS = "invalid_credentials"
     PERMISSION_DENIED = "permission_denied"
@@ -141,6 +143,7 @@ class GrpcStatus(StrEnum):
     """
 
     INVALID_ARGUMENT = "INVALID_ARGUMENT"
+    ALREADY_EXISTS = "ALREADY_EXISTS"
     UNAUTHENTICATED = "UNAUTHENTICATED"
     PERMISSION_DENIED = "PERMISSION_DENIED"
     NOT_FOUND = "NOT_FOUND"
@@ -288,6 +291,29 @@ class InvalidArgumentError(GatewayError):
     allowed_reasons: ClassVar[frozenset[ErrorReason]] = frozenset({ErrorReason.INVALID_REQUEST})
     _http_status: ClassVar[int] = 400
     _grpc_code: ClassVar[GrpcStatus] = GrpcStatus.INVALID_ARGUMENT
+
+
+class IdempotencyConflictError(GatewayError):
+    """An idempotency key was reused for a different request: 409 / ALREADY_EXISTS.
+
+    A key names one operation. A repeat carrying the same fingerprint is a replay and
+    is answered from the record; one carrying a different fingerprint is a different
+    operation and is refused rather than executed, because executing it would both
+    run a request the caller never made and overwrite the record the key already
+    holds — so one key could oscillate between unrelated payloads indefinitely.
+
+    409 Conflict is HTTP's own code for a request that conflicts with the current
+    state of the resource it addresses, which is exactly this: the key already
+    identifies another request. ``ALREADY_EXISTS`` is gRPC's code for a resource
+    that already exists, which is what the key does.
+    """
+
+    default_reason: ClassVar[ErrorReason] = ErrorReason.IDEMPOTENCY_CONFLICT
+    allowed_reasons: ClassVar[frozenset[ErrorReason]] = frozenset(
+        {ErrorReason.IDEMPOTENCY_CONFLICT}
+    )
+    _http_status: ClassVar[int] = 409
+    _grpc_code: ClassVar[GrpcStatus] = GrpcStatus.ALREADY_EXISTS
 
 
 class UnauthenticatedError(GatewayError):
