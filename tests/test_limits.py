@@ -708,6 +708,36 @@ async def test_a_tenant_slot_is_held_for_the_whole_life_of_a_stream():
     assert len(provider.calls) == 2
 
 
+async def test_a_paused_stream_that_is_cancelled_frees_its_tenant_slot():
+    """A caller that goes away mid-stream must not leave the tenant's slot held.
+
+    The slot is held by an ``async with`` around the stream's whole life, so a
+    cancellation inside it unwinds through the same cleanup a normal exit does. If
+    it did not, one abandoned caller would consume a tenant's bound until the
+    process restarted.
+    """
+    provider = _BlockingStreamProvider()
+    service = _service(
+        provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4)
+    )
+
+    async def consume():
+        return [event async for event in service.invoke_stream(_request(), tenant="tenant-a")]
+
+    first = asyncio.create_task(consume())
+    await asyncio.wait_for(provider.entered.wait(), timeout=5.0)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    # The tenant's next stream is served rather than waiting on a slot the
+    # cancelled invocation will never release.
+    provider.release.set()
+    assert [event async for event in service.invoke_stream(_request(), tenant="tenant-a")]
+    assert len(provider.calls) == 2
+
+
 # --------------------------------------------------------------------------- #
 # Every operation takes the decisions, and the refusal is a 429
 # --------------------------------------------------------------------------- #
