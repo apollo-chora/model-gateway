@@ -1,4 +1,4 @@
-"""Tests for the wired HTTP surface: ``create_app`` builds a working gateway (PRD 4, 19).
+"""Tests for the wired HTTP surface: ``create_app`` builds a working gateway.
 
 These tests exercise the application factory rather than the handlers, so they
 cover what the two things the handlers cannot: that the routes and the error
@@ -168,7 +168,7 @@ async def test_the_chat_endpoint_is_installed(client, provider):
 
 
 async def test_the_embeddings_endpoint_is_installed():
-    """The factory's own application answers ``POST /v1/embeddings`` (PRD section 4.7).
+    """The factory's own application answers ``POST /v1/embeddings``.
 
     The embeddings handler's own tests build their own application, so none of
     them can tell whether the factory registers the route at all — which is
@@ -290,11 +290,11 @@ async def test_the_factory_builds_the_litellm_service_with_a_registry_but_no_ser
 
 
 async def test_the_factory_gives_the_built_service_the_configured_attempt_budget(monkeypatch):
-    """Every attempt context carries the configured provider timeout (PRD 9.6).
+    """Every attempt context carries the configured provider timeout.
 
     The service derives that budget as the minimum of the configured timeout and
-    the invocation deadline remaining when the attempt begins (PRD section 15);
-    the service constructor is where the configured value enters.
+    the invocation deadline remaining when the attempt begins; the service
+    constructor is where the configured value enters.
     """
     captured = {}
 
@@ -491,7 +491,7 @@ async def test_an_injected_service_is_used_verbatim(provider):
 
 
 async def test_the_completions_endpoint_is_installed():
-    """The factory's own application answers ``POST /v1/completions`` (PRD section 4.4).
+    """The factory's own application answers ``POST /v1/completions``.
 
     The handler's own tests build their own application, so none of them can tell
     whether the factory registers the route at all — which is how the embeddings
@@ -523,7 +523,7 @@ async def test_the_completions_endpoint_is_installed():
 
 
 async def test_the_responses_endpoint_is_installed():
-    """The factory's own application answers ``POST /v1/responses`` (PRD section 4.5)."""
+    """The factory's own application answers ``POST /v1/responses``."""
     models = registry()
     provider = FakeTextProvider()
     app = create_app(

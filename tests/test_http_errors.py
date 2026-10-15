@@ -1,4 +1,4 @@
-"""Error-mapping tests: the taxonomy onto HTTP, and the sanitising backstop (PRD 5.4, 14)."""
+"""Error-mapping tests: the taxonomy onto HTTP, and the sanitising backstop."""
 
 import pytest
 from blacksheep import Application, Content

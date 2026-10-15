@@ -1,4 +1,4 @@
-"""Tests for the Responses endpoint (PRD sections 4.5, 9.1, 9.5 and 16)."""
+"""Tests for the Responses endpoint."""
 
 import pytest
 from blacksheep import Application, Content, JSONContent

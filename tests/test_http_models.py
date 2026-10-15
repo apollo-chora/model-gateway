@@ -1,4 +1,4 @@
-"""Tests for the model endpoints (PRD sections 4.3, 10 and acceptance criterion 12)."""
+"""Tests for the model endpoints."""
 
 import pytest
 from blacksheep import Application

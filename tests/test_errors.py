@@ -1,4 +1,4 @@
-"""Gateway error taxonomy: categories, payloads and sanitisation (PRD 5.4, 9.5, 15)."""
+"""Gateway error taxonomy: categories, payloads and sanitisation."""
 
 import ast
 import re
@@ -29,8 +29,9 @@ from model_gateway.errors import (
     sanitise_text,
 )
 
-# Every category in PRD section 5.4, the malformed-response category of PRD
-# 11.2, plus the capability category of PRD 9.5.
+# Every category of the taxonomy: the request, authentication, permission,
+# resource, retry, deadline, availability and internal categories, plus the
+# malformed-response and capability categories.
 CATEGORY_TABLE = (
     (
         IdempotencyConflictError,

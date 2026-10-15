@@ -1,4 +1,4 @@
-"""Wire-translation tests for the OpenAI-compatible DTOs (PRD sections 4.3, 4.4, 9.1, 9.5)."""
+"""Wire-translation tests for the OpenAI-compatible DTOs."""
 
 import pytest
 
@@ -497,8 +497,7 @@ class TestChatRequestParameterWireTypes:
     ``true`` for an integer parameter, because ``True == 1``, and the falsy
     ``0``, ``""``, ``[]`` and ``{}`` for a boolean or object parameter. A
     correctly typed value that is the OpenAI default asks for nothing and is
-    accepted; any other correctly typed value keeps the capability refusal
-    (PRD section 9.5).
+    accepted; any other correctly typed value keeps the capability refusal.
     """
 
     @pytest.mark.parametrize("value", [True, 1.5, "2", None, [], {}])
@@ -840,7 +839,7 @@ class TestChatCompletion:
 
         The OpenAI message records no order between ``content`` and
         ``tool_calls``, so an interleaved canonical response has no faithful
-        representation in it (PRD section 9.1).
+        representation in it.
         """
         with pytest.raises(CapabilityError) as error:
             ChatCompletion.from_invocation(

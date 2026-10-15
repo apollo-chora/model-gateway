@@ -1,4 +1,4 @@
-"""Tests for the legacy completions endpoint (PRD sections 4, 9.5 and 16)."""
+"""Tests for the legacy completions endpoint."""
 
 import asyncio
 import json
@@ -85,7 +85,7 @@ class FakeTextProvider:
 
 
 class FakeStreamingProvider:
-    """A provider double that can both complete and stream (PRD 16).
+    """A provider double that can both complete and stream.
 
     ``complete`` behaves like :class:`FakeTextProvider`. ``stream`` yields one
     event per scripted delta — a ``str`` becomes a content event, a
@@ -514,7 +514,7 @@ async def test_a_streaming_request_never_returns_a_whole_body():
 
 
 async def test_a_streaming_request_with_a_provider_that_cannot_stream_is_refused(client, provider):
-    """A provider that cannot stream is refused, not faked (PRD 16)."""
+    """A provider that cannot stream is refused, not faked."""
     response = await post(client, payload(stream=True))
 
     assert response.status == 422

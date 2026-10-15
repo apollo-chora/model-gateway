@@ -1,4 +1,4 @@
-"""Tests for the inbound HTTP authentication layer (PRD sections 7, 14 and 5.1).
+"""Tests for the inbound HTTP authentication layer.
 
 These tests exercise authentication against the real HTTP surface — middleware,
 handler and error mapping — so a request travels the whole path and the
