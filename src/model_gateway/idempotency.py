@@ -126,11 +126,12 @@ class IdempotencyStore(Protocol):
     """
 
     def get(self, key: str) -> IdempotencyRecord | None:
-        """The record for ``key``, or ``None`` when no answer was recorded under it.
+        """The record stored under ``key``, or ``None`` when there is none.
 
-        A record whose fingerprint does not match the request being made is not
-        returned: the key was reused for a different payload, which is a caller
-        error the gateway answers rather than papering over (PRD section 12).
+        The record is returned regardless of its fingerprint: whether it answers
+        the request being made is the caller's decision, made by comparing
+        :attr:`IdempotencyRecord.fingerprint` against the request. The store holds
+        answers; it does not judge requests.
         """
         ...
 
