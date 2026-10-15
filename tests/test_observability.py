@@ -8,6 +8,7 @@ span the gateway produces — because "supports W3C Trace Context" means continu
 a caller's trace, not merely emitting spans of the gateway's own.
 """
 
+import grpc
 import pytest
 from blacksheep import Application, JSONContent
 from blacksheep.server.routing import Router
@@ -27,9 +28,14 @@ from model_gateway.domain import (
     InvocationResponse,
     Message,
     Role,
+    StreamEvent,
+    StreamEventKind,
     TextPart,
     Usage,
 )
+from model_gateway.grpc import gateway_pb2 as pb
+from model_gateway.grpc import gateway_pb2_grpc
+from model_gateway.grpc.server import GrpcServer
 from model_gateway.grpc.tracing import continue_trace
 from model_gateway.http.auth import create_auth_middleware
 from model_gateway.http.chat import register_chat_routes
@@ -151,6 +157,13 @@ def _route(model_id: str = "upstream-text", **overrides) -> Route:
     }
     values.update(overrides)
     return Route(**values)  # type: ignore[arg-type]
+
+
+def _message(text: str) -> pb.Message:
+    """One user message carrying one text part."""
+    message = pb.Message(role=pb.ROLE_USER)
+    message.content.add().text.text = text
+    return message
 
 
 def _request(**overrides) -> InvocationRequest:
@@ -387,3 +400,113 @@ async def test_the_context_is_detached_even_when_the_call_aborts():
     spans = exporter.get_finished_spans()
     assert [span.name for span in spans] == ["after"]
     assert spans[0].parent is None
+
+
+# --------------------------------------------------------------------------- #
+# The inbound context reaches the service over gRPC too
+# --------------------------------------------------------------------------- #
+
+
+class _StreamingEchoProvider:
+    """A streaming provider whose script yields one event at a time."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Route, object, object]] = []
+
+    async def stream(self, route, request, context):
+        self.calls.append((route, request, context))
+        yield StreamEvent(
+            kind=StreamEventKind.CONTENT, sequence=0, invocation_id="inv-stream-1", text="hello"
+        )
+        yield StreamEvent(
+            kind=StreamEventKind.FINISH, sequence=1, invocation_id="inv-stream-1",
+            finish_reason=FinishReason.STOP,
+        )
+
+
+_API_KEY = "sk-gateway-key"
+
+
+def _authorization(key: str) -> tuple[tuple[str, str], ...]:
+    """The credential a gRPC call presents, in the gRPC form the transport reads."""
+    return (("authorization", f"Bearer {key}"),)
+
+
+def _traced(key: str) -> tuple[tuple[str, str], ...]:
+    """The credential a tracing caller presents: the key and its trace context together."""
+    return _authorization(key) + (("traceparent", TRACEPARENT),)
+
+
+def invoke_request(**overrides) -> pb.InvokeRequest:
+    """A standalone InvokeRequest naming the routed text model."""
+    values = {
+        "invocation_id": "inv-trace-1",
+        "tenant_id": "tenant-a",
+        "model": "text-default",
+        "messages": (_message("hello"),),
+        # The contract refuses an unspecified modality, so the request states one.
+        "response_modality": pb.RESPONSE_MODALITY_TEXT,
+    }
+    values.update(overrides)
+    return pb.InvokeRequest(**values)
+
+
+def _grpc_settings() -> Settings:
+    """Settings for a gRPC listener, with the one credential a call presents."""
+    return Settings.from_env({"GATEWAY_API_KEYS": f"{_API_KEY}:tenant-a"})
+
+
+def _grpc_server(service) -> GrpcServer:
+    settings = _grpc_settings()
+    return GrpcServer(
+        service=service,
+        registry=ModelRegistry((_route(),)),
+        settings=settings,
+        api_keys=ApiKeySet.from_settings(settings),
+    )
+
+
+async def test_a_unary_grpc_call_carries_the_caller_trace_to_the_service_span():
+    exporter, tracer = _recording_tracer()
+    server = _grpc_server(_service(tracer))
+
+    await server.start()
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{server.port}") as channel:
+            stub = gateway_pb2_grpc.ModelGatewayServiceStub(channel)
+            await stub.Invoke(invoke_request(), metadata=_traced(_API_KEY))
+    finally:
+        await server.stop()
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].name == "invoke"
+    assert spans[0].context.trace_id == _PARENT_TRACE_ID
+    assert spans[0].parent is not None
+    assert spans[0].parent.span_id == 0x00F067AA0BA902B7
+
+
+async def test_a_streaming_grpc_call_carries_the_caller_trace_to_the_service_span():
+    exporter, tracer = _recording_tracer()
+    provider = _StreamingEchoProvider()
+    service = InferenceService(ModelRegistry((_route(),)), provider, tracer=tracer)
+    server = _grpc_server(service)
+
+    await server.start()
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{server.port}") as channel:
+            stub = gateway_pb2_grpc.ModelGatewayServiceStub(channel)
+            stream = stub.InvokeStream(invoke_request(), metadata=_traced(_API_KEY))
+            chunks = [chunk async for chunk in stream]
+    finally:
+        await server.stop()
+
+    assert len(chunks) == 2
+    assert [chunk.sequence for chunk in chunks] == [0, 1]
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].name == "invoke_stream"
+    assert spans[0].context.trace_id == _PARENT_TRACE_ID
+    assert spans[0].parent is not None
+    assert spans[0].parent.span_id == 0x00F067AA0BA902B7
