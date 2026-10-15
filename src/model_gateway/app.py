@@ -28,6 +28,7 @@ touching routing, policy or the public contract (PRD sections 9 and 23).
 import orjson
 import structlog
 from blacksheep import Application
+from blacksheep.server.routing import Router
 from blacksheep.settings.json import json_settings
 
 from model_gateway.accounting import (
@@ -234,7 +235,7 @@ def create_app(
     registry: ModelRegistry | None = None,
     service: InferenceService | None = None,
     serve_grpc: bool = False,
-    router=None,
+    router: Router | None = None,
 ) -> Application:
     """Build the application, ready to be started by the server.
 
