@@ -30,6 +30,7 @@ from model_gateway.domain import (
     TextPart,
     Usage,
 )
+from model_gateway.grpc.tracing import continue_trace
 from model_gateway.http.auth import create_auth_middleware
 from model_gateway.http.chat import register_chat_routes
 from model_gateway.http.errors import register_error_handlers
@@ -308,4 +309,59 @@ async def test_a_request_without_a_traceparent_starts_its_own_trace():
 
     spans = exporter.get_finished_spans()
     assert len(spans) == 1
+    assert spans[0].parent is None
+
+
+# --------------------------------------------------------------------------- #
+# The same over gRPC, whose carrier is the call's metadata
+# --------------------------------------------------------------------------- #
+
+
+class _CallContext:
+    """A gRPC context double carrying only the metadata the helper reads."""
+
+    def __init__(self, metadata: tuple[tuple[str, str], ...]) -> None:
+        self._metadata = metadata
+
+    def invocation_metadata(self):
+        return self._metadata
+
+
+async def test_a_calls_metadata_carries_the_callers_trace():
+    """gRPC propagation is the same carrier shape as HTTP, so one trace spans both."""
+    exporter, tracer = _recording_tracer()
+
+    async with continue_trace(_CallContext((("traceparent", TRACEPARENT),))):
+        with tracer.start_as_current_span("Invoke"):
+            pass
+
+    spans = exporter.get_finished_spans()
+    assert spans[0].context.trace_id == _PARENT_TRACE_ID
+    assert spans[0].parent is not None
+    assert spans[0].parent.span_id == 0x00F067AA0BA902B7
+
+
+async def test_a_call_without_metadata_starts_its_own_trace():
+    exporter, tracer = _recording_tracer()
+
+    async with continue_trace(_CallContext(())):
+        with tracer.start_as_current_span("Invoke"):
+            pass
+
+    assert exporter.get_finished_spans()[0].parent is None
+
+
+async def test_the_context_is_detached_even_when_the_call_aborts():
+    """A context left attached would make the next call on this worker a child of this one."""
+    exporter, tracer = _recording_tracer()
+
+    with pytest.raises(RuntimeError):
+        async with continue_trace(_CallContext((("traceparent", TRACEPARENT),))):
+            raise RuntimeError("the handler aborted")
+
+    with tracer.start_as_current_span("after"):
+        pass
+
+    spans = exporter.get_finished_spans()
+    assert [span.name for span in spans] == ["after"]
     assert spans[0].parent is None
