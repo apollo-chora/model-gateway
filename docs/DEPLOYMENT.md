@@ -29,12 +29,19 @@ Copy `.env.example` for development or `.env.production.example` for a real
 deployment and fill in the credentials; PRD section 18 is the complete list of
 settings with the defaults they take.
 
-**A container started with no configuration at all is a working gateway with no
-providers.** It starts, answers `/healthz` and `/readyz`, serves `/v1/models` with an
+**A container started with no configuration at all runs, and cannot serve
+inference.** It starts, answers `/healthz` and `/readyz`, serves `/v1/models` with an
 empty list, and refuses every inference request as a model it does not know. That is
-the honest state of a deployment that has not said what it can reach, and it is
-worth knowing because it means a missing environment file does not look like a
-crash.
+worth knowing in both directions: a missing environment file does not look like a
+crash, and it does not look like a working deployment either.
+
+**A green liveness probe is not evidence that provider configuration is present.**
+`/healthz` answers whether the process is the process and nothing else, so a
+deployment that has forgotten its environment file reports healthy while refusing
+every request. Check `/v1/models` before treating a deployment as ready for
+inference traffic. Whether readiness *should* distinguish a deliberately empty
+gateway from one that was expected to serve inference is a contract this PRD does
+not settle, and it is recorded as an open question rather than assumed either way.
 
 ## What happens at startup
 
