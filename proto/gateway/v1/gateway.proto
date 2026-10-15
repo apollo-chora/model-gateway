@@ -1,4 +1,4 @@
-// The gateway's own versioned inference contract (PRD section 5).
+// The gateway's own versioned inference contract.
 //
 // Package gateway.v1 is published, not imported: field numbers are stable and a
 // field is never reused or renumbered once it has been served. A caller written
@@ -81,16 +81,16 @@ message InvokeRequest {
   // different facts, and the canonical record keeps them apart. Only a
   // completed answer is recorded, so a repeat under the same key reaches the
   // caller without reaching the provider, and the gateway claims no exactly-once
-  // upstream execution (PRD section 12).
+  // upstream execution.
   optional string idempotency_key = 15;
   // Caller bookkeeping as canonical-domain JSON text, never forwarded to the model
   // or a provider. JSON bytes rather than a Struct because Struct types every
   // number as a double, so a JSON integer would arrive as a float and one beyond
-  // 2^53 would not be represented exactly (section 5.1).
+  // 2^53 would not be represented exactly.
   bytes metadata_json = 14;
 }
 
-// ToolChoice is the caller's tool-choice policy (PRD section 9.3).
+// ToolChoice is the caller's tool-choice policy.
 message ToolChoice {
   ToolChoiceMode mode = 1;
   // The tool a 'specific' choice requires the model to call. It must name one of
@@ -241,7 +241,7 @@ message InvokeResponse {
   optional double estimated_cost = 8;
   // An ISO 4217 code, present only with estimated_cost.
   string cost_currency = 9;
-  // Gateway attempts, which can exceed the upstream requests (PRD section 9.6).
+  // Gateway attempts, which can exceed the upstream requests.
   int32 attempt_count = 10;
   bool fallback_used = 11;
   IdempotencyStatus idempotency_status = 13;
