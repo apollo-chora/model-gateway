@@ -171,11 +171,11 @@ class Metrics:
     def __init__(self, *, duration_buckets: tuple[float, ...] = _DEFAULT_BUCKETS) -> None:
         self.requests_total = Counter(
             "gateway_requests_total",
-            "Invocations the gateway was asked to serve, counted when a request is admitted.",
+            "Invocations the gateway was asked to serve, one count per invocation.",
         )
         self.request_duration_seconds = Histogram(
             "gateway_request_duration_seconds",
-            "Elapsed time of an invocation, from admission to its answer or failure.",
+            "Elapsed time of an invocation, from its start to its answer or failure.",
             buckets=duration_buckets,
         )
         self.upstream_requests_total = Counter(
