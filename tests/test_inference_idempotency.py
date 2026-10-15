@@ -11,6 +11,8 @@ recorded so a retry is allowed to retry, and an unknown model is still a
 model-not-found error even when the key has a cached record.
 """
 
+import asyncio
+
 import pytest
 
 from model_gateway.capabilities import Capability
@@ -18,16 +20,17 @@ from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import (
     IdempotencyStatus,
     InvocationRequest,
-    InvocationResponse,
     Message,
     Role,
     TextPart,
 )
-from model_gateway.errors import ModelNotFoundError, UnavailableError
+from model_gateway.errors import (
+    IdempotencyConflictError,
+    ModelNotFoundError,
+    UnavailableError,
+)
 from model_gateway.idempotency import (
-    IdempotencyRecord,
     MemoryIdempotencyStore,
-    RequestFingerprint,
 )
 from model_gateway.inference import InferenceService
 from model_gateway.providers.mock import MockProvider, MockSpec
@@ -117,21 +120,72 @@ async def test_a_repeat_with_a_freshly_minted_invocation_id_is_the_same_request(
     assert len(provider.calls) == 1
 
 
-async def test_one_key_reused_for_another_payload_is_served_as_a_new_request() -> None:
-    """Rule 1: the fingerprint covers the payload, so a reused key is two requests."""
+async def test_one_key_reused_for_another_payload_is_refused_as_a_conflict() -> None:
+    """Rule 1: a key names one operation, so reuse is refused rather than executed.
+
+    Executing it would run a request the caller never made and overwrite the record
+    the key already holds, letting one key oscillate between unrelated payloads
+    indefinitely. The provider is never called.
+    """
     store = MemoryIdempotencyStore()
     provider = MockProvider((MockSpec(text="sunny in Paris"), MockSpec(text="rainy in London")))
     gateway = service(store, provider)
 
     first = await gateway.invoke(request())
-    second = await gateway.invoke(london())
+
+    assert first.idempotency_status is IdempotencyStatus.NEW
+    with pytest.raises(IdempotencyConflictError) as error:
+        await gateway.invoke(london())
+
+    assert error.value.reason.value == "idempotency_conflict"
+    assert error.value.http_status == 409
+    assert error.value.grpc_code == "ALREADY_EXISTS"
+    assert len(provider.calls) == 1
+
+
+async def test_two_credentials_using_the_same_key_do_not_interfere() -> None:
+    """The key is namespaced by the trusted principal, so neither destroys the other's record."""
+    store = MemoryIdempotencyStore()
+    provider = MockProvider((MockSpec(text="sunny in Paris"), MockSpec(text="sunny in Paris")))
+    gateway = service(store, provider)
+
+    first = await gateway.invoke(request(), namespace="acme:cred-a")
+    second = await gateway.invoke(request(), namespace="acme:cred-b")
+    repeat = await gateway.invoke(request(), namespace="acme:cred-a")
 
     assert first.idempotency_status is IdempotencyStatus.NEW
     assert second.idempotency_status is IdempotencyStatus.NEW
-    assert second.text == "rainy in London"
-    assert second.text != first.text
+    assert second.invocation_id == "inv-1"
+    assert repeat.idempotency_status is IdempotencyStatus.REPLAYED
     assert len(provider.calls) == 2
-    assert len(store) == 1
+    assert len(store) == 2
+
+
+async def test_simultaneous_identical_requests_are_served_by_one_provider_call() -> None:
+    """The situation idempotency exists to handle: two callers arriving together.
+
+    Exactly one of them owns the invocation; the other either coalesces onto its
+    claim while it is in flight or finds its completed record. Both read one
+    provider call and the same answer, whichever they saw. The status differs with
+    the timing — ``new`` for the owner and the coalesced, ``replayed`` for one that
+    arrives after the answer was recorded — so the assertion is on the call count
+    and the shared answer, not on which status each happened to get.
+    """
+    store = MemoryIdempotencyStore()
+    provider = MockProvider(MockSpec(text="sunny in Paris"))
+    gateway = service(store, provider)
+
+    first, second = await asyncio.gather(
+        gateway.invoke(request(), namespace="acme:cred-a"),
+        gateway.invoke(request(invocation_id="inv-2"), namespace="acme:cred-a"),
+    )
+
+    assert len(provider.calls) == 1
+    assert first.text == second.text == "sunny in Paris"
+    assert {first.idempotency_status, second.idempotency_status} <= {
+        IdempotencyStatus.NEW,
+        IdempotencyStatus.REPLAYED,
+    }
 
 
 async def test_a_request_without_a_key_never_reaches_the_store() -> None:
@@ -199,10 +253,13 @@ async def test_a_service_without_an_injected_store_deduplicates_from_its_own() -
 class BrokenStore:
     """A store that fails the way a defective one would, to prove the failure surfaces."""
 
-    def get(self, key: str) -> IdempotencyRecord | None:
+    async def acquire(self, key, fingerprint, namespace):
         raise RuntimeError("the idempotency store is broken")
 
-    def put(self, key: str, fingerprint: RequestFingerprint, response: InvocationResponse) -> None:
+    async def complete(self, key, namespace, response):
+        raise RuntimeError("the idempotency store is broken")
+
+    async def fail(self, key, namespace, error):
         raise RuntimeError("the idempotency store is broken")
 
 

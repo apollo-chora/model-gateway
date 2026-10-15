@@ -816,21 +816,29 @@ async def test_a_call_with_no_key_is_answered_not_applicable(stub, provider):
     assert response.idempotency_status == pb.IDEMPOTENCY_STATUS_NOT_APPLICABLE
 
 
-async def test_a_key_reused_for_another_payload_is_served_as_a_new_request(stub, provider):
-    # The fingerprint covers the payload, not the key: the same key sent with a
-    # different body is a second request, so it is answered rather than given
-    # the first request's answer.
-    await stub.Invoke(request(idempotency_key=IDEMPOTENCY_KEY), metadata=bearer())
-    other = await stub.Invoke(
-        request(
-            idempotency_key=IDEMPOTENCY_KEY,
-            messages=(user_message("A different question entirely."),),
-        ),
-        metadata=bearer(),
-    )
+async def test_a_key_reused_for_another_payload_is_refused_as_a_conflict(stub, provider):
+    """A key names one operation, so reuse is refused rather than executed.
 
-    assert other.idempotency_status == pb.IDEMPOTENCY_STATUS_NEW
-    assert len(provider.calls) == 2
+    Executing it would run a request the caller never made and overwrite the record
+    the key already holds, letting one key oscillate between unrelated payloads
+    indefinitely. The provider is never called.
+    """
+    await stub.Invoke(request(idempotency_key=IDEMPOTENCY_KEY), metadata=bearer())
+
+    with pytest.raises(grpc.aio.AioRpcError) as error:
+        await stub.Invoke(
+            request(
+                idempotency_key=IDEMPOTENCY_KEY,
+                messages=(user_message("A different question entirely."),),
+            ),
+            metadata=bearer(),
+        )
+
+    assert error.value.code() == grpc.StatusCode.ALREADY_EXISTS
+    payload = orjson.loads(error.value.details())
+    assert payload["reason"] == "idempotency_conflict"
+    assert payload["details"]["idempotency_key"] == IDEMPOTENCY_KEY
+    assert len(provider.calls) == 1
 
 
 async def test_an_empty_key_is_refused_rather_than_read_as_no_key():
