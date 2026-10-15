@@ -62,7 +62,13 @@ class GrpcServer:
             auth_enabled=settings.auth_enabled,
             allow_anonymous_health=settings.allow_anonymous_health,
         )
-        self._grpc = grpc.aio.server()
+        # The same bound the HTTP transport applies, in this transport's own unit:
+        # gRPC bounds a message rather than a body, and reports one over the bound
+        # as RESOURCE_EXHAUSTED — the status the taxonomy maps for this condition —
+        # so one configured value bounds both transports (PRD section 14).
+        self._grpc = grpc.aio.server(
+            options=[("grpc.max_receive_message_length", settings.max_request_body_bytes)]
+        )
         gateway_pb2_grpc.add_ModelGatewayServiceServicer_to_server(
             ModelGatewayServiceServicer(
                 Invoke(self._authenticator, service),
