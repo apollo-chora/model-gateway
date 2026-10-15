@@ -56,6 +56,7 @@ from model_gateway.http import (
     register_responses_routes,
 )
 from model_gateway.http.auth import create_auth_middleware
+from model_gateway.http.body_limit import create_body_limit_middleware
 from model_gateway.http.metrics import register_metrics_route
 from model_gateway.http.tracing import create_tracing_middleware
 from model_gateway.inference import InferenceService
@@ -332,6 +333,10 @@ def create_app(
             allow_anonymous_health=settings.allow_anonymous_health,
         )
     )
+    # Appended after authentication so an unidentified caller is told that it is
+    # unidentified rather than something about this deployment's configuration.
+    # Neither check reads the body, so the order costs nothing (PRD section 14).
+    app.middlewares.append(create_body_limit_middleware(settings.max_request_body_bytes))
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/readyz", readyz)
     register_metrics_route(app.router, metrics)
