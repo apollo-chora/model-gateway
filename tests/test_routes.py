@@ -1,4 +1,4 @@
-"""Route parsing and startup validation (PRD sections 6, 7, 8, 11, 18)."""
+"""Route parsing and startup validation."""
 
 import copy
 import dataclasses
@@ -98,7 +98,7 @@ def orphan_message(variable: str, prefix: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_operation_values_match_the_prd():
+def test_operation_values_match_the_routing_operations():
     assert Operation.TEXT == "text"
     assert Operation.IMAGE == "image"
     assert Operation.EMBEDDINGS == "embeddings"
@@ -1497,11 +1497,11 @@ def test_an_embedding_property_on_another_operations_route_is_ignored():
 
 
 # ---------------------------------------------------------------------------
-# The PRD's own examples
+# Worked configuration examples
 # ---------------------------------------------------------------------------
 
 
-def test_the_prd_fallback_example_is_accepted():
+def test_a_primary_and_fallback_route_configuration_is_accepted():
     routes = parse(
         {
             "TEXT_LLM_ENDPOINT": "https://primary.example/v1",
@@ -1522,7 +1522,7 @@ def test_the_prd_fallback_example_is_accepted():
     assert [route.auth_type for route in routes] == [None, None]
 
 
-def test_the_prd_complete_environment_example_is_accepted():
+def test_a_complete_environment_configuration_is_accepted():
     env = {
         "CHORA_HTTP_PORT": "8080",
         "CHORA_ENVIRONMENT": "production",

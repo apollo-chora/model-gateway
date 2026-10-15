@@ -1,6 +1,6 @@
-"""Tracing: configuration, propagation and the span an invocation leaves (PRD §17).
+"""Tracing: configuration, propagation and the span an invocation leaves.
 
-Section 17 asks for W3C Trace Context and OpenTelemetry support. Three things are
+The gateway is required to support W3C Trace Context and OpenTelemetry. Three things are
 worth proving separately: that a deployment which did not ask for tracing gets
 none, that one which asked and gave no endpoint is refused rather than silently
 dropping spans, and that an inbound ``traceparent`` really is the parent of the

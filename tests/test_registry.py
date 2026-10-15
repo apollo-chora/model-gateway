@@ -1,11 +1,10 @@
-"""The public model registry: fixed public model IDs onto configured routes (PRD 4.3, 6, 10, 11).
+"""The public model registry: fixed public model IDs onto configured routes.
 
 The registry is the only thing that maps a public ID onto a route, so these tests
 pin both directions of that contract: a configured operation resolves to the ID
 the caller used and to the routes the deployment configured for it, and an ID
 the gateway does not expose resolves to nothing at all — no route, no endpoint,
-no error message that carries one (PRD sections 4.3 and 10, acceptance
-criterion 13).
+no error message that carries one.
 
 The advertised limits are deployment configuration rather than route fields, so
 they are read from the environment the registry was built from. Tests that build
@@ -127,7 +126,7 @@ def registry(env: dict[str, str]) -> ModelRegistry:
 # ---------------------------------------------------------------------------
 
 
-def test_the_public_model_ids_are_the_prd_fixed_set():
+def test_the_public_model_ids_are_the_fixed_set():
     assert PUBLIC_MODEL_IDS == {
         Operation.TEXT: "text-default",
         Operation.IMAGE: "image-default",

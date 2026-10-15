@@ -1,4 +1,4 @@
-"""Settings loading and startup validation (PRD sections 6, 7, 18)."""
+"""Settings loading and startup validation."""
 
 import dataclasses
 import importlib
@@ -205,7 +205,7 @@ def test_settings_is_importable_from_the_config_package():
     assert Settings.__module__ == "model_gateway.config.settings"
 
 
-def test_defaults_match_the_prd_example_environment():
+def test_defaults_match_the_example_environment():
     settings = Settings.from_env({})
 
     assert settings.environment is Environment.DEVELOPMENT

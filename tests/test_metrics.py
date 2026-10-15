@@ -1,7 +1,7 @@
-"""The operational metrics and their exposition (PRD section 17).
+"""The operational metrics and their exposition.
 
 The metric *names* are the contract, so one test checks this registry against
-section 17's list line for line rather than against a copy of itself. The
+the required list line for line rather than against a copy of itself. The
 exposition *format* is the other contract — a scraper reads the wire text, not the
 objects — so the rendering is pinned with golden expectations rather than by
 inspecting values, because a value assertion would keep passing while the text
@@ -55,7 +55,7 @@ REQUIRED_METRICS = (
     "gateway_active_requests",
     "gateway_rate_limit_rejections_total",
 )
-"""Section 17's list, copied here on purpose.
+"""The required metric names, copied here on purpose.
 
 Copied rather than imported from the module under test: a test that reads the
 names out of the implementation agrees with the implementation by construction and
@@ -63,7 +63,7 @@ would not notice a name being changed.
 """
 
 
-def test_the_registry_declares_exactly_the_metrics_section_17_requires():
+def test_the_registry_declares_exactly_the_required_metrics():
     assert METRIC_NAMES == REQUIRED_METRICS
     assert [metric.name for metric in Metrics().all()] == list(REQUIRED_METRICS)
 
@@ -427,7 +427,7 @@ async def test_the_metrics_endpoint_serves_the_exposition_format():
 
 
 async def test_the_metrics_endpoint_requires_a_credential_like_every_other_path():
-    """Section 14.2 exempts two paths, and a scrape is not one of them."""
+    """Two paths are exempt from authentication, and a scrape is not one of them."""
     metrics = Metrics()
     app = _metrics_app(metrics, _EchoProvider())
 

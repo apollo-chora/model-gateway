@@ -1,4 +1,4 @@
-"""Usage and cost accounting: the record, the pricing, the sinks (PRD section 13).
+"""Usage and cost accounting: the record, the pricing, the sinks.
 
 These tests prove the rules the module is built on: a token count is either
 reported or estimated and the difference travels with it, cost comes from
@@ -311,7 +311,7 @@ def test_the_projection_is_exhaustive_over_the_record():
     assert set(_record().to_dict()) == _RECORD_KEYS
 
 
-def test_a_record_carries_every_fact_section_13_asks_for():
+def test_a_record_carries_every_declared_fact():
     record = _record()
     projected = record.to_dict()
 
@@ -856,7 +856,7 @@ async def test_an_embeddings_fallback_is_recorded_against_the_route_that_served_
     A failed primary followed by a serving fallback is the case that exercises
     both facts at once: the attempt count is two, the fallback flag is set, and
     the route named is the one that answered. An embeddings answer carries neither
-    fact (PRD section 5.2), so this is the walk's report and not the answer's.
+    fact, so this is the walk's report and not the answer's.
     """
     from model_gateway.errors import UnavailableError
 
@@ -1015,7 +1015,7 @@ class _ImageProvider:
 
 
 async def test_an_embeddings_invocation_is_recorded():
-    """§13 asks for a record of every invocation that produced an answer."""
+    """A record is kept of every invocation that produced an answer."""
     sink = MemoryAccountingSink()
     service = InferenceService(
         ModelRegistry((_embedding_route(),)),
@@ -1059,7 +1059,7 @@ async def test_an_image_invocation_is_recorded():
 
 
 async def test_the_tenant_is_absent_for_an_operation_whose_request_carries_none():
-    """The canonical embeddings and image requests have no tenant field (§5.1).
+    """The canonical embeddings and image requests have no tenant field.
 
     The tenant an invocation acts under is the credential's, so the record states
     a tenant only where the request stated one rather than borrowing the
@@ -1153,7 +1153,7 @@ async def _drain(stream) -> list[StreamEvent]:
 
 
 async def test_a_completed_stream_is_recorded():
-    """§13 asks for a record of every invocation that produced an answer, streams included."""
+    """A record is kept of every invocation that produced an answer, streams included."""
     sink = MemoryAccountingSink()
     service = _streaming_service(
         _ScriptedStreamProvider(
