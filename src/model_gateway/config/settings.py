@@ -220,6 +220,19 @@ _FIELDS: tuple[_Field, ...] = (
         "100",
         _parse_positive_int,
     ),
+    _Field("rate_limit_requests", "GATEWAY_RATE_LIMIT_REQUESTS", "0", _parse_non_negative_int),
+    _Field(
+        "rate_limit_window_seconds",
+        "GATEWAY_RATE_LIMIT_WINDOW_SECONDS",
+        "60",
+        _parse_positive_float,
+    ),
+    _Field(
+        "tenant_max_concurrent_requests",
+        "GATEWAY_TENANT_MAX_CONCURRENT_REQUESTS",
+        "0",
+        _parse_non_negative_int,
+    ),
     _Field(
         "shutdown_timeout_seconds",
         "GATEWAY_SHUTDOWN_TIMEOUT_SECONDS",
@@ -257,6 +270,9 @@ class Settings:
     provider_retry_count: int
     provider_retry_backoff_ms: int
     provider_max_concurrent_requests: int
+    rate_limit_requests: int
+    rate_limit_window_seconds: float
+    tenant_max_concurrent_requests: int
     shutdown_timeout_seconds: float
 
     usage_tracking_enabled: bool
