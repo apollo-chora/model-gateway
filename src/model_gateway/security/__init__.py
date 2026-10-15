@@ -1,4 +1,4 @@
-"""Security policy for upstream traffic (PRD sections 7, 8, 9.4 and 14).
+"""Security policy for upstream traffic.
 
 Endpoint joining, scheme and SSRF validation, redirect and credential rules,
 and the reserved-authentication-header rule live here so that configuration
@@ -8,9 +8,8 @@ These checks screen configuration; they are not by themselves a guarantee of
 SSRF prevention. The transport that performs the outbound request must pin the
 validated address and disable automatic redirect following, so that a redirect
 surfaces instead of being followed silently; no redirect is evaluated, because
-the binding has no redirect-evaluation step and refuses every hop (PRD
-section 14.1). See the transport contract in
-``model_gateway.security.url_policy``.
+the binding has no redirect-evaluation step and refuses every hop. See the
+transport contract in ``model_gateway.security.url_policy``.
 """
 
 from model_gateway.security.url_policy import (

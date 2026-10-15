@@ -1,4 +1,4 @@
-"""Transport-independent authorization for a trusted identity (PRD sections 5.1, 7 and 15).
+"""Transport-independent authorization for a trusted identity.
 
 The rule that a caller's *claimed* tenant must never become or override its
 *authenticated* tenant is a property of the credential model, not of any one
@@ -22,11 +22,11 @@ whatever tenant the caller claimed against it.
 The function validates and raises; it does not rewrite the invocation. The
 trusted tenant a caller acts under is always ``Identity.tenant``, read from the
 credential, and a transport builds its invocation from that identity rather than
-from the body (PRD section 5.1).
+from the body.
 
 Only the credential's ``tenant`` and ``credential_id`` are principals for
 authorization; caller-supplied ``actor_id`` and ``agent_id`` are attribution
-labels and are not consulted here (PRD section 5.1).
+labels and are not consulted here.
 """
 
 from model_gateway.errors import PermissionDeniedError
@@ -38,8 +38,8 @@ __all__ = ["reconcile_identity"]
 def reconcile_identity(identity: Identity | None, claimed_tenant: str | None) -> None:
     """Refuse a claimed tenant that disagrees with the authenticated tenant.
 
-    The authenticated identity is the sole source of tenant identity (PRD
-    section 5.1): a claimed tenant can never supply or override a tenant. When
+    The authenticated identity is the sole source of tenant identity: a
+    claimed tenant can never supply or override a tenant. When
     the caller is authenticated and claims a different tenant — including one
     the credential is not bound to at all — the request is a
     :class:`~model_gateway.errors.PermissionDeniedError`. An absent claim is

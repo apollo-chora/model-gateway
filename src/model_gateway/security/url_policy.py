@@ -1,21 +1,20 @@
 """Upstream URL policy: deterministic endpoint joining, scheme and SSRF checks.
 
 The endpoint handed to LiteLLM is composed from a configured base URL and an
-optional configured path (PRD section 8). Composition is literal: the base
+optional configured path. Composition is literal: the base
 URL's path is preserved and the configured path's segments are appended to it,
 with no component repaired, reordered or dropped. A full URL in the path
 setting is refused unless the route opts in explicitly.
 
 Every URL the gateway is about to contact is validated first: the scheme must
 be HTTPS unless insecure transport is explicitly enabled for development, and
-every address a host resolves to must be publicly routable (PRD sections 9.4
-and 14). The redirect decision below — a same-origin hop permitted after
-revalidation, a cross-origin hop refused unless the caller opts in, credentials
-never carried across an origin change — is specified as policy (PRD sections 7
-and 14.1) but has no caller in a request path: the binding has no redirect-
-evaluation step, so a redirect is refused rather than assessed (PRD section
-14.1). Credentials must arrive through route configuration; a URL that embeds
-userinfo is refused.
+every address a host resolves to must be publicly routable. The redirect
+decision below — a same-origin hop permitted after revalidation, a
+cross-origin hop refused unless the caller opts in, credentials never carried
+across an origin change — is specified as policy but has no caller in a
+request path: the binding has no redirect-evaluation step, so a redirect is
+refused rather than assessed. Credentials must arrive through route
+configuration; a URL that embeds userinfo is refused.
 
 Transport contract
 ------------------
@@ -30,7 +29,7 @@ performs the outbound request is required to:
   being followed silently. No hop is evaluated today: the binding has no
   redirect-evaluation step, so every redirect is refused and surfaces to the
   caller as an upstream error, and :func:`evaluate_redirect` has no caller in a
-  request path (PRD section 14.1).
+  request path.
 
 Without both obligations met, this module is advisory only.
 """
@@ -52,7 +51,7 @@ _DEFAULT_PORTS = {_INSECURE_SCHEME: 80, _SECURE_SCHEME: 443}
 RESERVED_AUTH_HEADERS: frozenset[str] = frozenset({"authorization", "x-api-key", "api-key"})
 
 ALLOWED_HOSTS_VARIABLE = "GATEWAY_ALLOWED_UPSTREAM_HOSTS"
-"""The variable naming the upstream hosts a deployment permits (PRD section 14)."""
+"""The variable naming the upstream hosts a deployment permits."""
 
 _HOSTNAME_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\Z")
 
@@ -129,7 +128,7 @@ def is_reserved_auth_header(name: str) -> bool:
     """Whether ``name`` is an authentication header a route's own configuration owns.
 
     Configuration validation uses this to reject reserved names supplied through
-    ``*_EXTRA_HEADERS_JSON`` (PRD section 7).
+    ``*_EXTRA_HEADERS_JSON``.
     """
     return name.strip().lower() in RESERVED_AUTH_HEADERS
 
@@ -146,7 +145,7 @@ def is_blocked_address(address: str) -> bool:
 
 
 def check_host(host: str, *, resolver: Resolver = system_resolver) -> None:
-    """Reject a host that resolves to any blocked address (PRD sections 9.4 and 14).
+    """Reject a host that resolves to any blocked address.
 
     Loopback, private, unique-local, link-local (which includes the cloud
     metadata address 169.254.169.254), multicast, reserved, unspecified and
@@ -180,7 +179,7 @@ def check_host(host: str, *, resolver: Resolver = system_resolver) -> None:
 
 
 def check_allowed_host(host: str, allowed_hosts: frozenset[str]) -> None:
-    """Reject a host an allowlist does not name (PRD section 14).
+    """Reject a host an allowlist does not name.
 
     **The allowlist narrows and never widens.** A host it names still has to pass
     every other check in this module, including the address screen, so configuring
@@ -210,7 +209,7 @@ def join_endpoint(
     *,
     allow_absolute_path_url: bool = False,
 ) -> str:
-    """Compose an endpoint from a base URL and an optional configured path (PRD section 8).
+    """Compose an endpoint from a base URL and an optional configured path.
 
     The base URL may carry a path of its own, and the configured path's segments
     are appended to it literally: ``/v1`` joined with ``/custom`` gives
@@ -254,15 +253,15 @@ def validate_upstream_url(
     allow_insecure_transport: bool = False,
     resolver: Resolver = system_resolver,
 ) -> None:
-    """Apply scheme policy and SSRF checks to an absolute upstream URL (PRD section 14).
+    """Apply scheme policy and SSRF checks to an absolute upstream URL.
 
     Configuration-time screening only, not a guarantee of SSRF prevention: the
     checks run once, against a DNS answer the transport will obtain again. The
     transport that performs the outbound request is required to pin the
     validated address and to disable automatic redirect following, so that a
     redirect surfaces instead of being followed silently. No hop is evaluated:
-    the binding refuses redirects rather than assessing them (module docstring,
-    PRD section 14.1).
+    the binding refuses redirects rather than assessing them (see the module
+    docstring).
     """
     parsed = _parse_url(url, what="URL")
     _check_scheme(parsed.scheme, allow_insecure_transport=allow_insecure_transport)
@@ -280,12 +279,13 @@ def resolve_endpoint(
 ) -> str:
     """Join a route's endpoint and validate it before it is handed to LiteLLM.
 
-    The result is the ``api_base`` value of PRD section 9.6. Its one caller is the
+    The result is the ``api_base`` value the binding passes to LiteLLM. Its one
+    caller is the
     route parser, which is where configuration is validated: the binding receives a
     resolved ``Route`` rather than resolving one, so this is configuration-time
     screening and not a per-request step. ``allowed_hosts`` is the deployment's
     optional allowlist, applied to the joined endpoint so an absolute-path override
-    is checked against it too (PRD section 14).
+    is checked against it too.
     """
     endpoint = join_endpoint(base_url, path, allow_absolute_path_url=allow_absolute_path_url)
     validate_upstream_url(
@@ -317,13 +317,13 @@ def evaluate_redirect(
     body holding private prompts and tool payloads, so deciding which of those
     may cross an origin is riskier than refusing the hop. When the opt-in is set
     the hop proceeds, but credentials are never forwarded across the origin
-    change (PRD sections 7 and 14).
+    change.
 
     No request path calls this helper. It states the policy for controlled
     redirect handling, which is not yet implemented: the binding has no
     redirect-evaluation step, so a transport that disables automatic redirect
     following returns the 3xx to the caller unchanged and the hop is refused
-    rather than assessed (PRD section 14.1).
+    rather than assessed.
 
     ``source_url`` is the URL the gateway already validated, so a malformed
     source raises :class:`UrlPolicyError`; a malformed target is a refusal.

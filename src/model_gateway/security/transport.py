@@ -1,10 +1,10 @@
-"""The outbound transport: the connection-time half of the URL policy (PRD section 14.1).
+"""The outbound transport: the connection-time half of the URL policy.
 
 Screening a URL when configuration is loaded does not prevent SSRF on its own.
 :mod:`~model_gateway.security.url_policy` validates the endpoint the operator
 configured, and the binding resolves that hostname again when it performs the
-request. Between the two, DNS may answer differently — the time-of-check to
-time-of-use gap PRD section 14.1 describes. The controls that close it belong to
+request. Between the two, DNS may answer differently — a time-of-check to
+time-of-use gap. The controls that close it belong to
 whatever opens the socket, which is this module:
 
 * **Address pinning.** :func:`pin_request` resolves the request's hostname
@@ -19,7 +19,7 @@ whatever opens the socket, which is this module:
   ``follow_redirects=False``, so a 3xx surfaces to the caller as the response
   it is and is never followed. The gateway has no redirect-evaluation step, so
   the hop is refused rather than assessed and surfaces to the caller as an
-  upstream error (PRD section 14.1). Neither transport follows nor evaluates a
+  upstream error. Neither transport follows nor evaluates a
   redirect: connecting is their job.
 
 Pinning would be worthless if it changed who the upstream thinks it is talking
@@ -38,7 +38,7 @@ Omitting it loses both controls silently — no error, no warning, and no visibl
 difference until a rebinding or a redirect is attempted. The same call site must
 keep ``num_retries=0``, because a client supplied without it leaves the retry
 count at LiteLLM's own default and would stack a second retry loop on the
-gateway's (PRD section 11.3).
+gateway's.
 
 Which client that is has three answers, because the pinned library does not
 accept the same object on every provider path, and the difference is a security
@@ -107,8 +107,8 @@ class PinnedAddressTransport(httpx.AsyncBaseTransport):
 
     Every request is rewritten before it is sent: the URL's host is replaced by
     the validated address the resolver returned, so the socket terminates where
-    policy was checked rather than wherever the hostname points at connect time
-    (PRD section 14.1). The hostname itself is not lost — it stays in the ``Host``
+    policy was checked rather than wherever the hostname points at connect time.
+    The hostname itself is not lost — it stays in the ``Host``
     header and is handed to the connection as the TLS server name, so the
     authority the upstream sees and the certificate it is validated against are
     unchanged.
@@ -164,7 +164,7 @@ class PinnedAddressTransport(httpx.AsyncBaseTransport):
         destination is not even resolved. This transport follows no redirect and
         evaluates none; the gateway has no redirect-evaluation step, so the hop
         is refused rather than assessed and surfaces to the caller as an
-        upstream error (PRD section 14.1).
+        upstream error.
         """
         return await self._inner.handle_async_request(
             pin_request(
@@ -263,8 +263,7 @@ def pin_request(
 
     The URL's host is replaced and nothing else about it: scheme, port, path
     and query stay the caller's, because the request is the binding's own
-    composition of the route's endpoint and the operation path (PRD section
-    8).
+    composition of the route's endpoint and the operation path.
 
     The ``Host`` header is the authority the request already carried, and is
     derived from the original URL only when it carried none — a client-built
@@ -299,7 +298,7 @@ def attempt_timeout(
     *,
     connect_timeout: float | None = None,
 ) -> httpx.Timeout:
-    """Derive an outbound timeout from one attempt's budget (PRD section 15).
+    """Derive an outbound timeout from one attempt's budget.
 
     ``budget`` is the seconds this attempt may use — ``AttemptContext.timeout``,
     drawn from the invocation's single deadline. It becomes every phase of the
@@ -367,16 +366,15 @@ def build_async_client(
     """Build the httpx client one attempt is made through.
 
     The returned client pins every connection to a validated address, never
-    follows a redirect, and carries the attempt's timeout (PRD sections 9, 14.1
-    and 15). See the module docstring for why both controls are required, why
+    follows a redirect, and carries the attempt's timeout. See the module
+    docstring for why both controls are required, why
     LiteLLM's own client cannot supply them, and which provider paths accept this
     client rather than :func:`build_pinned_transport`.
 
     One client per attempt: it is cheap, it owns a connection pool, and its
     timeout is this attempt's. Close it when the attempt ends — ``async with
     build_async_client(...) as client:`` — or the pooled connections outlive the
-    call (PRD section 15).
-
+    call.
     ``verify`` is httpx's TLS verification setting: ``True`` for the default
     trust store, ``False`` to disable verification, or an
     :class:`ssl.SSLContext` for a private CA
@@ -386,7 +384,7 @@ def build_async_client(
 
     No proxy is configured and none is taken from the environment. A proxy that
     re-resolves the hostname independently recreates the very gap this client
-    closes, so it cannot be the compensating control PRD section 14.1 describes;
+    closes, so it cannot close that gap;
     supplying the transport explicitly is what keeps the environment from
     installing one between the gateway and the upstream.
     """
@@ -416,7 +414,7 @@ def build_sync_client(
 
     The synchronous twin of :func:`build_async_client`: the returned client
     pins every connection to a validated address, never follows a redirect, and
-    carries the attempt's timeout (PRD sections 9, 14.1 and 15). It exists for
+    carries the attempt's timeout. It exists for
     the library paths that are synchronous — the image binding's generic
     dialects are served through one — so a future operation that unexpectedly
     takes a synchronous path reuses the same audited control rather than
@@ -431,7 +429,7 @@ def build_sync_client(
 
     No proxy is configured and none is taken from the environment. A proxy that
     re-resolves the hostname independently recreates the very gap this client
-    closes, so it cannot be the compensating control PRD section 14.1 describes;
+    closes, so it cannot close that gap;
     supplying the transport explicitly is what keeps the environment from
     installing one between the gateway and the upstream.
     """
@@ -480,7 +478,7 @@ def _validated_addresses(host: str, resolver: Resolver) -> tuple[str, ...]:
 
 
 def _check_scheme(scheme: str, *, allow_insecure_transport: bool) -> None:
-    """Refuse a scheme this transport will not speak (PRD section 14).
+    """Refuse a scheme this transport will not speak.
 
     The URL policy applies the same rule when an endpoint is configured. It is
     applied again here because this is the last point before a socket, and a

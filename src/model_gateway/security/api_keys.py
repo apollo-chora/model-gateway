@@ -1,6 +1,6 @@
 """Inbound credential store: API-key parsing, verification and identity.
 
-This module owns the gateway's inbound API keys (PRD section 7): the format
+This module owns the gateway's inbound API keys: the format
 of ``GATEWAY_API_KEYS``, how a presented key is checked, and the
 :class:`~model_gateway.security.Identity` the check produces. It is the only
 place a configured key is compared against a presentation.
@@ -13,7 +13,7 @@ element of ``Settings.api_keys`` is one whole entry, either ``<key>`` or
 ``<key>:<tenant>``. Surrounding whitespace is trimmed on the entry and on
 both halves, and blank entries are dropped. The rest is rejected at startup,
 because ambiguous configuration must be refused rather than resolved by
-guessing (PRD sections 6 and 11.1):
+guessing:
 
 - an entry with an empty key part (``:tenant``);
 - an entry with an empty tenant part (``key:``) — it reads as a tenant
@@ -29,15 +29,14 @@ guessing (PRD sections 6 and 11.1):
 
 Configuration-time keys are plaintext secrets
 ---------------------------------------------
-The keys live in the operator's environment as plaintext: that is the PRD's
-configuration model (sections 6 and 18), not a defect this module can remove.
+The keys live in the operator's environment as plaintext: that is the
+configuration model, not a defect this module can remove.
 At startup each configured key is reduced to its SHA-256 digest and the
 plaintext is discarded, so the store holds a digest rather than the key for the
 process lifetime. The gateway never logs, echoes or serialises a key — error
 messages name the rule that was violated and never the key that violated it,
-and the store's repr shows only derived labels. Secret redaction (PRD section
-14) and the rule that credentials are never logged (PRD section 17) apply to
-everything in this module.
+and the store's repr shows only derived labels. Secret redaction and the rule
+that credentials are never logged apply to everything in this module.
 
 Verification
 ------------
@@ -78,7 +77,7 @@ different consumers:
   share a label. It exists to let an operator correlate log lines, nothing more.
 
 Neither is a credential. A hash prefix is not encryption, and a configured key
-may be low entropy: the PRD's own example keys (``primary-key``,
+may be low entropy: the example keys (``primary-key``,
 ``internal-tooling``) are guessable, so an attacker holding a logged label can
 test candidate keys offline until one hashes to it. The label is therefore a
 correlation aid and not a secret to rely on. The operational consequence is that
@@ -219,8 +218,7 @@ class ApiKeySet:
 
         Unauthenticated means exactly this and nothing more: the caller has
         NO tenant (``tenant is None`` — a request-body ``tenant_id`` can never
-        supply one, PRD section 5.1), no credential identifier and no key
-        label.
+        supply one), no credential identifier and no key label.
         """
         return Identity(authenticated=False, tenant=None, credential_id=None, key_label=None)
 

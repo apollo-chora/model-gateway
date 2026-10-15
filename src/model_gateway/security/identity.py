@@ -1,4 +1,4 @@
-"""Trusted identity of an inbound caller (PRD sections 5.1 and 7).
+"""Trusted identity of an inbound caller.
 
 Inbound authentication is credential-based: a caller presents an API key, and
 everything the gateway believes about that caller is derived from the key
@@ -9,7 +9,7 @@ Four rules define the type:
 
 - A tenant is a property of the credential, never of the request. ``tenant``
   is ``None`` unless the presented key is explicitly bound to one, and a
-  request-body ``tenant_id`` can never supply or override it (PRD section 5.1).
+  request-body ``tenant_id`` can never supply or override it.
 - The credential, not the caller, is the principal. ``credential_id`` is the
   collision-resistant internal identifier downstream policy keys on — rate
   limiting, concurrency limits, idempotency and accounting all use it, and
@@ -21,7 +21,7 @@ Four rules define the type:
 - Caller-supplied ``actor_id`` and ``agent_id`` are attribution labels, never
   principals. They record who or what the caller says it is, and they must
   never key a quota, a rate limit, a concurrency limit or an authorization
-  decision. Only ``tenant`` and ``credential_id`` may (PRD section 5.1).
+  decision. Only ``tenant`` and ``credential_id`` may.
 """
 
 from dataclasses import dataclass
@@ -48,7 +48,7 @@ class Identity:
         configured key binds to no tenant. An authenticated caller with
         ``tenant is None`` is authenticated but tenant-less; an
         unauthenticated caller has NO tenant by construction, and no
-        request-body ``tenant_id`` can supply one (PRD section 5.1).
+        request-body ``tenant_id`` can supply one.
 
     ``credential_id``
         The collision-resistant identifier of the presented credential — the
@@ -84,7 +84,7 @@ class Identity:
 
     @property
     def idempotency_namespace(self) -> str:
-        """The trusted principal namespace a caller's keys are scoped to (PRD section 12).
+        """The trusted principal namespace a caller's keys are scoped to.
 
         The credential identifier is the namespace: it is collision-resistant, it is
         unique to one credential, and a credential already carries its tenant
@@ -93,8 +93,7 @@ class Identity:
         other credential by its identifier alone.
 
         This is derived from the credential, never from a request field: a tenant
-        is a property of the credential and can never be supplied by the caller
-        (PRD section 5.1).
+        is a property of the credential and can never be supplied by the caller.
         """
         return self.credential_id or ""
 
@@ -141,11 +140,11 @@ def caller_tenant(identity: Identity | None) -> str | None:
     """The tenant a caller's invocation acts under, or ``None`` when there is none.
 
     Read from the identity the transport established and never from the request: a
-    tenant is a property of the credential (PRD section 5.1). ``None`` is a caller
+    tenant is a property of the credential. ``None`` is a caller
     with no tenant at all — an anonymous one, or an authenticated credential the
     operator bound to no tenant — and a per-tenant bound falls back to the
     credential identifier for such a caller, because a tenant-less credential is
-    its own principal (PRD section 14.2) and a shared empty key would let one of
+    its own principal and a shared empty key would let one of
     them consume the bound the others are entitled to.
     """
     return identity.tenant if identity is not None else None
