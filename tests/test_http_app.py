@@ -307,6 +307,7 @@ async def test_the_factory_gives_the_built_service_the_configured_attempt_budget
             retry_count=None,
             retry_backoff_ms=None,
             limiter=None,
+            accounting=None,
         ):
             captured["attempt_timeout"] = attempt_timeout
 
@@ -341,12 +342,14 @@ async def test_the_factory_gives_the_built_service_every_configured_reliability_
             retry_count=None,
             retry_backoff_ms=None,
             limiter=None,
+            accounting=None,
         ):
             captured.update(
                 attempt_timeout=attempt_timeout,
                 retry_count=retry_count,
                 retry_backoff_ms=retry_backoff_ms,
                 limiter=limiter,
+                accounting=accounting,
             )
 
     monkeypatch.setattr("model_gateway.app.InferenceService", RecordingService)

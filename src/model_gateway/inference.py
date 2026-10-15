@@ -240,7 +240,7 @@ is missing rather than receiving a generic failure (PRD sections 6.2 and
 _Result = TypeVar("_Result")
 """The answer one operation produces: a completion, a stream, or vectors."""
 
-_Serve = Callable[[Route, "InvocationState", Deadline], Awaitable[_Result]]
+_Serve = Callable[[Route, "InvocationState", Deadline], Awaitable[tuple[_Result, Route]]]
 """One attempt on one route, finished: the call and the gateway's own stamping."""
 
 _TERMINAL_EVENT_KINDS = frozenset({StreamEventKind.FINISH, StreamEventKind.ERROR})
@@ -512,16 +512,16 @@ class InferenceService:
         it is never recorded and reports ``NOT_APPLICABLE``.
         """
         routes = self._registry.routes_for(request.model)
-        # The plan's primary is its first route: the one the invocation would be
-        # served by if every attempt were on it, which is the route the record
-        # attributes the answer to.
-        route = routes[0]
         started = time.monotonic()
         key = request.idempotency_key
         if key is None:
-            response = await self._invoke_on(request, routes)
-            self._record(request, response, route, namespace or "", started)
-            return response
+            response, route, state = await self._invoke_on(request, routes)
+            # The answer and its record carry one identifier, minted here when the
+            # request did not already carry one: the record must name the
+            # invocation the caller was told about, not a second one.
+            answer = replace(response, invocation_id=request.invocation_id or uuid4().hex)
+            self._record(request, answer, route, state, namespace or "", started)
+            return answer
 
         namespace = namespace or ""
         fingerprint = request_fingerprint(request)
@@ -535,28 +535,44 @@ class InferenceService:
             # coalesced caller "new" would report that its request reached the
             # provider, which is the accounting fact the field exists to carry.
             response = await settle(claim.future)
-            self._record(request, response, route, namespace, started)
+            # A coalesced waiter did not reach the provider and did not add to
+            # the execution the owner performed, so it is not accounted: the
+            # owner's record is the one record for that execution (§12).
             return replace(response, idempotency_status=IdempotencyStatus.REPLAYED)
 
         try:
-            response = await self._invoke_on(request, routes)
+            response, route, state = await self._invoke_on(request, routes)
         except BaseException as error:
             await self._idempotency_store.fail(key, namespace, error)
             raise
-        recorded = replace(response, idempotency_status=IdempotencyStatus.NEW)
+        recorded = replace(
+            response,
+            idempotency_status=IdempotencyStatus.NEW,
+            invocation_id=request.invocation_id or uuid4().hex,
+        )
         await self._idempotency_store.complete(key, namespace, recorded)
-        self._record(request, recorded, route, namespace, started)
+        self._record(request, recorded, route, state, namespace, started)
         return recorded
 
     def _record(
         self,
-        request: InvocationRequest,
-        response: InvocationResponse,
+        request: InvocationRequest | EmbeddingRequest | ImageRequest,
+        response: InvocationResponse | EmbeddingResponse | ImageResponse,
         route: Route,
+        state: InvocationState,
         namespace: str,
         started: float,
     ) -> None:
         """Record one invocation's usage and cost, when accounting is enabled.
+
+        Every operation records, because §13 asks for a record of every
+        invocation that produced an answer and not only of a text one, and the
+        walk knows for all of them what the record needs. ``state`` carries the
+        two facts only the walk knows — how many attempts the gateway made and
+        whether a fallback served the invocation — and it is passed rather than
+        read off ``response`` because the canonical embeddings and image answers
+        have no field for either (PRD section 5.2) while the record has one for
+        both.
 
         Only a completed answer is recorded, and only when the caller asked for
         it: a deployment that disables accounting is not silently accounting. A
@@ -578,6 +594,8 @@ class InferenceService:
                 route,
                 namespace=namespace,
                 latency_ms=(time.monotonic() - started) * 1000,
+                attempts=state.attempt_count,
+                fallback_used=state.fallback_used,
             )
         except Exception as error:
             logger.error(
@@ -648,7 +666,9 @@ class InferenceService:
         finally:
             await stream.aclose()
 
-    async def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
+    async def embed(
+        self, request: EmbeddingRequest, *, namespace: str | None = None
+    ) -> EmbeddingResponse:
         """Embed the texts named by ``request`` through the public model's routes.
 
         The embeddings counterpart of :meth:`invoke`, under the same policy: the
@@ -725,6 +745,17 @@ class InferenceService:
         inference library's internal retry paths mean one of those calls can
         carry more than one upstream request (PRD section 11.3). The embeddings
         path therefore makes no exactly-once claim either.
+
+        **Every completed invocation leaves a usage record.** A served answer is
+        handed to the accounting sink with the same facts the text operation
+        records — the serving route, the public model, the upstream model, the
+        token counts and their provenance, the latency and the walk's attempt and
+        fallback facts — under the same ``USAGE_TRACKING_ENABLED`` setting. The
+        canonical embeddings response carries no attempt count, so that fact
+        reaches the record from the walk rather than from the answer (PRD section
+        13). ``namespace`` is the trusted principal the invocation acted under,
+        which the embeddings request does not carry and the authenticated caller
+        does.
         """
         routes = self._registry.routes_for(request.model)
         if not isinstance(self._provider, EmbeddingProvider):
@@ -742,16 +773,24 @@ class InferenceService:
         )
         _reject_unsupported_dimension(request, plan.primary)
         invocation_id = uuid4().hex
+        started = time.monotonic()
 
         async def serve(
             route: Route, state: InvocationState, deadline: Deadline
-        ) -> EmbeddingResponse:
+        ) -> tuple[EmbeddingResponse, Route]:
             response = await self._embed_attempt(route, request, state, deadline, invocation_id)
-            return _normalise_embeddings(route, request, response, invocation_id=invocation_id)
+            return (
+                _normalise_embeddings(route, request, response, invocation_id=invocation_id),
+                route,
+            )
 
-        return await self._walk(request.model, plan, serve)
+        result, route, state = await self._walk(request.model, plan, serve)
+        self._record(request, result, route, state, namespace or "", started)
+        return result
 
-    async def generate(self, request: ImageRequest) -> ImageResponse:
+    async def generate(
+        self, request: ImageRequest, *, namespace: str | None = None
+    ) -> ImageResponse:
         """Generate the images the prompt names through the public model's routes.
 
         The image operation's counterpart of :meth:`invoke`, under the same
@@ -806,25 +845,41 @@ class InferenceService:
         internal retry paths mean one of those calls can carry more than one
         upstream request (PRD section 11.3). The image path makes no
         exactly-once claim.
+
+        **Every completed invocation leaves a usage record.** A served answer is
+        handed to the accounting sink with the same facts the text operation
+        records — the serving route, the public model, the upstream model, the
+        token counts and their provenance, the latency and the walk's attempt and
+        fallback facts — under the same ``USAGE_TRACKING_ENABLED`` setting. The
+        canonical image response carries no attempt count, so that fact reaches
+        the record from the walk rather than from the answer (PRD section 13).
+        ``namespace`` is the trusted principal the invocation acted under, which
+        the image request does not carry and the authenticated caller does.
         """
         routes = self._registry.routes_for(request.model)
         _require_image_provider(self._provider)
         plan = _select_routes_for(routes, request.model, (Capability.GENERATION,))
         invocation_id = uuid4().hex
+        started = time.monotonic()
 
         async def serve(
             route: Route, state: InvocationState, deadline: Deadline
-        ) -> ImageResponse:
+        ) -> tuple[ImageResponse, Route]:
             response = await self._image_attempt(
                 route, request, state, deadline, invocation_id
             )
-            return _normalise_images(route, request, response, invocation_id=invocation_id)
+            return (
+                _normalise_images(route, request, response, invocation_id=invocation_id),
+                route,
+            )
 
-        return await self._walk(request.model, plan, serve)
+        result, route, state = await self._walk(request.model, plan, serve)
+        self._record(request, result, route, state, namespace or "", started)
+        return result
 
     async def _invoke_on(
         self, request: InvocationRequest, routes: tuple[Route, ...]
-    ) -> InvocationResponse:
+    ) -> tuple[InvocationResponse, Route, InvocationState]:
         """Serve one text invocation from the configured route order, primary first.
 
         The text operation's entry into the shared walk. Selection is the text
@@ -840,18 +895,19 @@ class InferenceService:
         :func:`_normalise`, which is where ``attempt_count`` and
         ``fallback_used`` come from rather than being assumed (PRD section 5.2).
         """
-        return await self._walk(
+        result, answered_by, state = await self._walk(
             request.model,
             _select_routes(routes, request),
             self._text_serve(request),
         )
+        return result, answered_by, state
 
     async def _walk(
         self,
         model: str,
         plan: _RoutePlan,
         serve: _Serve[_Result],
-    ) -> _Result:
+    ) -> tuple[_Result, Route, InvocationState]:
         """Walk one operation's route plan under one deadline and one retry loop.
 
         This is the policy the non-streaming operations share — the text
@@ -921,7 +977,7 @@ class InferenceService:
                     raise _deadline_exceeded(model, state) from failure
                 state = state.with_attempt(on_fallback=position > 0)
                 try:
-                    return await serve(route, state, deadline)
+                    result, answered_by = await serve(route, state, deadline)
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -936,6 +992,7 @@ class InferenceService:
                     if not is_fallback_eligible(error, remaining=remaining):
                         raise
                     break
+                return result, answered_by, state
 
         if failure is None:
             raise _deadline_exceeded(model, state)
@@ -953,9 +1010,9 @@ class InferenceService:
 
         async def serve(
             route: Route, state: InvocationState, deadline: Deadline
-        ) -> InvocationResponse:
+        ) -> tuple[InvocationResponse, Route]:
             response = await self._attempt(route, request, state, deadline)
-            return _normalise(route, request, response, state)
+            return _normalise(route, request, response, state), route
 
         return serve
 
