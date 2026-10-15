@@ -132,6 +132,21 @@ INVALID_STATES = [
         id="max-concurrent-zero",
     ),
     pytest.param(
+        {"rate_limit_requests": -1},
+        "GATEWAY_RATE_LIMIT_REQUESTS must be a non-negative integer, got '-1'",
+        id="rate-limit-negative",
+    ),
+    pytest.param(
+        {"rate_limit_window_seconds": 0},
+        "GATEWAY_RATE_LIMIT_WINDOW_SECONDS must be a positive number, got '0'",
+        id="rate-limit-window-zero",
+    ),
+    pytest.param(
+        {"tenant_max_concurrent_requests": -1},
+        "GATEWAY_TENANT_MAX_CONCURRENT_REQUESTS must be a non-negative integer, got '-1'",
+        id="tenant-concurrency-negative",
+    ),
+    pytest.param(
         {"environment": "banana"},
         "CHORA_ENVIRONMENT must be one of 'development', 'test', 'production', got 'banana'",
         id="environment-unknown",
@@ -205,6 +220,9 @@ def test_defaults_match_the_prd_example_environment():
     assert settings.provider_retry_count == 2
     assert settings.provider_retry_backoff_ms == 500
     assert settings.provider_max_concurrent_requests == 100
+    assert settings.rate_limit_requests == 0
+    assert settings.rate_limit_window_seconds == 60.0
+    assert settings.tenant_max_concurrent_requests == 0
     assert settings.shutdown_timeout_seconds == 30.0
     assert settings.usage_tracking_enabled is True
     assert settings.cost_tracking_enabled is False
@@ -240,6 +258,9 @@ def test_every_deployment_variable_is_loaded():
             "PROVIDER_RETRY_COUNT": "5",
             "PROVIDER_RETRY_BACKOFF_MS": "250",
             "PROVIDER_MAX_CONCURRENT_REQUESTS": "7",
+            "GATEWAY_RATE_LIMIT_REQUESTS": "120",
+            "GATEWAY_RATE_LIMIT_WINDOW_SECONDS": "30",
+            "GATEWAY_TENANT_MAX_CONCURRENT_REQUESTS": "4",
             "GATEWAY_SHUTDOWN_TIMEOUT_SECONDS": "45",
             "USAGE_TRACKING_ENABLED": "false",
             "COST_TRACKING_ENABLED": "true",
@@ -261,6 +282,9 @@ def test_every_deployment_variable_is_loaded():
     assert settings.provider_retry_count == 5
     assert settings.provider_retry_backoff_ms == 250
     assert settings.provider_max_concurrent_requests == 7
+    assert settings.rate_limit_requests == 120
+    assert settings.rate_limit_window_seconds == 30.0
+    assert settings.tenant_max_concurrent_requests == 4
     assert settings.shutdown_timeout_seconds == 45.0
     assert settings.usage_tracking_enabled is False
     assert settings.cost_tracking_enabled is True
