@@ -1,4 +1,4 @@
-"""Canonical domain types and their golden fixtures (PRD sections 4, 5, 9.1, 9.3, 9.4 and 13)."""
+"""Canonical domain types and their golden fixtures."""
 
 import dataclasses
 import json
@@ -143,7 +143,7 @@ def test_request_fixture_pins_a_multimodal_message() -> None:
 
 
 def test_request_fixture_pins_a_refusal_replayed_as_assistant_history() -> None:
-    """An assistant refusal is history, so a request may carry one (PRD 5.2)."""
+    """An assistant refusal is history, so a request may carry one."""
     document, _ = fixture("invocation_request.json")
     parsed = InvocationRequest.from_dict(document)
 
@@ -287,7 +287,7 @@ def test_finish_reason_coerce_accepts_its_own_values(reason: FinishReason) -> No
 
 
 def test_finish_reason_coerce_maps_an_unrecognised_reason_to_unknown() -> None:
-    """An unknown provider reason is classified, not dropped (PRD section 5.2)."""
+    """An unknown provider reason is classified, not dropped."""
     assert FinishReason.coerce("end_turn") is FinishReason.UNKNOWN
     assert FinishReason.coerce("") is FinishReason.UNKNOWN
 
@@ -316,7 +316,7 @@ def test_response_refuses_a_finish_reason_that_is_not_a_string() -> None:
 
 
 def test_response_keeps_an_unclassified_reason_apart_from_a_missing_one() -> None:
-    """UNKNOWN must never mean 'the gateway deleted what upstream told us' (PRD 5.2)."""
+    """UNKNOWN must never mean 'the gateway deleted what upstream told us'."""
     unclassified = response(raw_finish_reason="brand_new_semantic")
     missing = response()
 
@@ -371,7 +371,7 @@ def test_message_refuses_a_role_that_is_not_a_string() -> None:
 
 
 def test_message_refuses_an_unknown_role_when_parsing() -> None:
-    """A role the gateway cannot name cannot be carried into a message (PRD 9.1)."""
+    """A role the gateway cannot name cannot be carried into a message."""
     with pytest.raises(ValueError, match="message 'role' must be one of"):
         Message.from_dict({"role": "wizard", "content": []})
 
@@ -574,12 +574,12 @@ def test_refusal_part_refuses_an_unknown_key() -> None:
 
 
 def test_refusal_part_is_a_content_part_but_not_a_text_part() -> None:
-    """Collapsing a refusal into text would lose the provider's own decision (PRD 5.2)."""
+    """Collapsing a refusal into text would lose the provider's own decision."""
     assert RefusalPart(text="no") != TextPart(text="no")
 
 
 def test_content_part_refuses_an_unknown_type() -> None:
-    """A part the gateway cannot represent must not be skipped (PRD section 9.1)."""
+    """A part the gateway cannot represent must not be skipped."""
     with pytest.raises(ValueError, match="does not define"):
         content_part_from_dict({"type": "audio", "data": "AAAA"})
 
@@ -607,7 +607,7 @@ def test_output_item_dispatches_on_its_type() -> None:
 
 
 def test_output_item_refuses_an_unknown_type() -> None:
-    """A dropped item changes the answer the caller receives (PRD section 9.1)."""
+    """A dropped item changes the answer the caller receives."""
     with pytest.raises(ValueError, match="does not define"):
         output_item_from_dict({"type": "audio", "data": "AAAA"})
 
@@ -1109,7 +1109,7 @@ def test_response_format_refuses_an_unknown_mode() -> None:
 
 
 def test_response_format_refuses_a_schema_mode_without_a_schema() -> None:
-    """The requirement could not be stated, let alone enforced (PRD section 9.5)."""
+    """The requirement could not be stated, let alone enforced."""
     with pytest.raises(ValueError, match="must carry the 'schema'"):
         ResponseFormat(mode=ResponseFormatMode.JSON_SCHEMA)
     with pytest.raises(ValueError, match="must carry the 'schema'"):
@@ -1167,7 +1167,7 @@ def test_response_format_accepts_a_boolean_schema(schema: bool) -> None:
 def test_response_format_refuses_a_schema_that_is_neither_an_object_nor_a_boolean(
     schema: object,
 ) -> None:
-    """A schema the specification does not define is refused rather than coerced (PRD 9.1)."""
+    """A schema the specification does not define is refused rather than coerced."""
     with pytest.raises(ValueError, match="must be a JSON object"):
         ResponseFormat(mode=ResponseFormatMode.JSON_SCHEMA, schema=schema)
 
@@ -1749,7 +1749,7 @@ def test_response_parses_its_defaults_from_a_minimal_document() -> None:
     ],
 )
 def test_an_unrepresentable_field_fails_explicitly(kind: type, document: dict) -> None:
-    """PRD section 9.1: a parameter must never disappear silently."""
+    """A parameter must never disappear silently."""
     with pytest.raises(ValueError, match="unsupported key"):
         kind.from_dict(document)
 

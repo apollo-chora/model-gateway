@@ -1,10 +1,10 @@
-"""Tests for the canonical streaming types and their LiteLLM translation (PRD 5.3, 9.1, 16).
+"""Tests for the canonical streaming types and their LiteLLM translation.
 
 The domain side pins the canonical event: what a kind must carry, what a kind
 refuses, and that a sequence number is the gateway's own numbering of the events
-of one invocation. The translation side pins the stream-side rules of PRD
-section 9.1 the same way the non-streaming translation tests pin the response
-side: every fixture is built from the real LiteLLM types the installed library
+of one invocation. The translation side pins the stream-side rules the same way
+the non-streaming translation tests pin the response side: every fixture is
+built from the real LiteLLM types the installed library
 defines — :class:`litellm.types.utils.ModelResponseStream` with its
 ``StreamingChoices``, ``Delta``, ``ChatCompletionDeltaToolCall`` and ``Usage``
 records — so a fixture carrying an extra semantic field fails a translator that
@@ -156,7 +156,7 @@ def library_trailing_usage(prompt_tokens: int, completion_tokens: int) -> Usage:
 
 
 class TestStreamEventKind:
-    """The vocabulary is the gateway's own and its values are pinned (PRD 5.3)."""
+    """The vocabulary is the gateway's own and its values are pinned."""
 
     def test_values_are_pinned(self) -> None:
         assert StreamEventKind.CONTENT == "content"
@@ -208,7 +208,7 @@ class TestStreamEventRoundTrip:
         }
 
     def test_finish_event_round_trip(self) -> None:
-        """The classification and the provider's own reason survive the trip (PRD 5.2)."""
+        """The classification and the provider's own reason survive the trip."""
         event = StreamEvent(
             kind=StreamEventKind.FINISH,
             sequence=3,
@@ -221,7 +221,7 @@ class TestStreamEventRoundTrip:
         assert event.to_dict()["raw_finish_reason"] == "stop"
 
     def test_error_event_round_trip(self) -> None:
-        """The gateway's reason and its sanitised message survive the trip (PRD 5.4)."""
+        """The gateway's reason and its sanitised message survive the trip."""
         event = StreamEvent(
             kind=StreamEventKind.ERROR,
             sequence=5,
@@ -421,7 +421,7 @@ class TestStreamEventConstructionRefusals:
             )
 
     def test_raw_reason_without_a_finish_event_is_refused(self) -> None:
-        """The provider's own reason is only meaningful beside its classification (PRD 9.1)."""
+        """The provider's own reason is only meaningful beside its classification."""
         with pytest.raises(ValueError, match="carries 'raw_finish_reason'"):
             StreamEvent(
                 kind=StreamEventKind.CONTENT,
@@ -447,7 +447,7 @@ class TestStreamEventConstructionRefusals:
             )
 
     def test_error_event_carrying_a_finish_reason_is_refused(self) -> None:
-        """A failure is not a finish, so the two terminal kinds are disjoint (PRD 5.2, 5.4)."""
+        """A failure is not a finish, so the two terminal kinds are disjoint."""
         with pytest.raises(ValueError, match="carries 'finish_reason'"):
             StreamEvent(
                 kind=StreamEventKind.ERROR,
@@ -586,7 +586,7 @@ class TestStreamEventConstructionRefusals:
             )
 
     def test_unknown_key_is_refused(self) -> None:
-        """A key the canonical type does not define fails loudly (PRD section 9.1)."""
+        """A key the canonical type does not define fails loudly."""
         with pytest.raises(ValueError, match="unsupported key"):
             StreamEvent.from_dict(
                 {
@@ -604,7 +604,7 @@ class TestStreamEventConstructionRefusals:
 
 
 class TestToolCallDelta:
-    """A delta is one fragment of a call; its index is what attributes it (PRD 9.3)."""
+    """A delta is one fragment of a call; its index is what attributes it."""
 
     def test_round_trip(self) -> None:
         delta = ToolCallDelta(index=0, id="call_1", name="get_weather", arguments_delta='{"a"')
@@ -646,7 +646,7 @@ class TestToolCallDelta:
 
 
 class TestToLitellmStreamParams:
-    """The streaming call is the non-streaming one plus stream=True (PRD section 9.6)."""
+    """The streaming call is the non-streaming one plus stream=True."""
 
     def test_stream_is_true(self) -> None:
         assert to_litellm_stream_params(make_route(), make_request())["stream"] is True
@@ -668,7 +668,7 @@ class TestToLitellmStreamParams:
 
 
 class TestFromLitellmChunkContent:
-    """Text deltas become content events, numbered by the gateway (PRD 5.3, 16)."""
+    """Text deltas become content events, numbered by the gateway."""
 
     def test_text_delta_becomes_a_content_event(self) -> None:
         events = from_litellm_chunk(content_chunk("Recur"), invocation_id=INVOCATION_ID, sequence=0)
@@ -716,7 +716,7 @@ class TestFromLitellmChunkContent:
 
 
 class TestFromLitellmChunkToolCalls:
-    """A tool call arrives across several chunks and each fragment is reported (PRD 9.3, 16)."""
+    """A tool call arrives across several chunks and each fragment is reported."""
 
     def test_tool_call_arriving_in_fragments_is_accumulated(self) -> None:
         first = tool_call_chunk(
@@ -792,7 +792,7 @@ class TestFromLitellmChunkToolCalls:
 
 
 class TestFromLitellmChunkUsage:
-    """A chunk's usage report becomes a usage event (PRD section 16)."""
+    """A chunk's usage report becomes a usage event."""
 
     def test_usage_is_reported_with_provider_provenance(self) -> None:
         chunk = ModelResponseStream(
@@ -823,7 +823,7 @@ class TestFromLitellmChunkUsage:
         assert usage.source_of("cached_tokens").value == "provider"
 
     def test_unreported_total_is_derived_and_named_an_estimate(self) -> None:
-        """A zero total beside non-zero parts is LiteLLM's placeholder, not a fact (PRD 13)."""
+        """A zero total beside non-zero parts is LiteLLM's placeholder, not a fact."""
         chunk = ModelResponseStream(
             choices=[StreamingChoices(index=0, finish_reason="stop")],
             usage=Usage(prompt_tokens=25, completion_tokens=42),
@@ -854,7 +854,7 @@ class TestFromLitellmChunkUsage:
         assert events[0].usage == TokenUsage(input_tokens=25, output_tokens=42, total_tokens=67)
 
     def test_the_librarys_own_trailing_usage_record_is_accepted(self) -> None:
-        """The placeholder values the library fills are not provider facts (PRD 9.1).
+        """The placeholder values the library fills are not provider facts.
 
         The usage record is the one LiteLLM's own ``stream_chunk_builder``
         assembles for a trailing usage chunk: ``completion_tokens_details``
@@ -900,7 +900,7 @@ class TestFromLitellmChunkUsage:
         on the value: a provider that reports ``reasoning_tokens=0`` without
         the library's derived ``text_tokens`` stated a fact the canonical
         usage model cannot carry, and dropping it would lose information in
-        exactly the way the refusal exists to prevent (PRD 9.1).
+        exactly the way the refusal exists to prevent.
         """
         chunk = ModelResponseStream(
             choices=[StreamingChoices(index=0, finish_reason="stop")],
@@ -915,7 +915,7 @@ class TestFromLitellmChunkUsage:
             from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
 
     def test_an_explicit_zero_valued_category_is_refused(self) -> None:
-        """Zero of a category the canonical model cannot carry is still refused (PRD 9.1).
+        """Zero of a category the canonical model cannot carry is still refused.
 
         The placeholder exception is the library's exact synthetic shape, not
         a general licence for zero-valued categories: an audio-token count
@@ -935,7 +935,7 @@ class TestFromLitellmChunkUsage:
             from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
 
     def test_a_text_tokens_numeric_coincidence_without_the_shape_is_refused(self) -> None:
-        """Numeric equality with the library's arithmetic is evidence, not proof (PRD 9.1).
+        """Numeric equality with the library's arithmetic is evidence, not proof.
 
         ``text_tokens`` equal to ``completion_tokens - reasoning_tokens`` is
         what the library derives, but a provider reporting that value on its
@@ -957,7 +957,7 @@ class TestFromLitellmChunkUsage:
 
 
 class TestFromLitellmChunkFinish:
-    """The terminal event carries the gateway's classification and the raw reason (PRD 5.3)."""
+    """The terminal event carries the gateway's classification and the raw reason."""
 
     def test_finish_reason_is_mapped_through_the_gateway_vocabulary(self) -> None:
         events = from_litellm_chunk(finish_chunk("stop"), invocation_id=INVOCATION_ID, sequence=0)
@@ -992,7 +992,7 @@ class TestFromLitellmChunkFinish:
         does. The gateway's vocabulary is its own — Anthropic's ``tool_use`` is
         not one of its reasons — so it becomes ``UNKNOWN``, and the raw value
         still says what the provider said: UNKNOWN never means the gateway
-        deleted the reason (PRD sections 5.2 and 9.1).
+        deleted the reason.
         """
         chunk = ModelResponseStream(
             choices=[
@@ -1031,7 +1031,7 @@ class TestFromLitellmChunkOrdering:
     """A chunk carrying several things produces the events in the order the answer reads."""
 
     def test_content_and_finish_in_one_chunk_produce_two_ordered_events(self) -> None:
-        """The finish event is terminal, so it is emitted last (PRD section 5.3)."""
+        """The finish event is terminal, so it is emitted last."""
         chunk = ModelResponseStream(
             choices=[
                 StreamingChoices(
@@ -1075,7 +1075,7 @@ class TestFromLitellmChunkOrdering:
 
 
 class TestFromLitellmChunkRefusals:
-    """A semantic the canonical event cannot carry is refused, naming the field (PRD 9.1)."""
+    """A semantic the canonical event cannot carry is refused, naming the field."""
 
     def test_reasoning_content_is_refused(self) -> None:
         chunk = ModelResponseStream(
@@ -1184,7 +1184,7 @@ class TestFromLitellmChunkRefusals:
             from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
 
     def test_a_reasoning_token_detail_is_refused(self) -> None:
-        """A token count the canonical usage cannot carry is refused, not dropped (PRD 9.1)."""
+        """A token count the canonical usage cannot carry is refused, not dropped."""
         chunk = ModelResponseStream(
             choices=[StreamingChoices(index=0, finish_reason="stop")],
             usage=Usage(
@@ -1204,7 +1204,7 @@ class TestFromLitellmChunkRefusals:
         non-zero count the canonical usage model cannot carry — here an
         audio-token count — is still refused, because silently dropping it
         would tell the caller the usage was honoured when part of the report
-        was dropped (PRD 9.1).
+        was dropped.
         """
         chunk = ModelResponseStream(
             choices=[StreamingChoices(index=0, finish_reason="stop")],
@@ -1254,7 +1254,7 @@ class TestFromLitellmChunkRefusals:
             from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
 
     def test_a_custom_tool_call_is_refused(self) -> None:
-        """A tool call that is not a function call has no canonical representation (PRD 9.3)."""
+        """A tool call that is not a function call has no canonical representation."""
         chunk = ModelResponseStream(
             choices=[
                 StreamingChoices(
@@ -1297,7 +1297,7 @@ class TestFromLitellmChunkRefusals:
             from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
 
     def test_several_choices_in_one_chunk_are_refused(self) -> None:
-        """The canonical stream carries one answer per invocation (PRD section 5.2)."""
+        """The canonical stream carries one answer per invocation."""
         chunk = ModelResponseStream(
             choices=[
                 StreamingChoices(index=0, finish_reason="stop"),
