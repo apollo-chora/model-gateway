@@ -44,9 +44,10 @@ Configuration is entirely environment variables: `TEXT_LLM_*` for the chat
 operation, `IMAGE_GEN_*` for images, `EMBEDDINGS_*` for embeddings, `GATEWAY_*` for
 inbound authentication and limits, `PROVIDER_*` for reliability. Each operation's
 block names its own endpoint, model, credential, dialect and capabilities, so the
-three are configured independently. [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) covers
-running, probing and operating it; `docs/PRD.md` section 18 is the complete list of
-settings.
+three are configured independently.
+
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) covers running, probing and operating it,
+and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) is the complete list of settings.
 
 ## Endpoints
 
@@ -69,8 +70,9 @@ uv run ruff check src tests
 ```
 
 The suite runs against deterministic stand-ins and opens no socket to any provider,
-so it needs no provider account and no network. `docs/PRD.md` is the specification;
-it is the authority on behaviour, and where the implementation and the document
-disagree the document is revised rather than the disagreement left standing.
+so it needs no provider account and no network. The code, the public API and the
+protobuf schema are the contracts: the tests verify behaviour against them, and the
+documentation explains intent. Where a document and the implementation disagree,
+the document is revised rather than the disagreement left standing.
 
 [LiteLLM]: https://github.com/BerriAI/litellm
