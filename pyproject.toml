@@ -39,6 +39,9 @@ packages = ["src/model_gateway"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "live: needs a real provider account, so it is skipped unless one is configured; select it with `-m live` (PRD section 20)",
+]
 
 [tool.ruff]
 line-length = 100
