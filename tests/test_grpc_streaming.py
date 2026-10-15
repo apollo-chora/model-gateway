@@ -27,6 +27,7 @@ import grpc
 import grpc.aio
 import pytest
 
+from model_gateway.accounting import AccountingRecorder, MemoryAccountingSink
 from model_gateway.capabilities import Capability
 from model_gateway.config import Settings
 from model_gateway.config.routes import Operation, Route
@@ -49,6 +50,9 @@ TENANT = "tenant-a"
 # A tenant no configured key is bound to, so a body claiming it disagrees with
 # the tenant the credential below carries.
 OTHER_TENANT = "tenant-b"
+# A second credential bound to that other tenant, so two callers are two
+# principals rather than one.
+OTHER_KEY = "sk-gateway-other-key"
 INVOCATION_ID = "inv-stream-1"
 TEXT_MODEL = "text-default"
 QUESTION = "What is the weather in Paris?"
@@ -103,9 +107,10 @@ async def serve():
         *,
         api_keys: tuple[str, ...] = (f"{API_KEY}:{TENANT}",),
         auth_enabled: bool = True,
+        accounting=None,
     ):
         registry = ModelRegistry((route(),))
-        service = InferenceService(registry, provider)
+        service = InferenceService(registry, provider, accounting=accounting)
         settings = _settings(auth_enabled=auth_enabled, api_keys=api_keys)
         authenticator = Authenticator(
             ApiKeySet.from_settings(settings),
@@ -857,3 +862,35 @@ class TestIdempotency:
 
         assert len(provider.stream_calls) == 2
         assert [chunk.content_delta for chunk in chunks] == ["Recursion", ""]
+
+
+# --------------------------------------------------------------------------- #
+# The authenticated principal reaches a record
+# --------------------------------------------------------------------------- #
+
+
+async def test_two_credentials_record_under_two_namespaces(serve):
+    """InvokeStream forwards the principal it authenticated.
+
+    The HTTP handlers have their own tests; this one covers the gRPC handler,
+    which authenticates through its own path and tears its stream down through its
+    own ``finally``, so a regression in forwarding the identity would not show up
+    on the HTTP side.
+    """
+    sink = MemoryAccountingSink()
+    provider = ScriptedStreamProvider([finish_event(sequence=0)])
+    stub = await serve(
+        provider,
+        api_keys=(f"{API_KEY}:{TENANT}", f"{OTHER_KEY}:{OTHER_TENANT}"),
+        accounting=AccountingRecorder(sink, None),
+    )
+
+    for key, tenant in ((API_KEY, TENANT), (OTHER_KEY, OTHER_TENANT)):
+        assert await collect(
+            stub, invoke_request(tenant_id=tenant), metadata=authorization(key)
+        )
+
+    assert len(sink.records) == 2
+    namespaces = [record.namespace for record in sink.records]
+    assert all(namespaces)
+    assert namespaces[0] != namespaces[1]
