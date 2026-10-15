@@ -505,7 +505,9 @@ class ConcurrencyLimiter:
     extreme, policy rather than an error.
     """
 
-    def __init__(self, maximum: int, *, max_waiters: int | None = None) -> None:
+    def __init__(
+        self, maximum: int, *, max_waiters: int | None = None, subject: str = "upstream"
+    ) -> None:
         if isinstance(maximum, bool) or not isinstance(maximum, int):
             raise ValueError(f"maximum must be a positive integer, got {maximum!r}")
         if maximum < 1:
@@ -516,6 +518,7 @@ class ConcurrencyLimiter:
             raise ValueError(f"max_waiters must be a non-negative integer, got {max_waiters!r}")
         self._maximum = maximum
         self._max_waiters = max_waiters
+        self._subject = subject
         self._slots = asyncio.Semaphore(maximum)
         self._waiting = 0
 
@@ -572,7 +575,7 @@ class ConcurrencyLimiter:
             return
         if self._waiting >= self._max_waiters:
             raise ResourceExhaustedError(
-                f"the gateway's upstream concurrency limit is saturated: "
+                f"the gateway's {self._subject} concurrency limit is saturated: "
                 f"{self._max_waiters} callers are already queued behind "
                 f"{self._maximum} slots",
                 reason=ErrorReason.CONCURRENCY_LIMIT_EXCEEDED,
