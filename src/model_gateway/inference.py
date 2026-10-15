@@ -148,13 +148,19 @@ import asyncio
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TypeVar
 from uuid import uuid4
 
 import structlog
 
-from model_gateway.accounting import AccountingRecorder
+from model_gateway.accounting import (
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_INCOMPLETE,
+    AccountingRecorder,
+    InvocationOutcome,
+)
 from model_gateway.capabilities import Capability
 from model_gateway.config.routes import Route
 from model_gateway.domain import (
@@ -163,6 +169,7 @@ from model_gateway.domain import (
     InvocationRequest,
     InvocationResponse,
     ResponseFormatMode,
+    Usage,
 )
 from model_gateway.domain.embeddings import (
     Embedding,
@@ -348,6 +355,38 @@ class _RoutePlan:
     fallbacks: tuple[Route, ...]
 
 
+@dataclass
+class _StreamFacts:
+    """What a streaming invocation has produced so far, filled in by its walk.
+
+    A generator cannot return the facts an invocation's accounting needs, so the
+    streaming walk writes them here as it runs and the service reads them once the
+    stream is over. This is the streaming counterpart of the answer a
+    non-streaming walk returns, and it exists so that a streamed invocation
+    reaches the same record path as a completed one rather than a parallel one.
+
+    ``route`` is unset until the first event is handed to the caller, and it is
+    how the service tells a stream that produced an answer from one that produced
+    nothing: a refusal before the first event leaves it ``None``, and there is
+    then no answer to account for. ``state`` is the walk state at that same
+    moment, which is where the attempt count and the fallback flag come from.
+
+    ``usage`` is the last token report the provider sent, or ``None`` when it sent
+    none — the canonical stream carries usage on events of its own rather than on
+    the answer, so a provider that reports nothing leaves no counts rather than
+    invented ones. ``status`` and ``error_reason`` are set when the stream reaches
+    a terminal event, and left unset otherwise; the service reads an unset status
+    as ``incomplete``, which is what a stream that produced output and then
+    stopped without a terminal event is.
+    """
+
+    route: Route | None = None
+    state: InvocationState = field(default_factory=InvocationState)
+    usage: Usage | None = None
+    status: str | None = None
+    error_reason: str | None = None
+
+
 class InferenceService:
     """Policy for one inference invocation: resolve, select, call, normalise.
 
@@ -520,7 +559,7 @@ class InferenceService:
             # request did not already carry one: the record must name the
             # invocation the caller was told about, not a second one.
             answer = replace(response, invocation_id=request.invocation_id or uuid4().hex)
-            self._record(request, answer, route, state, namespace or "", started)
+            self._record(request, _outcome_of(answer), route, state, namespace or "", started)
             return answer
 
         namespace = namespace or ""
@@ -551,33 +590,37 @@ class InferenceService:
             invocation_id=request.invocation_id or uuid4().hex,
         )
         await self._idempotency_store.complete(key, namespace, recorded)
-        self._record(request, recorded, route, state, namespace, started)
+        self._record(request, _outcome_of(recorded), route, state, namespace, started)
         return recorded
 
     def _record(
         self,
         request: InvocationRequest | EmbeddingRequest | ImageRequest,
-        response: InvocationResponse | EmbeddingResponse | ImageResponse,
+        outcome: InvocationOutcome,
         route: Route,
         state: InvocationState,
         namespace: str,
         started: float,
     ) -> None:
-        """Record one invocation's usage and cost, when accounting is enabled.
+        """Record one invocation's answer and cost, when accounting is enabled.
 
         Every operation records, because §13 asks for a record of every
         invocation that produced an answer and not only of a text one, and the
-        walk knows for all of them what the record needs. ``state`` carries the
-        two facts only the walk knows — how many attempts the gateway made and
-        whether a fallback served the invocation — and it is passed rather than
-        read off ``response`` because the canonical embeddings and image answers
-        have no field for either (PRD section 5.2) while the record has one for
-        both.
+        walk knows for all of them what the record needs. ``outcome`` is the
+        answer's own facts, and stating them rather than reading them off a
+        response is what lets a streamed answer be recorded through this same
+        path: a stream has no response object, so it states the same facts
+        directly. ``state`` carries the two facts only the walk knows — how many
+        attempts the gateway made and whether a fallback served the invocation —
+        and it is passed rather than read off the answer because the canonical
+        embeddings and image answers have no field for either (PRD section 5.2)
+        while the record has one for both.
 
-        Only a completed answer is recorded, and only when the caller asked for
-        it: a deployment that disables accounting is not silently accounting. A
-        failure propagates the answer to no one and leaves no record, because
-        there is no answer to account for.
+        Only an answer is recorded, and only when the caller asked for it: a
+        deployment that disables accounting is not silently accounting. A failure
+        that produced no output propagates to the caller and leaves no record,
+        because there is no answer to account for; a streamed answer that produced
+        output and then failed is an answer, and is recorded as one.
 
         A recording failure must not fail the invocation. The answer has already
         been produced and the caller is waiting on it; a store the operator
@@ -590,7 +633,7 @@ class InferenceService:
         try:
             self._accounting.record(
                 request,
-                response,
+                outcome,
                 route,
                 namespace=namespace,
                 latency_ms=(time.monotonic() - started) * 1000,
@@ -601,10 +644,55 @@ class InferenceService:
             logger.error(
                 "usage record could not be stored",
                 error_type=type(error).__name__,
-                invocation_id=response.invocation_id,
+                invocation_id=outcome.invocation_id,
             )
 
-    async def invoke_stream(self, request: InvocationRequest) -> AsyncIterator[StreamEvent]:
+    def _record_stream(
+        self,
+        request: InvocationRequest,
+        facts: "_StreamFacts",
+        namespace: str,
+        started: float,
+    ) -> None:
+        """Record a streamed invocation that produced output, when accounting is on.
+
+        A stream that produced nothing leaves no record, because there is no
+        answer to account for: a refusal before the first event reaches the caller
+        as an ordinary error response and no provider produced anything (PRD
+        section 16).
+
+        A stream that produced output and then ended without a terminal event is
+        recorded as ``incomplete`` rather than ``failed``. §16 draws that
+        distinction for the caller — a truncated stream is not a failed one — and
+        a record that collapsed the two would report a failure the stream never
+        declared.
+
+        ``usage`` is the last report the provider sent, or an empty report when it
+        sent none. The canonical stream carries usage on events of its own, so a
+        provider that reports nothing leaves a record with no counts rather than
+        with invented ones.
+        """
+        if facts.route is None:
+            return
+        status = facts.status or STATUS_INCOMPLETE
+        self._record(
+            request,
+            InvocationOutcome(
+                invocation_id=request.invocation_id or "",
+                upstream_model=facts.route.model_id,
+                usage=facts.usage or Usage(),
+                status=status,
+                error_reason=facts.error_reason if status == STATUS_FAILED else None,
+            ),
+            facts.route,
+            facts.state,
+            namespace,
+            started,
+        )
+
+    async def invoke_stream(
+        self, request: InvocationRequest, *, namespace: str | None = None
+    ) -> AsyncIterator[StreamEvent]:
         """Invoke the public model named by ``request.model``, streaming the answer.
 
         The streaming counterpart of :meth:`invoke`, under the same policy: the
@@ -651,6 +739,17 @@ class InferenceService:
         presents a non-streamed answer as streaming. A request that carries an
         idempotency key is therefore served as a stream like any other, and its
         ``idempotency_status`` stays ``NOT_APPLICABLE``.
+
+        **A streamed answer is accounted for too.** A stream that produced output
+        leaves one record, written when the stream is over — whether it finished,
+        failed after output, or stopped without a terminal event — and a stream
+        that produced nothing leaves none, because there is no answer to account
+        for (PRD section 13). The record is written even when the caller goes away
+        mid-stream: the provider was called and the gateway owes for the output it
+        produced, and the record says ``incomplete`` rather than ``failed`` so it
+        reports what happened rather than what did not. ``namespace`` is the
+        trusted principal the invocation acted under, which the streaming request
+        does not carry and the authenticated caller does.
         """
         routes = self._registry.routes_for(request.model)
         if not isinstance(self._provider, StreamingTextProvider):
@@ -659,12 +758,15 @@ class InferenceService:
                 "streaming request with a non-streamed body, so the request is refused",
                 details={"capability": _STREAMING_CAPABILITY},
             )
-        stream = self._invoke_stream_on(request, routes)
+        facts = _StreamFacts()
+        started = time.monotonic()
+        stream = self._invoke_stream_on(request, routes, facts)
         try:
             async for event in stream:
                 yield event
         finally:
             await stream.aclose()
+            self._record_stream(request, facts, namespace or "", started)
 
     async def embed(
         self, request: EmbeddingRequest, *, namespace: str | None = None
@@ -785,7 +887,7 @@ class InferenceService:
             )
 
         result, route, state = await self._walk(request.model, plan, serve)
-        self._record(request, result, route, state, namespace or "", started)
+        self._record(request, _outcome_of(result), route, state, namespace or "", started)
         return result
 
     async def generate(
@@ -874,7 +976,7 @@ class InferenceService:
             )
 
         result, route, state = await self._walk(request.model, plan, serve)
-        self._record(request, result, route, state, namespace or "", started)
+        self._record(request, _outcome_of(result), route, state, namespace or "", started)
         return result
 
     async def _invoke_on(
@@ -1157,7 +1259,7 @@ class InferenceService:
             )
 
     async def _invoke_stream_on(
-        self, request: InvocationRequest, routes: tuple[Route, ...]
+        self, request: InvocationRequest, routes: tuple[Route, ...], facts: "_StreamFacts"
     ) -> AsyncIterator[StreamEvent]:
         """Serve one streaming invocation from the configured route order.
 
@@ -1207,6 +1309,16 @@ class InferenceService:
         for an answer it never saw finish, so a caller whose stream stops reads
         a stream that is over without a terminal event, not a failed one (PRD
         section 16).
+
+        **``facts`` is what the walk leaves behind for the record.** A generator
+        cannot return the facts an invocation's accounting needs, so the route
+        that produced output, the walk state, the last usage the provider
+        reported and the terminal state are accumulated as the walk runs and read
+        once the stream is over. They are set *before* each event is handed over,
+        not after: a consumer that stops on a terminal event closes this
+        generator at the ``yield``, and the stream still reached its terminal
+        state. A walk that produced no output leaves ``facts.route`` unset, which
+        is how the caller of this method knows there is no answer to account for.
         """
         plan = _select_routes(routes, request)
         deadline = Deadline.after(self._attempt_timeout)
@@ -1226,6 +1338,21 @@ class InferenceService:
                     async for event in attempt_events:
                         last_sequence = event.sequence
                         output_started = True
+                        if facts.route is None:
+                            # The route that produced the first event is the one
+                            # that served the invocation: nothing may fall back or
+                            # retry once output has begun, so it cannot change.
+                            facts.route = route
+                            facts.state = state
+                        if event.usage is not None:
+                            facts.usage = event.usage
+                        if event.kind in _TERMINAL_EVENT_KINDS:
+                            facts.status = (
+                                STATUS_COMPLETED
+                                if event.kind is StreamEventKind.FINISH
+                                else STATUS_FAILED
+                            )
+                            facts.error_reason = event.error_reason
                         yield event
                         if event.kind in _TERMINAL_EVENT_KINDS:
                             terminal_emitted = True
@@ -1241,6 +1368,8 @@ class InferenceService:
                         # caller was already shown.
                         raise
                     if output_started:
+                        facts.status = STATUS_FAILED
+                        facts.error_reason = _gateway_reason(error)
                         yield _error_event(request, error, sequence=last_sequence + 1)
                         terminal_emitted = True
                         raise
@@ -1407,7 +1536,7 @@ def _error_event(
     rather than the provider's (PRD section 5.4). The event is built from the
     normalised error, never from the raw one.
     """
-    gateway_error = error if isinstance(error, GatewayError) else normalise_exception(error)
+    gateway_error = _normalised_error(error)
     return StreamEvent(
         kind=StreamEventKind.ERROR,
         sequence=sequence,
@@ -1415,6 +1544,24 @@ def _error_event(
         error_reason=gateway_error.reason.value,
         error_message=gateway_error.message,
     )
+
+
+def _normalised_error(error: BaseException) -> GatewayError:
+    """A failure as the gateway's own taxonomy states it.
+
+    A failure that is already a :class:`~model_gateway.errors.GatewayError` is
+    itself; anything else is normalised, so the reason is one of the taxonomy's
+    own and the message is gateway-authored rather than the provider's (PRD
+    section 5.4). The terminal event a failed stream carries and the record that
+    stream leaves are both built from this one answer, so they cannot disagree
+    about why the invocation failed.
+    """
+    return error if isinstance(error, GatewayError) else normalise_exception(error)
+
+
+def _gateway_reason(error: BaseException) -> str:
+    """The stable reason a failure is reported under, in the taxonomy's vocabulary."""
+    return _normalised_error(error).reason.value
 
 
 def _select_routes(routes: tuple[Route, ...], request: InvocationRequest) -> _RoutePlan:
@@ -1590,6 +1737,25 @@ def _carries_images(request: InvocationRequest) -> bool:
         isinstance(part, ImagePart)
         for message in request.messages
         for part in message.content
+    )
+
+
+def _outcome_of(
+    response: InvocationResponse | EmbeddingResponse | ImageResponse,
+) -> InvocationOutcome:
+    """The answer facts a record takes from a canonical answer, whichever one it is.
+
+    All three canonical answers carry the same three facts the record needs from
+    an answer — the invocation identifier, the upstream model and the usage
+    report — and a non-streaming path only ever reaches this with an answer that
+    completed, so the status is the completed one. A streamed answer has no such
+    object and states these facts directly (see ``_StreamFacts``), which is why
+    the record's input is a value object rather than a response type.
+    """
+    return InvocationOutcome(
+        invocation_id=response.invocation_id or "",
+        upstream_model=response.upstream_model,
+        usage=response.usage,
     )
 
 

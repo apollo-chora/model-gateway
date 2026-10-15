@@ -148,7 +148,10 @@ def create_chat_completion(service: InferenceService) -> ChatHandler:
             return json(completion.to_dict())
 
         return await _stream_chat_completion(
-            service, invocation, completion_id=f"{_COMPLETION_ID_PREFIX}{invocation_id}"
+            service,
+            invocation,
+            completion_id=f"{_COMPLETION_ID_PREFIX}{invocation_id}",
+            namespace=caller_namespace(identity),
         )
 
     return chat_completions
@@ -159,6 +162,7 @@ async def _stream_chat_completion(
     invocation: InvocationRequest,
     *,
     completion_id: str,
+    namespace: str,
 ) -> Response:
     """Serve one streaming invocation as Server-Sent Events (PRD section 16).
 
@@ -182,7 +186,7 @@ async def _stream_chat_completion(
     its own status, before the SSE response commits to a 200 the caller cannot be
     given back.
     """
-    event_iter = service.invoke_stream(invocation)
+    event_iter = service.invoke_stream(invocation, namespace=namespace)
 
     # Pull the first event to surface a pre-stream refusal before the SSE
     # response commits to a 200 the caller cannot be given back.

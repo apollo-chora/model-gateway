@@ -75,6 +75,7 @@ from model_gateway.grpc.identity import Authenticator
 from model_gateway.grpc.mapping import chunk_from_event, invocation_request_from_proto
 from model_gateway.inference import InferenceService
 from model_gateway.security.authorization import reconcile_identity
+from model_gateway.security.identity import caller_namespace
 
 __all__ = ["InvokeStream"]
 
@@ -107,7 +108,7 @@ class InvokeStream:
         except Exception as error:
             await _abort(context, error, method="InvokeStream")
 
-        stream = self._service.invoke_stream(invocation)
+        stream = self._service.invoke_stream(invocation, namespace=caller_namespace(identity))
         delivered = 0
         try:
             async for event in stream:
