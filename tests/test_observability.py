@@ -323,6 +323,9 @@ async def test_an_inbound_traceparent_reaches_the_service_through_the_http_surfa
     assert spans[0].context.trace_id == _PARENT_TRACE_ID
     assert spans[0].parent is not None
     assert spans[0].parent.span_id == 0x00F067AA0BA902B7
+    # Remote, so the parent came off the request's carrier rather than being a
+    # span the gateway made up and then reported as its own parent.
+    assert spans[0].parent.is_remote
 
 
 async def test_a_request_without_a_traceparent_starts_its_own_trace():
@@ -484,6 +487,9 @@ async def test_a_unary_grpc_call_carries_the_caller_trace_to_the_service_span():
     assert spans[0].context.trace_id == _PARENT_TRACE_ID
     assert spans[0].parent is not None
     assert spans[0].parent.span_id == 0x00F067AA0BA902B7
+    # Remote, so the parent came off the call's metadata rather than being a span
+    # the gateway made up and then reported as its own parent.
+    assert spans[0].parent.is_remote
 
 
 async def test_a_streaming_grpc_call_carries_the_caller_trace_to_the_service_span():
@@ -510,3 +516,6 @@ async def test_a_streaming_grpc_call_carries_the_caller_trace_to_the_service_spa
     assert spans[0].context.trace_id == _PARENT_TRACE_ID
     assert spans[0].parent is not None
     assert spans[0].parent.span_id == 0x00F067AA0BA902B7
+    # Remote, so the parent came off the call's metadata rather than being a span
+    # the gateway made up and then reported as its own parent.
+    assert spans[0].parent.is_remote
