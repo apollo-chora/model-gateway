@@ -202,6 +202,7 @@ CRITERIA: dict[int, tuple[str, tuple[str, ...]]] = {
             "tests/test_litellm_client_injection.py::TestTheStartupRefusal::test_a_text_route_with_an_unverified_dialect_fails_the_start",
             "tests/test_images_http.py::TestTheStartupCheck::test_an_image_route_advertising_editing_refuses_the_start",
             "tests/test_routes.py::test_a_partially_configured_block_is_rejected",
+            "tests/test_allowed_hosts.py::test_a_route_outside_the_allowlist_fails_the_start_naming_its_variable",
             "tests/test_observability.py::test_tracing_with_nowhere_to_send_is_refused_at_startup",
         ),
     ),
