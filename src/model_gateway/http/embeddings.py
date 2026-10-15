@@ -64,6 +64,8 @@ from model_gateway.domain.serialization import (
     reject_unknown_keys,
 )
 from model_gateway.errors import InvalidArgumentError
+from model_gateway.http.auth import get_identity
+from model_gateway.security.identity import caller_namespace
 
 if TYPE_CHECKING:
     from model_gateway.inference import InferenceService
@@ -162,7 +164,10 @@ def create_embeddings(service: InferenceService) -> EmbeddingsHandler:
 
     async def embeddings(request: Request) -> Response:
         embedding_request = embedding_request_from_payload(await _read_json_body(request))
-        response = await service.embed(embedding_request)
+        identity = get_identity(request)
+        response = await service.embed(
+            embedding_request, namespace=caller_namespace(identity)
+        )
         return json(EmbeddingsResponse.from_embedding_response(response).to_dict())
 
     return embeddings
