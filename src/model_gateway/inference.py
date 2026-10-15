@@ -1,19 +1,19 @@
 """The inference service: gateway-owned policy around one provider call.
 
-The service owns policy; the provider owns translation. That split is PRD
-section 9's boundary, and this module is the policy side of it:
+The service owns policy; the provider owns translation. That split is the
+boundary, and this module is the policy side of it:
 
 * **Routing.** The public model ID in the request is resolved to the routes
   configured for its operation by the registry. An unknown ID is a
   :class:`~model_gateway.errors.ModelNotFoundError` raised here, before any
   provider is called, so a caller-supplied model name cannot reach an
-  unconfigured upstream endpoint (PRD section 10).
+    unconfigured upstream endpoint.
 * **Capability enforcement.** The request is validated against the primary
   route's capability contract before anything is selected. The registry
-  advertises the primary route's capabilities as the public model's own (PRD
-  section 4.3), so a request the primary cannot honour is refused with a
+    advertises the primary route's capabilities as the public model's own, so
+  a request the primary cannot honour is refused with a
   :class:`~model_gateway.errors.CapabilityError` even when a later route declares
-  what the request needs (PRD section 9.5): serving it would answer a request the
+    what the request needs: serving it would answer a request the
   public contract never advertised for that model. Silently dropping a tool, an
   image or a structured-output requirement is forbidden, and so is obtaining one
   through a fallback. Only then are the remaining routes filtered, each by the
@@ -22,16 +22,16 @@ section 9's boundary, and this module is the policy side of it:
 * **Attempt execution.** The provider is handed one resolved route, the request
   and an :class:`~model_gateway.providers.base.AttemptContext` carrying the
   attempt's own facts: the invocation it belongs to, which attempt it is and the
-  budget that attempt may use (PRD section 9.6). The budget is the gateway's, so
+    budget that attempt may use. The budget is the gateway's, so
   a provider never reads a deadline out of configuration it does not own, and the
   core never wraps the call in a timeout the provider cannot see.
 * **Normalisation.** The provider's answer comes back as upstream data and is
   re-normalised at this boundary: the public model that was asked for, the
   upstream model that actually served it and the invocation's own reliability
   facts are the gateway's to state, because the gateway chose the route and made
-  the attempts (PRD sections 5.2 and 9).
+    the attempts.
 * **Reliability.** One invocation has one deadline, one retry loop and one
-  attempt count (PRD sections 11.3 and 15), and the loop is built from the
+    attempt count, and the loop is built from the
   primitives of :mod:`model_gateway.reliability`. :func:`_select_routes_for` decides
   the primary route and the fallbacks that could serve the request;
   :meth:`InferenceService._walk` anchors a single
@@ -65,7 +65,7 @@ section 9's boundary, and this module is the policy side of it:
 non-streaming invocation may carry one, and a repeat of the same request is
 answered from the record of the first answer rather than by asking the provider
 again — the provider is called once and every equivalent repeat is served from
-the record, which is what prevents duplicate accounting (PRD section 12). The
+the record, which is what prevents duplicate accounting. The
 record is keyed by the caller's key and matched against a fingerprint of the
 request, so a key reused for a different body is a second request and is served
 as one rather than answered from the wrong answer; the gateway-minted invocation
@@ -81,12 +81,12 @@ produced token by token in this call as a stream, which the gateway does not do.
 The provider performs one gateway attempt and owns protocol translation and
 execution and nothing else (:mod:`model_gateway.providers.base`); one attempt
 may carry more than one wire request, because a provider's library can retry
-internally (PRD section 11.3).
+internally.
 
 **Cancellation propagates.** :exc:`asyncio.CancelledError` is a
 :exc:`BaseException` and is never caught here, so a cancelled invocation stops
 at the attempt in flight, releases the concurrency slot that attempt held, and
-makes no further attempt (PRD section 15).
+makes no further attempt.
 
 **Embeddings are served under the same policy.** :meth:`InferenceService.embed`
 is the embeddings operation's entry point, and it is the same walk: the public
@@ -105,12 +105,11 @@ not own: the vectors are **ordered against the caller's input**, and their
 length is **checked against the dimensionality the served route declares**,
 so an upstream answer that cannot be matched to the request is refused rather
 than passed on as a wrong-shaped answer — a malformed-response error, refused
-on the route that answered wrongly and walked to an eligible fallback (PRD
-sections 4.7, 6.3, 9.5 and 11.2).
+on the route that answered wrongly and walked to an eligible fallback.
 
 **``attempt_count`` counts gateway attempts, never upstream requests.** The
 gateway counts the calls it makes. The inference library has internal retry
-paths no supported knob disables (PRD section 11.3), so one gateway attempt can
+paths no supported knob disables, so one gateway attempt can
 carry more than one wire request and this count may understate what the upstream
 saw. It must never be documented, reported or recorded as a wire-request count.
 The embeddings path makes the same claim and no stronger one: it does not offer
@@ -123,8 +122,8 @@ capability is asked before anything is attempted, the primary route's
 capability contract is enforced — which for this operation means the
 ``generation`` capability, and only that — and one deadline covers the
 invocation, with every attempt made inside a concurrency slot whose wait is
-bounded by what is left of that deadline (PRD sections 4.6, 6.2, 9.6, 11.2,
-11.3 and 15). The answer is checked against the request before it is returned:
+bounded by what is left of that deadline. The answer is checked against the
+request before it is returned:
 a caller that stated ``n`` is answered with exactly that many images, and an
 upstream that returned another number has not answered the request, so the
 invocation is refused rather than answered with the wrong number of images —
@@ -132,12 +131,12 @@ a :class:`~model_gateway.errors.MalformedResponseError`, refused on the route
 that answered wrongly and walked to an eligible fallback. The image path makes
 the same no-exactly-once claim as the others: the gateway counts its own
 attempts, and the inference library's internal retry paths mean one of those
-calls can carry more than one upstream request (PRD sections 11.3 and 12).
+calls can carry more than one upstream request.
 
 **Image editing is absent from the surface.** The gateway's canonical image
 request carries no field for an image input, so an edit cannot be forwarded
 to any route however its capabilities read, and an edit answered without it
-would report an image edited that never left the gateway (PRD section 9.5).
+would report an image edited that never left the gateway.
 The service therefore has no edit entry point at all: an operation the
 gateway categorically cannot perform is left out rather than published and
 guaranteed to fail, and a configured route that declares the ``editing``
@@ -221,11 +220,11 @@ _EMBEDDINGS_CAPABILITY = Capability.EMBEDDINGS.value
 """The capability an embeddings invocation asks of the route that serves it.
 
 The refusal names it so a caller learns which operation is missing rather than
-receiving a generic failure (PRD section 9.5).
+receiving a generic failure.
 """
 
 _FLOAT_ENCODING = "float"
-"""The one wire encoding the gateway's embeddings answer is given in (PRD 4.7).
+"""The one wire encoding the gateway's embeddings answer is given in.
 
 It is the upstream's own default as well, so a caller who asked for it — or
 asked for nothing — is served by asking the provider for nothing extra.
@@ -237,7 +236,7 @@ _ENCODING_CAPABILITY = "encoded_output"
 The gateway's embeddings response is the float form, so any other encoding a
 canonical request can still carry is a behaviour this gateway does not have;
 naming it keeps the refusal in the same vocabulary the chat endpoint's feature
-refusals use (PRD section 9.5).
+refusals use.
 """
 
 _IMAGE_CAPABILITY = Capability.GENERATION.value
@@ -245,8 +244,7 @@ _IMAGE_CAPABILITY = Capability.GENERATION.value
 
 Image generation is the image operation's own capability, the default every
 image route declares; the refusal names it so a caller learns which operation
-is missing rather than receiving a generic failure (PRD sections 6.2 and
-9.5).
+is missing rather than receiving a generic failure.
 """
 
 _Result = TypeVar("_Result")
@@ -273,7 +271,7 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_MAX_CONCURRENT_REQUESTS = 100
 """The concurrency bound a service is built with when no limiter is injected.
 
-It is ``PROVIDER_MAX_CONCURRENT_REQUESTS``'s own default (PRD section 15), so a
+It is ``PROVIDER_MAX_CONCURRENT_REQUESTS``'s own default, so a
 service constructed without a deployment's configuration still bounds its
 simultaneous upstream attempts rather than leaving them unbounded. The
 application factory passes the configured value, or a limiter of its own.
@@ -282,7 +280,7 @@ application factory passes the configured value, or a limiter of its own.
 
 @dataclass(frozen=True)
 class InvocationState:
-    """What the gateway has done for one invocation so far (PRD sections 5.2 and 13).
+    """What the gateway has done for one invocation so far.
 
     The response reports facts about the gateway's own execution — how many
     provider attempts were made and whether a fallback path was taken — and those
@@ -293,17 +291,17 @@ class InvocationState:
 
     ``attempt_count`` starts at zero, because a state exists before the first
     call, and counts the attempts that were made — including ones that raised,
-    because a failed attempt is work the gateway did (PRD section 13). It counts
+    because a failed attempt is work the gateway did. It counts
     *gateway* attempts: one call this service made, on one route, under one
     attempt number. It is not a wire-request count. The inference library has
-    internal retry paths that no supported knob switches off (PRD section 11.3),
+    internal retry paths that no supported knob switches off,
     so a single attempt here can carry more than one upstream request, and this
     count may understate what the upstream saw. Reporting it as the number of
     upstream requests would be a claim the gateway cannot support.
 
     ``fallback_used`` records that the invocation took a *fallback path*: a route
     other than the primary one served it because the normal primary path could
-    not (PRD section 5.2). It is deliberately narrower than "a route other than
+    not. It is deliberately narrower than "a route other than
     the first configured one was used", which was also true whenever capability
     routing passed the primary over. The primary route is the one the public
     model advertises, and a request it cannot honour is refused rather than
@@ -325,12 +323,12 @@ class InvocationState:
 
         The attempt is recorded before the call, so an attempt that raises counts
         too: the count describes what the gateway did, and a failure is not less
-        of an attempt than a success (PRD section 13).
+        of an attempt than a success.
 
         ``on_fallback`` states that this attempt is made on a route other than
         the primary one, after the primary path could not serve the invocation.
-        That is the one thing that makes ``fallback_used`` true (PRD section
-        5.2), and it is sticky, because one such route is enough for the
+        That is the one thing that makes ``fallback_used`` true,
+        and it is sticky, because one such route is enough for the
         invocation to have fallen back. It defaults to false because an attempt
         on the primary route is never a fallback, however many routes are
         configured behind it.
@@ -349,7 +347,7 @@ class _RoutePlan:
     ``primary`` is the route the public model advertises — the first configured
     route — and the one every invocation is attempted on. ``fallbacks`` are the
     later routes that could serve the same request unchanged, in configured
-    order: the candidates a genuine failure fallback may walk (PRD section 11.2).
+    order: the candidates a genuine failure fallback may walk.
 
     Empty ``fallbacks`` is not a refusal. It says only that the invocation has
     nowhere to go if the primary path fails, which is the ordinary case for a
@@ -381,7 +379,7 @@ class _StreamFacts:
     the gateway owes for whatever it carried; a stream that emitted nothing at all
     is the only one with no answer to account for. That is deliberately the same
     criterion the walk already applies to decide that no further fallback or retry
-    may occur (PRD sections 11.2 and 16), so the rule that ends the walk and the
+    may occur, so the rule that ends the walk and the
     rule that decides whether there is something to record cannot drift apart.
 
     ``usage`` is the last token report the provider sent, or ``None`` when it sent
@@ -527,7 +525,7 @@ class InferenceService:
         ``attempt_timeout`` is the one number the deployment configures today —
         ``PROVIDER_TIMEOUT_SECONDS`` — and it plays two roles at once: it is the
         invocation's total budget *and* the ceiling on each attempt inside it
-        (PRD sections 9.6 and 15). Those are logically distinct bounds and this
+        Those are logically distinct bounds and this
         parameter does not yet separate them. The deadline is anchored from it
         when an invocation begins, and every attempt is handed the smaller of it
         and what is left of the deadline, so retries and fallbacks draw from one
@@ -567,16 +565,16 @@ class InferenceService:
         embed is a perfectly usable text provider, and refusing to construct the
         service would disable chat over an operation the deployment never asks
         for. The refusal belongs to the request that needs the missing
-        capability, and it names it (PRD sections 6 and 9.5). Image generation
+        capability, and it names it. Image generation
         is asked the same way, through
         :class:`~model_gateway.providers.base.ImageProvider`, when an image
         request arrives: a provider that cannot generate is a usable text and
         embeddings provider, and an image request it cannot serve is refused
-        rather than handed to it (PRD sections 4.6 and 9.5).
+        rather than handed to it.
 
         ``idempotency_store`` is where the answers to keyed invocations are
         recorded, so a repeat of the same request is answered from the record
-        rather than by asking the provider again (PRD section 12). It defaults to
+        rather than by asking the provider again. It defaults to
         an in-memory store, which is sufficient for a single-instance deployment;
         a deployment that needs its records to survive a restart or to be shared
         between instances configures a store of its own and passes it here. A
@@ -585,11 +583,11 @@ class InferenceService:
         exactly the duplicate accounting the key exists to prevent.
 
         ``rate_limiter`` and ``tenant_limiter`` are the two admission decisions of
-        PRD section 14, and both default to ``None``, which is a deployment that
+        the gateway, and both default to ``None``, which is a deployment that
         configured neither. They are taken at each operation's entry, before the
         model is resolved and before any provider is called, and that placement is
         load-bearing rather than tidy: the walk treats a ``RATE_LIMITED`` failure
-        as route-local and therefore fallback-eligible (PRD section 11.2), because
+        as route-local and therefore fallback-eligible, because
         an *upstream's* rate limit belongs to the route that answered it. The
         gateway's own limit belongs to the caller and to no route, so raising it
         inside the walk would make the gateway walk a request from one provider to
@@ -646,7 +644,7 @@ class InferenceService:
         The public model is recorded as an attribute because it is the one fact a
         caller of a trace needs to group spans by, and it is the gateway's own
         vocabulary rather than anything the caller supplied as content — the same
-        distinction the log redaction draws (PRD section 17).
+        distinction the log redaction draws.
         """
         if self._tracer is None:
             yield None
@@ -714,7 +712,7 @@ class InferenceService:
         A count the provider never reported is not added. The metrics are sums of
         what the gateway knows, and adding a zero for an unknown count would make
         the total claim that nothing was spent where the truth is that nothing was
-        reported — the same distinction the record preserves (PRD section 13).
+        reported — the same distinction the record preserves.
         """
         metrics = self._metrics
         if metrics is None:
@@ -737,7 +735,7 @@ class InferenceService:
 
         The rate limit is keyed on ``namespace``, which is the credential
         identifier the rest of the gateway already keys policy on, and never on
-        anything a request carries (PRD sections 7 and 14.2).
+        anything a request carries.
         """
         if self._rate_limiter is None:
             return
@@ -752,7 +750,7 @@ class InferenceService:
 
         Keyed on the tenant the credential is bound to, or on the credential
         identifier when it is bound to none. A tenant-less credential is its own
-        principal (PRD section 14.2), so falling back to the identifier keeps one
+        principal, so falling back to the identifier keeps one
         of them from consuming the bound the others are entitled to — which a
         shared empty key would do.
 
@@ -805,7 +803,7 @@ class InferenceService:
         Resolves the ID to its configured routes, validates the request against
         the primary route's capability contract — the contract the registry
         advertises for the model — then serves the invocation under one deadline
-        and one retry loop (PRD sections 11.2, 11.3 and 15). Raises
+        and one retry loop. Raises
         :class:`~model_gateway.errors.ModelNotFoundError` for an unknown ID and
         :class:`~model_gateway.errors.CapabilityError` when the primary route
         cannot honour the request; otherwise raises the failure of the last
@@ -818,7 +816,7 @@ class InferenceService:
 
         The returned ``attempt_count`` counts the gateway's own attempts and is
         not a count of upstream requests: the inference library can issue more
-        than one request inside a single attempt (PRD section 11.3).
+        than one request inside a single attempt.
 
         **An idempotency key is answered from the gateway's own record.** A
         request carrying one is deduplicated here rather than upstream: a repeat
@@ -826,7 +824,7 @@ class InferenceService:
         with :attr:`~model_gateway.domain.IdempotencyStatus.REPLAYED`, and the
         provider is not called again — one provider call, and every equivalent
         repeat served from the record, which is what prevents duplicate
-        accounting (PRD section 12). The key is namespaced by the trusted
+        accounting. The key is namespaced by the trusted
         principal, so two credentials using the same key are two operations and
         cannot overwrite each other's records.
 
@@ -904,7 +902,7 @@ class InferenceService:
             response = await settle(claim.future)
             # A coalesced waiter did not reach the provider and did not add to
             # the execution the owner performed, so it is not accounted: the
-            # owner's record is the one record for that execution (§12).
+            # the owner's record is the one record for that execution.
             return replace(response, idempotency_status=IdempotencyStatus.REPLAYED)
 
         try:
@@ -932,8 +930,8 @@ class InferenceService:
     ) -> None:
         """Record one invocation's answer and cost, when accounting is enabled.
 
-        Every operation records, because §13 asks for a record of every
-        invocation that produced an answer and not only of a text one, and the
+        Every operation records, because the accounting contract asks for a record
+        of every invocation that produced an answer and not only of a text one, and the
         walk knows for all of them what the record needs. ``outcome`` is the
         answer's own facts, and stating them rather than reading them off a
         response is what lets a streamed answer be recorded through this same
@@ -941,7 +939,7 @@ class InferenceService:
         directly. ``state`` carries the two facts only the walk knows — how many
         attempts the gateway made and whether a fallback served the invocation —
         and it is passed rather than read off the answer because the canonical
-        embeddings and image answers have no field for either (PRD section 5.2)
+        embeddings and image answers have no field for either
         while the record has one for both.
 
         Only an answer is recorded, and only when the caller asked for it: a
@@ -987,12 +985,11 @@ class InferenceService:
 
         A stream that produced nothing leaves no record, because there is no
         answer to account for: a refusal before the first event reaches the caller
-        as an ordinary error response and no provider produced anything (PRD
-        section 16).
+        as an ordinary error response and no provider produced anything.
 
         A stream that produced output and then ended without a terminal event is
-        recorded as ``incomplete`` rather than ``failed``. §16 draws that
-        distinction for the caller — a truncated stream is not a failed one — and
+        recorded as ``incomplete`` rather than ``failed``. The stream contract
+        draws that distinction for the caller — a truncated stream is not a failed one — and
         a record that collapsed the two would report a failure the stream never
         declared.
 
@@ -1045,7 +1042,7 @@ class InferenceService:
         The streaming counterpart of :meth:`invoke`, under the same policy: the
         ID is resolved to its configured routes, the request is validated against
         the primary route's capability contract, and the invocation runs under
-        one deadline and one retry loop (PRD sections 11.2, 11.3 and 15). The
+        one deadline and one retry loop. The
         difference is what a failure may do once the answer has begun.
 
         **The public model is resolved before streaming eligibility is asked.**
@@ -1064,7 +1061,7 @@ class InferenceService:
         event, a failure ends the stream instead: switching providers, or even
         retrying the same route, would concatenate a second answer onto the
         first, and a caller that has seen output cannot be given a contradictory
-        one (PRD sections 11.2, 11.3 and 16). The stream then ends with exactly
+        one. The stream then ends with exactly
         one terminal :class:`~model_gateway.domain.streaming.StreamEvent` of kind
         ``ERROR`` that reports the failure's own gateway reason and sanitised
         message, rather than stopping silently or mislabelling the failure as a
@@ -1091,7 +1088,7 @@ class InferenceService:
         makes one record attempt, made when the stream is over — whether it
         finished, failed after output, or stopped without a terminal event — and a
         stream that produced nothing makes none, because there is no answer to
-        account for (PRD section 13). It is an attempt rather than a guarantee
+        account for. It is an attempt rather than a guarantee
         that a record was stored, because a sink that fails is logged rather than
         propagated, exactly as on the non-streaming paths. The attempt is made even
         when the caller goes away mid-stream: the provider was called and the
@@ -1120,7 +1117,7 @@ class InferenceService:
         answer is arriving, and it is still in flight at the moment its usage is
         accounted for. A stream refused a slot is refused before any event is
         produced, so the refusal reaches the caller as an ordinary error response
-        rather than as a stream that failed (PRD section 16).
+        rather than as a stream that failed.
         """
         routes = self._registry.routes_for(request.model)
         # Admission comes first, before the streaming capability is asked: the
@@ -1166,28 +1163,26 @@ class InferenceService:
         operation, the request is validated against the primary route's
         capability contract — which for this operation means the ``embeddings``
         capability, and only that — and the invocation runs under one deadline
-        and one retry loop (PRD sections 4.7, 6.3, 11.2, 11.3 and 15).
+        and one retry loop.
 
         **The model is resolved before the provider's capability is asked.** A
         request naming a model the gateway does not expose is a
         :class:`~model_gateway.errors.ModelNotFoundError`, and it is refused as
         that whatever the bound provider can do: the request addresses a
         resource that does not exist, so whether some other operation could have
-        been served has no bearing on the answer (PRD section 10).
+        been served has no bearing on the answer.
 
         **A provider that cannot embed is refused, never improvised.** The
         gateway does not answer an embeddings request with a vector it invented
         or with an empty one, because either would tell the caller its request
         was served when it was not. The refusal is a
-        :class:`~model_gateway.errors.CapabilityError` naming ``embeddings``
-        (PRD section 9.5).
+        :class:`~model_gateway.errors.CapabilityError` naming ``embeddings``.
 
         **A caller who asked for a wire encoding the gateway cannot produce is
-        refused too.** The canonical answer is the float form (PRD section 4.7),
+        refused too.** The canonical answer is the float form,
         so ``encoding_format`` of ``float`` — or none at all, which is the
         upstream's own default — is honoured, and ``base64`` is refused with a
-        capability error naming the encoding rather than answered in floats
-        (PRD section 9.5).
+        capability error naming the encoding rather than answered in floats.
 
         **A caller dimension is honoured only where the route accepts one.** A
         route declares whether it accepts a caller-selectable dimensionality
@@ -1198,7 +1193,7 @@ class InferenceService:
         the one it declares, and a request that states a dimension is refused
         with a capability error naming the parameter before any provider is
         called — the parameter is neither forwarded against the route's
-        configuration nor silently dropped (PRD sections 6.3 and 9.5).
+        configuration nor silently dropped.
 
         **The answer is checked against the request before it is returned.** Each
         vector is placed at the position the upstream reported, so ``data`` is in
@@ -1206,11 +1201,11 @@ class InferenceService:
         position set must be exactly the caller's indices: an upstream that
         returned fewer, more or duplicated vectors has not answered the request,
         and the invocation is refused rather than answered with a vector matched
-        to the wrong text (PRD section 4.7). Every vector's length must equal the
+        to the wrong text. Every vector's length must equal the
         dimensionality the *served route* declares — read per route, not from one
         operation-wide setting — or the one the caller asked for, when the route
         accepts the parameter and the caller asked for one, so a wrong-shaped
-        vector is refused rather than returned (PRD sections 4.7 and 6.3). A
+        vector is refused rather than returned. A
         refusal of this kind is a
         :class:`~model_gateway.errors.MalformedResponseError`: the fault lies in
         that upstream's answer, so the invocation falls back to another eligible
@@ -1233,7 +1228,7 @@ class InferenceService:
         ``attempt_count`` is not reported here, but the same limit applies to
         what this method does: it counts the calls the *gateway* makes, and the
         inference library's internal retry paths mean one of those calls can
-        carry more than one upstream request (PRD section 11.3). The embeddings
+        carry more than one upstream request. The embeddings
         path therefore makes no exactly-once claim either.
 
         **Every completed invocation leaves a usage record.** A served answer is
@@ -1242,9 +1237,9 @@ class InferenceService:
         token counts and their provenance, the latency and the walk's attempt and
         fallback facts — under the same ``USAGE_TRACKING_ENABLED`` setting. The
         canonical embeddings response carries no attempt count, so that fact
-        reaches the record from the walk rather than from the answer (PRD section
-        13). ``namespace`` is the trusted principal the invocation acted under,
-        which the embeddings request does not carry and the authenticated caller
+        reaches the record from the walk rather than from the answer. ``namespace``
+        is the trusted principal the invocation acted under, which the embeddings
+        request does not carry and the authenticated caller
         does.
         """
         routes = self._registry.routes_for(request.model)
@@ -1306,27 +1301,26 @@ class InferenceService:
         the image operation, the request is validated against the primary
         route's capability contract — which for this operation means the
         ``generation`` capability, and only that — and the invocation runs
-        under one deadline and one retry loop (PRD sections 4.6, 6.2, 9.6,
-        11.2, 11.3 and 15).
+        under one deadline and one retry loop.
 
         **The model is resolved before the provider's capability is asked.** A
         request naming a model the gateway does not expose is a
         :class:`~model_gateway.errors.ModelNotFoundError`, and it is refused
         as that whatever the bound provider can do: the request addresses a
         resource that does not exist, so whether some other operation could
-        have been served has no bearing on the answer (PRD section 10).
+        have been served has no bearing on the answer.
 
         **A provider that cannot generate images is refused, never
         improvised.** The gateway does not answer an image request with an
         image it invented, and an empty result is not an answer either, so
         the refusal is a :class:`~model_gateway.errors.CapabilityError` naming
-        ``generation`` (PRD sections 4.6 and 9.5).
+        ``generation``.
 
         **The answer is checked against the request before it is returned.** A
         caller that stated ``n`` is answered with exactly that many images; an
         upstream that returned another number has not answered the request,
         and the invocation is refused rather than answered with the wrong
-        number of images (PRD section 4.6). A caller who stated no count is
+        number of images. A caller who stated no count is
         checked against none: the upstream's own default applies, and the
         gateway cannot know what number that was. A refusal of this kind is a
         :class:`~model_gateway.errors.MalformedResponseError`: the fault lies
@@ -1338,7 +1332,7 @@ class InferenceService:
         gateway minted for this call. It carries no attempt count or fallback
         flag: the canonical image response has no field for them, and the
         gateway does not publish a number the caller's contract does not
-        define (PRD sections 5.2 and 13).
+        define.
 
         Raises :class:`~model_gateway.errors.ModelNotFoundError` for an
         unknown ID, :class:`~model_gateway.errors.CapabilityError` when the
@@ -1351,7 +1345,7 @@ class InferenceService:
         ``attempt_count`` is not reported here, but the same limit applies:
         it counts the calls the *gateway* makes, and the inference library's
         internal retry paths mean one of those calls can carry more than one
-        upstream request (PRD section 11.3). The image path makes no
+        upstream request. The image path makes no
         exactly-once claim.
 
         **Every completed invocation leaves a usage record.** A served answer is
@@ -1360,7 +1354,7 @@ class InferenceService:
         token counts and their provenance, the latency and the walk's attempt and
         fallback facts — under the same ``USAGE_TRACKING_ENABLED`` setting. The
         canonical image response carries no attempt count, so that fact reaches
-        the record from the walk rather than from the answer (PRD section 13).
+        the record from the walk rather than from the answer.
         ``namespace`` is the trusted principal the invocation acted under, which
         the image request does not carry and the authenticated caller does.
         """
@@ -1401,7 +1395,7 @@ class InferenceService:
         The text operation's entry into the shared walk. Selection is the text
         operation's own — :func:`_select_routes` measures the request against the
         primary route's advertised capabilities and refuses what the public model
-        never advertised (PRD sections 4.3 and 9.5) — and everything after it is
+        never advertised — and everything after it is
         :meth:`_walk`'s: one deadline, the same-route retry test, the separate
         fallback test, the bounded backoff and the last attempt's failure
         reported.
@@ -1409,7 +1403,7 @@ class InferenceService:
         What this method contributes to the walk is the answer shape. The
         provider's completion is stamped with the gateway's own facts by
         :func:`_normalise`, which is where ``attempt_count`` and
-        ``fallback_used`` come from rather than being assumed (PRD section 5.2).
+        ``fallback_used`` come from rather than being assumed.
         """
         result, answered_by, state = await self._walk(
             request.model,
@@ -1430,10 +1424,10 @@ class InferenceService:
         """Walk one operation's route plan under one deadline and one retry loop.
 
         This is the policy the non-streaming operations share — the text
-        invocation's (PRD section 11.2) and the embeddings one's (PRD section
-        4.7) — written once so the two cannot drift apart. The streaming walk is
+        invocation's and the embeddings one's — written once so the two cannot
+        drift apart. The streaming walk is
         deliberately not this one: it carries the extra rule that no fallback and
-        no retry may follow the first delivered event (PRD sections 11.2 and 16),
+        no retry may follow the first delivered event,
         which is a rule about output the caller has already seen rather than a
         different reliability policy.
 
@@ -1452,7 +1446,7 @@ class InferenceService:
         *May another route help?* :func:`~model_gateway.reliability.is_fallback_eligible`
         answers that one, and a yes moves the invocation on to the next route in
         ``plan.fallbacks``. A fallback that answers is what makes
-        ``fallback_used`` true (PRD section 5.2).
+        ``fallback_used`` true.
 
         A failure that answers no to both terminates the invocation where it
         happened, and the refusal raised is that failure. This is the case the
@@ -1469,14 +1463,14 @@ class InferenceService:
         One :class:`~model_gateway.reliability.Deadline` is anchored here, when
         the invocation begins, and every attempt derives its budget from it, so
         retries and fallbacks consume one budget rather than each getting a fresh
-        one (PRD section 15). An attempt is never started once that budget is
+        one. An attempt is never started once that budget is
         spent: the invocation fails with a
         :class:`~model_gateway.errors.DeadlineExceededError` and no provider is
         called.
 
         When no route could serve the invocation, the failure raised is the last
         attempt's rather than the first: the most recent failure is the one that
-        says why the invocation could not be served (PRD section 11.2).
+        says why the invocation could not be served.
 
         The wait between attempts happens outside the concurrency slot, so a
         caller in backoff holds nothing another caller could be using, and it is
@@ -1532,7 +1526,7 @@ class InferenceService:
 
         The walk performs the call and nothing else; this closure is where the
         text operation's own answer is produced — the single provider call plus
-        the gateway's own stamping of the result (PRD section 5.2).
+        the gateway's own stamping of the result.
         """
 
         async def serve(
@@ -1567,7 +1561,7 @@ class InferenceService:
         The budget handed to the provider is derived here, *after* the slot is
         held, from the invocation's one deadline: waiting for a slot consumes
         invocation budget too, so the budget is computed at the moment the
-        attempt starts rather than before the wait (PRD section 15). An attempt
+        attempt starts rather than before the wait. An attempt
         whose budget is already spent is not made — the provider is not called
         and a :class:`~model_gateway.errors.DeadlineExceededError` is raised
         instead.
@@ -1592,7 +1586,7 @@ class InferenceService:
         call and released when it ends — success, failure or cancellation — and
         the budget handed to the provider is derived from the invocation's one
         deadline after the slot is held, so waiting for a slot consumes
-        invocation budget too (PRD section 15).
+        invocation budget too.
 
         The provider is handed the route, the request and an
         :class:`~model_gateway.providers.base.AttemptContext` carrying the
@@ -1600,7 +1594,7 @@ class InferenceService:
         :meth:`~model_gateway.providers.base.TextProvider.complete`. The
         invocation identifier is the one the gateway minted for this invocation,
         which the canonical embeddings request does not carry and the canonical
-        response must state (PRD section 5.2).
+        response must state.
         """
         async with self._attempt_context(
             request.model, invocation_id, state, deadline
@@ -1622,7 +1616,7 @@ class InferenceService:
         the call and released when it ends — success, failure or cancellation —
         and the budget handed to the provider is derived from the invocation's
         one deadline after the slot is held, so waiting for a slot consumes
-        invocation budget too (PRD section 15).
+        invocation budget too.
 
         The provider is handed the route, the request and an
         :class:`~model_gateway.providers.base.AttemptContext` carrying the
@@ -1630,7 +1624,7 @@ class InferenceService:
         :meth:`~model_gateway.providers.base.EmbeddingProvider.embed`. The
         invocation identifier is the one the gateway minted for this
         invocation, which the canonical image request does not carry and the
-        canonical response must state (PRD section 5.2).
+        canonical response must state.
         """
         async with self._attempt_context(
             request.model, invocation_id, state, deadline
@@ -1663,7 +1657,7 @@ class InferenceService:
         The budget handed to the provider is derived here, *after* the slot is
         held, from the invocation's one deadline: waiting for a slot consumes
         invocation budget too, so the budget is computed at the moment the
-        attempt starts rather than before the wait (PRD section 15). An attempt
+        attempt starts rather than before the wait. An attempt
         whose budget is already spent is not made — the provider is not called
         and a :class:`~model_gateway.errors.DeadlineExceededError` is raised
         instead.
@@ -1671,7 +1665,7 @@ class InferenceService:
         ``model`` is the public model ID the invocation named, carried so the
         refusal can name the resource it was about; ``invocation_id`` is the
         gateway's own identifier for the invocation, which a text request carries
-        and an embeddings request does not (PRD section 5.2).
+        and an embeddings request does not.
         """
         async with self._limiter.slot(deadline.remaining()):
             budget = deadline.budget_for(self._attempt_timeout)
@@ -1708,9 +1702,9 @@ class InferenceService:
         The streaming counterpart of :meth:`_invoke_on`, and the same walk:
         the primary route first, then the fallbacks that could serve the
         request, under the invocation's single deadline, with the same two
-        questions asked of every failure. The difference is the rule PRD
-        sections 11.2 and 11.3 state and a non-streaming invocation never had
-        to enforce: **once an event has been yielded to the caller, no fallback
+        questions asked of every failure. The difference is the rule a
+        non-streaming invocation never had to enforce: **once an event has been
+        yielded to the caller, no fallback
         and no retry may occur.**
 
         Before the first event, the walk is exactly :meth:`_invoke_on`'s: a
@@ -1725,7 +1719,7 @@ class InferenceService:
         closed with exactly one terminal ``ERROR`` event that carries the
         failure's own gateway reason and sanitised message, rather than stopping
         silently, restarting on another provider, or mislabelling the failure as
-        a finish (PRD section 16). The error is then raised, so the caller knows
+        a finish. The error is then raised, so the caller knows
         the invocation failed; the terminal event is what the stream itself
         shows.
 
@@ -1749,8 +1743,7 @@ class InferenceService:
         upstream went away, or simply never reported a finish reason — ends the
         generator without one too. The gateway synthesises no terminal event
         for an answer it never saw finish, so a caller whose stream stops reads
-        a stream that is over without a terminal event, not a failed one (PRD
-        section 16).
+        a stream that is over without a terminal event, not a failed one.
 
         **``facts`` is what the walk leaves behind for the record.** A generator
         cannot return the facts an invocation's accounting needs, so the route
@@ -1848,7 +1841,7 @@ class InferenceService:
         duration of the stream and released when it ends — success, failure or
         cancellation — and the budget handed to the provider is derived from
         the invocation's one deadline after the slot is held, so waiting for a
-        slot consumes invocation budget too (PRD section 15).
+        slot consumes invocation budget too.
 
         The provider is handed the route, the request and an
         :class:`~model_gateway.providers.base.AttemptContext` carrying the
@@ -1914,7 +1907,7 @@ def _budget_is_spent(budget: float | None) -> bool:
     no timeout, so no deadline was anchored and no attempt is handed a ceiling
     of its own — and is never spent. Zero is: a deadline that has run out hands
     back zero, and an attempt given zero seconds is one the gateway has already
-    refused (PRD section 15).
+    refused.
     """
     return budget is not None and budget <= 0.0
 
@@ -1955,7 +1948,7 @@ async def _back_off(attempt: int, base_ms: float, deadline: Deadline) -> bool:
 
 
 def _deadline_exceeded(model: str, state: InvocationState) -> DeadlineExceededError:
-    """The refusal for an invocation whose budget is gone (PRD section 15).
+    """The refusal for an invocation whose budget is gone.
 
     The message and the details are built from gateway vocabulary and name only
     the public model and the number of gateway attempts made, so no upstream
@@ -1975,7 +1968,7 @@ def _error_event(
 
     A failure after the first event cannot be retried or walked to another
     route — the caller has already seen output, and a second answer would
-    contradict it (PRD sections 11.2 and 11.3). The stream therefore ends with
+    contradict it. The stream therefore ends with
     exactly one terminal ``ERROR`` event, so the caller is not left with a
     stream that simply stopped, and is not told the answer finished when it did
     not.
@@ -1985,8 +1978,8 @@ def _error_event(
     and there is none: the provider failed rather than finishing, so borrowing
     ``FinishReason.UNKNOWN`` and parking the gateway's reason in
     ``raw_finish_reason`` would describe a finish that never happened and put
-    gateway vocabulary in a field reserved for the provider's own (PRD sections
-    5.2, 5.4 and 9.1). ``error_reason`` is the value of the failure's
+    gateway vocabulary in a field reserved for the provider's own.
+    ``error_reason`` is the value of the failure's
     :class:`~model_gateway.errors.ErrorReason`, which is what a caller switches
     on; ``error_message`` is the same sanitised message the error carries, so
     the reason and the text agree with the error that is raised alongside the
@@ -1998,7 +1991,7 @@ def _error_event(
     :class:`~model_gateway.errors.GatewayError` is normalised first — here,
     before the event is built, exactly as the HTTP boundary normalises it — so
     the reason is one of the taxonomy's own and the message is gateway-authored
-    rather than the provider's (PRD section 5.4). The event is built from the
+    rather than the provider's. The event is built from the
     normalised error, never from the raw one.
     """
     gateway_error = _normalised_error(error)
@@ -2016,8 +2009,8 @@ def _normalised_error(error: BaseException) -> GatewayError:
 
     A failure that is already a :class:`~model_gateway.errors.GatewayError` is
     itself; anything else is normalised, so the reason is one of the taxonomy's
-    own and the message is gateway-authored rather than the provider's (PRD
-    section 5.4). The terminal event a failed stream carries and the record that
+    own and the message is gateway-authored rather than the provider's. The
+    terminal event a failed stream carries and the record that
     stream leaves are both built from this one answer, so they cannot disagree
     about why the invocation failed.
     """
@@ -2065,13 +2058,13 @@ def _select_routes_for(
     validated first: a request it cannot honour is refused with a
     :class:`~model_gateway.errors.CapabilityError` even when a later route
     declares what the request needs, because serving it would answer a request
-    the public model never advertised (PRD sections 4.3 and 9.5).
+    the public model never advertised.
 
     Only then are the remaining routes filtered, each by the same test, into the
     fallbacks. A route that does not declare everything the request needs is
     skipped rather than attempted, so a capability gap in a fallback cannot make
-    an invocation fatal that the primary route could have served (PRD section
-    11.2); and because the request was already validated against the primary,
+    an invocation fatal that the primary route could have served; and because
+    the request was already validated against the primary,
     filtering afterwards is what keeps a fallback from expanding the advertised
     capabilities. A fallback may preserve them, never add to them.
 
@@ -2107,14 +2100,13 @@ def _route_can_serve(
     """Whether ``route`` could serve this request unchanged.
 
     The capability test first, exactly as the primary is validated: a route
-    that does not declare an operation's capability cannot serve it (PRD
-    section 9.5). The dimension test applies only when the caller stated a
+    that does not declare an operation's capability cannot serve it. The
+    dimension test applies only when the caller stated a
     dimension: a route that does not accept the ``dimensions`` parameter
     cannot honour a request that asks for one, so it is not a candidate. The
     primary route establishes whether caller-selectable dimensions are part of
     the model's contract, and a fallback that cannot honour the same request is
-    not one — a fallback may preserve the advertised contract, never expand it
-    (PRD sections 9.5 and 11.2).
+    not one — a fallback may preserve the advertised contract, never expand it.
     """
     if _first_missing_capability(route, required) is not None:
         return False
@@ -2136,7 +2128,7 @@ def _first_missing_capability(
 
 
 def _no_eligible_route(model: str, missing: Capability | None) -> CapabilityError:
-    """The refusal for a request the advertised model cannot serve (PRD section 9.5).
+    """The refusal for a request the advertised model cannot serve.
 
     ``missing`` is the first capability the primary route lacks for this request,
     which is the capability the public model does not advertise. It is ``None``
@@ -2164,16 +2156,16 @@ def _required_capabilities(request: InvocationRequest) -> tuple[Capability, ...]
     A chat invocation needs the chat capability; declaring tools needs the tools
     capability, because a provider that cannot call tools cannot be made to; an
     image in the conversation needs the vision capability, because dropping it
-    would change what the caller said (PRD sections 9.4 and 9.5); and a
+    would change what the caller said; and a
     generation config carrying a non-text response format needs the
     structured-output capability, because a route that cannot honour the schema
     would otherwise answer with free text while the caller believed its
-    requirement had been met (PRD section 9.5). A text-mode response format asks
+    requirement had been met. A text-mode response format asks
     for nothing beyond chat: it is the provider's own default.
 
     A system instruction asks for nothing beyond chat. It is baseline chat
-    semantics that every chat binding must map or refuse (PRD sections 4.4, 9.1
-    and 9.5), so a route declaring chat already claims to handle it, and a
+    semantics that every chat binding must map or refuse, so a route declaring
+    chat already claims to handle it, and a
     capability of its own would move that obligation somewhere it could be left
     unset (:class:`~model_gateway.capabilities.Capability`).
 
@@ -2232,16 +2224,16 @@ def _normalise(
 ) -> InvocationResponse:
     """Stamp the gateway's own facts onto a provider's answer.
 
-    A provider's response is upstream data, never forwarded unchanged (PRD
-    section 9). The gateway chose the route, so it states which public model was
+    A provider's response is upstream data, never forwarded unchanged. The
+    gateway chose the route, so it states which public model was
     asked for and which upstream model answered; and the gateway made the
     attempts, so ``attempt_count`` and ``fallback_used`` are read from ``state``
     rather than assumed. A provider cannot report how many times the gateway
     called, and neither may this function invent the number.
 
     ``invocation_id`` is always the gateway's own, never the provider's. The
-    gateway mints the identifier before the call, and PRD section 5.2 describes
-    the response field as the gateway invocation identifier, so a value a
+    gateway mints the identifier before the call, and the response field is the
+    gateway invocation identifier, so a value a
     provider supplies is discarded: a buggy or hostile provider must not be able
     to rename the invocation in the caller's own record of it. A provider's own
     request or response identifier is a different fact and must not be published
@@ -2262,7 +2254,7 @@ def _normalise(
 def _reject_unhonourable_encoding(request: EmbeddingRequest) -> None:
     """Refuse a wire encoding the gateway's embeddings answer cannot be given in.
 
-    The canonical embeddings answer is the float form (PRD section 4.7), and so
+    The canonical embeddings answer is the float form, and so
     is the OpenAI-compatible response the endpoint renders. ``float`` — and no
     stated encoding at all, which is the upstream's own default — is therefore
     honoured without asking the provider for anything else, and anything the
@@ -2271,11 +2263,11 @@ def _reject_unhonourable_encoding(request: EmbeddingRequest) -> None:
 
     The refusal is deliberate rather than a gap. Answering a caller who asked
     for base64 with floats would tell it its request was honoured while the
-    gateway silently ignored the encoding it asked for, which PRD section 9.5
-    forbids; and the gateway cannot return base64 instead, because the canonical
+    gateway would be silently ignoring the encoding it asked for, which is
+    forbidden; and the gateway cannot return base64 instead, because the canonical
     vector is a tuple of numbers and no field of the response carries an encoded
     form. Refusing is the only answer that keeps the caller's view of the
-    request and the gateway's view of it identical (PRD section 4).
+    request and the gateway's view of it identical.
     """
     encoding = request.encoding_format
     if encoding is None or encoding == _FLOAT_ENCODING:
@@ -2298,11 +2290,11 @@ def _reject_unsupported_dimension(request: EmbeddingRequest, primary: Route) -> 
     It is refused here — before any provider is called, before the walk begins
     — rather than forwarded against the route's configuration or silently
     dropped, and the refusal names the parameter so a caller learns which one
-    the route does not accept (PRD sections 6.3 and 9.5).
+    the route does not accept.
 
     The primary route establishes whether caller-selectable dimensions are part
     of the model's advertised contract, and no later route can expand it
-    (PRD section 9.5): a fallback that cannot honour the same request is not a
+    A fallback that cannot honour the same request is not a
     candidate, which :func:`_route_can_serve` enforces the other way round.
     """
     if request.dimensions is None or primary.supports_dimensions_param:
@@ -2316,7 +2308,7 @@ def _reject_unsupported_dimension(request: EmbeddingRequest, primary: Route) -> 
 
 
 def _require_image_provider(provider: TextProvider) -> None:
-    """Refuse an image invocation the bound provider cannot serve (PRD 9.5).
+    """Refuse an image invocation the bound provider cannot serve.
 
     Image generation is a capability of its own, not a mode of
     :class:`~model_gateway.providers.base.TextProvider`: it is a different
@@ -2325,7 +2317,7 @@ def _require_image_provider(provider: TextProvider) -> None:
     and left to improvise. There is no honest degradation: a text provider
     asked for an image could only invent one, and either would tell the caller
     its request was served when it was not. The refusal names ``generation``
-    so a caller learns which operation is missing (PRD section 9.5).
+    so a caller learns which operation is missing.
     """
     if not isinstance(provider, ImageProvider):
         raise CapabilityError(
@@ -2346,7 +2338,7 @@ def _normalise_images(
     """Stamp the gateway's own facts onto a provider's image answer.
 
     A provider's image answer is upstream data, never forwarded unchanged
-    (PRD section 9), and the two facts a provider cannot state are the
+    , and the two facts a provider cannot state are the
     gateway's own: which public model was asked for and which upstream model
     answered, and which invocation this answer belongs to.
 
@@ -2354,7 +2346,7 @@ def _normalise_images(
     caller that stated ``n`` asked for exactly that many images, and an
     upstream that returned another number has not answered the request, so
     the invocation is refused rather than answered with the wrong number of
-    images (PRD section 4.6). A caller who stated no count is checked against
+    images. A caller who stated no count is checked against
     none — the upstream's own default applies, and the gateway cannot know
     what number that was, so an unstated count is never a refusal.
 
@@ -2363,8 +2355,7 @@ def _normalise_images(
     request: the request was valid and the route was reachable, and the answer
     it produced was wrong. That is precisely the shape of failure another
     eligible route can fix, so the invocation walks to the next route while
-    the route that just answered wrongly is not worth retrying immediately
-    (PRD section 11.2).
+    the route that just answered wrongly is not worth retrying immediately.
     """
     _check_image_count(request, response)
     return replace(
@@ -2381,7 +2372,7 @@ def _check_image_count(request: ImageRequest, response: ImageResponse) -> None:
     ``ImageRequest.n`` is how many images the caller wants, and it is
     forwarded to the upstream as stated; an answer carrying another number is
     an answer to a different request, and returning it would tell the caller
-    it received ``n`` images when it did not (PRD section 4.6). An unstated
+    it received ``n`` images when it did not. An unstated
     count means the upstream's own default applies, and no expected number
     exists to check against.
     """
@@ -2406,14 +2397,14 @@ def _normalise_embeddings(
     """Order the vectors against the caller's input and check their shape.
 
     A provider's embeddings answer is upstream data, never forwarded unchanged
-    (PRD section 9), and the two facts a provider cannot state are the gateway's
+    , and the two facts a provider cannot state are the gateway's
     own: which public model was asked for and which upstream model answered, and
     which invocation this answer belongs to.
 
     The vectors are placed at the positions the upstream reported, so ``data`` is
     in the caller's input order whatever order the upstream used, and each
-    vector's own ``index`` is the position it was placed at. PRD section 4.7
-    requires the gateway to preserve input ordering, and preserving it means more
+    vector's own ``index`` is the position it was placed at. The gateway
+    preserves input ordering, and preserving it means more
     than passing an array through: the position of a vector has to be the
     position of the text it embeds, or the caller matches a vector to the wrong
     document and cannot tell that it did. An answer whose positions are not
@@ -2432,18 +2423,18 @@ def _normalise_embeddings(
     dimension to such a route is refused before it reaches this check
     (:func:`_reject_unsupported_dimension`). ``None`` means nothing is declared
     and nothing is checked: an unconfigured dimensionality is not a
-    dimensionality of zero (PRD sections 4.3 and 6.3). A vector of the wrong
+    dimensionality of zero. A vector of the wrong
     length is refused rather than returned, because a wrong-shaped vector is a
     wrong answer that a consumer of fixed-width vectors would accept and then
-    misuse (PRD section 4.7).
+    misuse.
 
     Both refusals are :class:`~model_gateway.errors.MalformedResponseError`.
     They are properties of what *this upstream* returned, not of the caller's
     request: the request was valid and the route was reachable, and the answer
     it produced was structurally wrong. That is precisely the shape of failure
     another eligible route can fix, so the invocation walks to the next route
-    while the route that just answered wrongly is not worth retrying immediately
-    (PRD section 11.2). A gateway defect, by contrast, is
+    while the route that just answered wrongly is not worth retrying
+    immediately. A gateway defect, by contrast, is
     :class:`~model_gateway.errors.InternalError` and terminates the invocation
     where it happened.
     """
