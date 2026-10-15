@@ -1,11 +1,11 @@
-# The gateway's container image (PRD section 19).
+# The gateway's container image.
 #
 # One image, one process, two listeners: HTTP on 8080 and gRPC on 9090, both
-# started and stopped by the application, which is the process's unit of lifetime
-# (PRD section 18). Nothing about a provider is baked in — every setting arrives as
-# an environment variable and the process refuses to start on a configuration it
+# started and stopped by the application, which is the process's unit of lifetime.
+# Nothing about a provider is baked in — every setting arrives as an
+# environment variable and the process refuses to start on a configuration it
 # cannot serve — so one image runs against any provider by changing its
-# environment alone (PRD section 23).
+# environment alone.
 #
 # Both stages use the same base image, and that is load-bearing rather than tidy:
 # a virtual environment records the interpreter it was built for, so copying it
@@ -50,7 +50,7 @@ LABEL org.opencontainers.image.title="model-gateway" \
       org.opencontainers.image.description="Vendor-neutral AI model gateway" \
       org.opencontainers.image.source="https://github.com/apollo-chora/model-gateway"
 
-# The two ports the deployment must publish (PRD section 19). These are the
+# The two ports the deployment must publish. These are the
 # defaults: the ports are CHORA_HTTP_PORT and CHORA_GRPC_PORT, so a deployment that
 # moves them publishes those instead.
 EXPOSE 8080 9090

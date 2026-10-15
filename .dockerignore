@@ -1,4 +1,4 @@
-# What the image build must not carry (PRD section 19).
+# What the image build must not carry.
 #
 # The build copies only `pyproject.toml`, `uv.lock` and `src`, so none of this
 # would reach the image — but it would all reach the builder, and two entries are
