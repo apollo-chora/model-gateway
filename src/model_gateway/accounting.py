@@ -14,7 +14,10 @@ copies both. Rendering an unreported count as zero — which the HTTP and gRPC u
 shapes must do, because they type their counters as integers — would turn an
 unknown quantity into an asserted one, and a caller reading a usage object could
 not tell a provider that reported no tokens from one that reported none at all.
-The wire layers make that trade-off and state it; the record does not.
+The wire layers make that trade-off and state it; the record does not. A count the
+provider never reported is not priced: `estimated_cost` is an estimate of *known*
+usage, and `estimated_tokens` preserves the estimate rather than letting it vanish
+behind zeros a caller cannot distinguish from a real measurement.
 
 **Cost comes from configured pricing, never from a vendor name.** A route names an
 upstream and a dialect, but what a million tokens costs is the operator's
@@ -42,6 +45,8 @@ import structlog
 from model_gateway.config.routes import Operation, Route
 from model_gateway.config.settings import ConfigurationError
 from model_gateway.domain import InvocationRequest, InvocationResponse, Usage
+from model_gateway.domain.embeddings import EmbeddingRequest, EmbeddingResponse
+from model_gateway.domain.images import ImageRequest, ImageResponse
 from model_gateway.domain.serialization import as_int
 
 logger = structlog.get_logger(__name__)
@@ -164,9 +169,20 @@ class UsageRecord:
     the authenticated credential. It is ``""`` when authentication was disabled,
     which is the shared anonymous namespace.
 
-    ``capabilities`` are the primary route's advertised capabilities and
+    ``capabilities`` are the serving route's advertised capabilities and
     ``operation`` the route's operation, so a record can be attributed to a feature
-    of the route rather than only to a model.
+    of the route rather than only to a model. They are read from the route that
+    actually served the invocation, never from the plan's primary: a fallback
+    answer recorded against the primary would credit a route that never produced it
+    and attribute the answer to capabilities the answering route may not have.
+
+    ``route_model_id`` is the serving route's own model ID and ``upstream_model``
+    the model the answer reports having come from. They coincide today, because the
+    gateway sends the route's model ID upstream and stamps the answer with it, but
+    they are separate facts — the route is the deployment's configured entry, the
+    upstream model is what answered — and §13 asks for both. Keeping them apart
+    means a route that later names its upstream differently does not silently
+    change what either field means.
     """
 
     invocation_id: str
@@ -174,6 +190,7 @@ class UsageRecord:
     namespace: str
     tenant: str | None
     public_model: str
+    route_model_id: str
     operation: Operation
     capabilities: frozenset[str]
     upstream_model: str
@@ -291,18 +308,34 @@ class AccountingRecorder:
 
     def record(
         self,
-        request: InvocationRequest,
-        response: InvocationResponse,
+        request: InvocationRequest | EmbeddingRequest | ImageRequest,
+        response: InvocationResponse | EmbeddingResponse | ImageResponse,
         route: Route,
         *,
         namespace: str,
         latency_ms: float,
-    ) -> None:
-        """Record one completed invocation.
+        attempts: int,
+        fallback_used: bool,
+    ) -> UsageRecord:
+        """Record one completed invocation, whatever operation produced it.
 
-        ``route`` is the route the invocation resolved to, which is where the
-        operation and the advertised capabilities come from — the request carries a
-        public model ID, not a route.
+        ``route`` is the route that *served* the invocation, which is where the
+        operation and the advertised capabilities come from — the request carries
+        a public model ID, not a route, and the route that answered may be a
+        fallback rather than the primary one.
+
+        ``attempts`` and ``fallback_used`` are supplied by the caller rather than
+        read off ``response``, because only the text answer carries them: the
+        canonical embeddings and image answers have no field for either (PRD
+        section 5.2), while the record §13 asks for does. They come from the same
+        walk state the text response is stamped from, so the two agree wherever
+        both exist.
+
+        ``tenant`` is the tenant the request stated, and only the text request can
+        state one: the canonical embeddings and image requests carry no tenant
+        field, because the tenant an invocation acts under is the credential's
+        (PRD section 5.1). It is therefore ``None`` for those operations rather
+        than borrowed from somewhere it was never stated.
         """
         usage = response.usage
         cost, currency = (
@@ -314,8 +347,9 @@ class AccountingRecorder:
             invocation_id=response.invocation_id or "",
             timestamp=datetime.now(UTC),
             namespace=namespace,
-            tenant=request.tenant_id,
+            tenant=request.tenant_id if isinstance(request, InvocationRequest) else None,
             public_model=request.model,
+            route_model_id=route.model_id,
             operation=route.operation,
             capabilities=frozenset(capability.value for capability in route.capabilities),
             upstream_model=response.upstream_model,
@@ -325,8 +359,8 @@ class AccountingRecorder:
             cached_tokens=usage.cached_tokens,
             estimated_tokens=frozenset(usage.estimated_fields),
             latency_ms=latency_ms,
-            attempts=response.attempt_count,
-            fallback_used=response.fallback_used,
+            attempts=attempts,
+            fallback_used=fallback_used,
             error_reason=None,
             estimated_cost=cost,
             cost_currency=currency,
