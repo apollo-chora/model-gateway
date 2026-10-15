@@ -145,6 +145,7 @@ capability is refused at startup by the application factory.
 """
 
 import asyncio
+import functools
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -183,6 +184,7 @@ from model_gateway.errors import (
     DeadlineExceededError,
     GatewayError,
     MalformedResponseError,
+    ResourceExhaustedError,
     normalise_exception,
 )
 from model_gateway.idempotency import (
@@ -192,6 +194,7 @@ from model_gateway.idempotency import (
     settle,
 )
 from model_gateway.limits import RateLimiter, TenantConcurrencyLimiter
+from model_gateway.metrics import Metrics
 from model_gateway.providers.base import (
     AttemptContext,
     EmbeddingProvider,
@@ -396,6 +399,53 @@ class _StreamFacts:
     error_reason: str | None = None
 
 
+def _counted_invocation(method):
+    """Count one invocation's arrival, its duration and how it ended.
+
+    A decorator rather than a wrapper written into each of the four operations,
+    because the four differ in what they serve and the counting is identical for
+    all of them. The scope is the whole operation, so a refusal from a gateway
+    limit is counted like any other outcome — it is an invocation the gateway
+    declined to serve, which is what the error count is for.
+
+    Defined before the class because a decorator is looked up when the class body
+    is executed, not when the method is called.
+    """
+
+    @functools.wraps(method)
+    async def counted(self, request, **kwargs):
+        async with self._counted():
+            return await method(self, request, **kwargs)
+
+    return counted
+
+
+def _counted_stream(method):
+    """The streaming counterpart of :func:`_counted_invocation`.
+
+    The scope is the stream's whole life rather than the call that produced the
+    generator. An async generator does nothing until it is iterated, so a
+    coroutine-shaped decorator would count a request that had not begun and finish
+    counting before it had.
+    """
+
+    @functools.wraps(method)
+    async def counted(self, request, **kwargs):
+        async with self._counted():
+            inner = method(self, request, **kwargs)
+            try:
+                async for event in inner:
+                    yield event
+            finally:
+                # The inner generator is closed explicitly rather than left to the
+                # event loop's finalization: it is what records the stream and
+                # releases its tenant slot, and a consumer that stops early must
+                # have that happen now rather than whenever the loop gets to it.
+                await inner.aclose()
+
+    return counted
+
+
 class InferenceService:
     """Policy for one inference invocation: resolve, select, call, normalise.
 
@@ -424,6 +474,7 @@ class InferenceService:
         accounting_enabled: bool = True,
         rate_limiter: RateLimiter | None = None,
         tenant_limiter: TenantConcurrencyLimiter | None = None,
+        metrics: Metrics | None = None,
     ) -> None:
         """Wire the service to the registry, the provider and the reliability policy.
 
@@ -506,6 +557,12 @@ class InferenceService:
         the concurrency bound is per *tenant*, because it exists to share the
         gateway's upstream pool fairly between tenants and a single global bound
         cannot do that without knowing who is asking.
+
+        ``metrics`` is the registry the invocation's own facts are counted into, or
+        ``None`` for a deployment that publishes none. The counts are taken at this
+        boundary rather than in the transports because both transports reach the
+        same operations here: an HTTP request and a gRPC call for one invocation
+        would otherwise be counted twice, or counted differently by each.
         """
         if attempt_timeout is not None and not _is_usable_budget(attempt_timeout):
             raise ValueError(
@@ -529,6 +586,77 @@ class InferenceService:
         self._accounting_enabled = accounting_enabled
         self._rate_limiter = rate_limiter
         self._tenant_limiter = tenant_limiter
+        self._metrics = metrics
+
+    @asynccontextmanager
+    async def _counted(self) -> AsyncIterator[None]:
+        """Count one invocation's arrival, its duration and how it ended.
+
+        Taken around the whole operation so the duration is the invocation's, not
+        one attempt's, and so a refusal from a gateway limit is counted as an error
+        like any other — it is an invocation the gateway declined to serve, which is
+        exactly what the error count is for. A deployment that publishes no metrics
+        pays nothing: the wrapper is one branch and no clock reading.
+
+        The duration is observed on every exit, including a cancellation, because
+        an invocation that was cut short still occupied the gateway for as long as
+        it ran and the active count would drift if it were not released.
+        """
+        metrics = self._metrics
+        if metrics is None:
+            yield
+            return
+        started = time.monotonic()
+        metrics.requests_total.inc()
+        metrics.active_requests.inc()
+        try:
+            yield
+        except GatewayError:
+            metrics.errors_total.inc()
+            raise
+        finally:
+            metrics.active_requests.dec()
+            metrics.request_duration_seconds.observe(time.monotonic() - started)
+
+    def _count_limit_rejection(self) -> None:
+        """Count a request the gateway's own limit refused.
+
+        Called where the refusal is raised rather than where the error is caught,
+        because this is the only place that can tell the gateway's own refusal from
+        an upstream's: both arrive as a resource-exhausted error, and only one of
+        them is the gateway declining rather than the provider reporting.
+        """
+        if self._metrics is not None:
+            self._metrics.rate_limit_rejections_total.inc()
+
+    def _count_retry(self) -> None:
+        """Count one attempt made after a retryable failure on the same route."""
+        if self._metrics is not None:
+            self._metrics.retries_total.inc()
+
+    def _count_answer(self, outcome: InvocationOutcome, state: InvocationState) -> None:
+        """Count what one completed answer contributed: its tokens and its fallback.
+
+        Called before the accounting branch rather than inside it, because a
+        deployment that records no usage still wants the counts: the two settings
+        answer different questions, and turning the record off does not turn the
+        metrics off.
+
+        A count the provider never reported is not added. The metrics are sums of
+        what the gateway knows, and adding a zero for an unknown count would make
+        the total claim that nothing was spent where the truth is that nothing was
+        reported — the same distinction the record preserves (PRD section 13).
+        """
+        metrics = self._metrics
+        if metrics is None:
+            return
+        if state.fallback_used:
+            metrics.fallbacks_total.inc()
+        usage = outcome.usage
+        if usage.input_tokens is not None:
+            metrics.tokens_input_total.inc(usage.input_tokens)
+        if usage.output_tokens is not None:
+            metrics.tokens_output_total.inc(usage.output_tokens)
 
     def _admit(self, namespace: str, tenant: str | None) -> None:
         """Take the admission decisions that can be answered without waiting.
@@ -542,8 +670,13 @@ class InferenceService:
         identifier the rest of the gateway already keys policy on, and never on
         anything a request carries (PRD sections 7 and 14.2).
         """
-        if self._rate_limiter is not None:
+        if self._rate_limiter is None:
+            return
+        try:
             self._rate_limiter.check(namespace)
+        except ResourceExhaustedError:
+            self._count_limit_rejection()
+            raise
 
     def _tenant_slot(self, namespace: str, tenant: str | None, deadline: Deadline):
         """The per-tenant concurrency slot an invocation holds for its whole duration.
@@ -567,8 +700,29 @@ class InferenceService:
         """
         if self._tenant_limiter is None:
             return _unbounded_slot()
-        return self._tenant_limiter.slot(tenant or namespace, deadline.remaining())
+        return self._counted_slot(tenant or namespace, deadline.remaining())
 
+    @asynccontextmanager
+    async def _counted_slot(self, principal: str, timeout: float | None) -> AsyncIterator[None]:
+        """Take a tenant slot, counting a refusal as the gateway's own.
+
+        The counting is here rather than at the entry point because this is the
+        only place that can tell the gateway's concurrency refusal from an
+        upstream's rate limit: both arrive as a resource-exhausted error. Whether
+        the slot was ever entered is what separates them — a refusal from the
+        limiter is raised before the body runs, so the flag is still false.
+        """
+        entered = False
+        try:
+            async with self._tenant_limiter.slot(principal, timeout):  # type: ignore[union-attr]
+                entered = True
+                yield
+        except ResourceExhaustedError:
+            if not entered:
+                self._count_limit_rejection()
+            raise
+
+    @_counted_invocation
     async def invoke(
         self,
         request: InvocationRequest,
@@ -627,9 +781,9 @@ class InferenceService:
         it is never recorded and reports ``NOT_APPLICABLE``.
         """
         routes = self._registry.routes_for(request.model)
-        # One deadline is anchored here, before admission, so the wait for a tenant
-        # slot draws from the same budget the walk then spends rather than from a
-        # full timeout of its own followed by a fresh one.
+        # One deadline is anchored here, before admission, so the wait for a
+        # tenant slot draws from the same budget the walk then spends rather
+        # than from a full timeout of its own followed by a fresh one.
         deadline = Deadline.after(self._attempt_timeout)
         started = time.monotonic()
         self._admit(namespace or "", tenant)
@@ -732,6 +886,7 @@ class InferenceService:
         would turn accounting into a correctness problem. The failure is logged
         for the operator instead.
         """
+        self._count_answer(outcome, state)
         if self._accounting is None or not self._accounting_enabled:
             return
         try:
@@ -806,6 +961,7 @@ class InferenceService:
             started,
         )
 
+    @_counted_stream
     async def invoke_stream(
         self,
         request: InvocationRequest,
@@ -923,6 +1079,7 @@ class InferenceService:
             finally:
                 self._record_stream(request, facts, namespace or "", started)
 
+    @_counted_invocation
     async def embed(
         self,
         request: EmbeddingRequest,
@@ -1061,6 +1218,7 @@ class InferenceService:
             self._record(request, _outcome_of(result), route, state, namespace or "", started)
             return result
 
+    @_counted_invocation
     async def generate(
         self,
         request: ImageRequest,
@@ -1283,6 +1441,7 @@ class InferenceService:
                         and is_retryable(error, remaining=remaining)
                         and await _back_off(retry + 1, self._retry_backoff_ms, deadline)
                     ):
+                        self._count_retry()
                         continue
                     if not is_fallback_eligible(error, remaining=remaining):
                         raise
@@ -1445,11 +1604,23 @@ class InferenceService:
             budget = deadline.budget_for(self._attempt_timeout)
             if _budget_is_spent(budget):
                 raise _deadline_exceeded(model, state)
-            yield AttemptContext(
+            context = AttemptContext(
                 invocation_id=invocation_id,
                 attempt_number=state.attempt_count,
                 timeout=budget,
             )
+            # Counted here rather than in the provider, because this is the one
+            # seam every non-streaming attempt passes through and a provider
+            # cannot be trusted to report how many times it was called.
+            if self._metrics is None:
+                yield context
+                return
+            self._metrics.upstream_requests_total.inc()
+            started = time.monotonic()
+            try:
+                yield context
+            finally:
+                self._metrics.upstream_duration_seconds.observe(time.monotonic() - started)
 
     async def _invoke_stream_on(
         self,
@@ -1578,6 +1749,7 @@ class InferenceService:
                         and is_retryable(error, remaining=remaining)
                         and await _back_off(retry + 1, self._retry_backoff_ms, deadline)
                     ):
+                        self._count_retry()
                         continue
                     if not is_fallback_eligible(error, remaining=remaining):
                         raise
@@ -1622,11 +1794,21 @@ class InferenceService:
                 timeout=budget,
             )
             upstream = self._provider.stream(route, request, context)
+            # The streaming counterpart of the counting in _attempt_context: one
+            # upstream request per gateway attempt, timed over the whole stream
+            # rather than over its first event.
+            if self._metrics is not None:
+                self._metrics.upstream_requests_total.inc()
+            started = time.monotonic()
             try:
                 async for event in upstream:
                     yield event
             finally:
                 await upstream.aclose()
+                if self._metrics is not None:
+                    self._metrics.upstream_duration_seconds.observe(
+                        time.monotonic() - started
+                    )
 
 
 @asynccontextmanager
