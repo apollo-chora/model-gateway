@@ -1,9 +1,9 @@
-"""Canonical image types and the image model ID (PRD sections 4.6, 6.2, 9.7, 10 and 13).
+"""Canonical image types and the image model ID.
 
 Two contracts meet here. The first is the canonical representation: an image
 request and response round-trip through ``to_dict`` and ``from_dict`` with every
 field emitted, and every state the representation cannot hold is refused rather
-than dropped (PRD sections 4.6 and 9.1). The sharpest of those refusals is the
+than dropped. The sharpest of those refusals is the
 image payload: a result entry carrying both a base64 payload and a URL, or
 neither, is refused at construction and at parse, because a caller reads
 whichever one is set and neither of those states defines that reading. The URL
@@ -14,8 +14,7 @@ The second is the public model ID ``image-default``, which resolves onto the
 configured image routes exactly as ``text-default`` and ``embedding-default``
 resolve onto theirs, and appears in the model listing only when an image block is
 configured — carrying the primary route's declared capabilities, so a caller can
-tell a model that generates from one that generates and edits (PRD sections 4.3,
-6.2 and 10).
+tell a model that generates from one that generates and edits.
 
 Nothing here reaches the network: every endpoint is an IP literal and every
 request is built by hand.
@@ -525,7 +524,7 @@ def test_image_default_advertises_the_capability_its_primary_route_declares():
 
 
 def test_image_default_advertises_editing_only_when_it_is_declared():
-    """A caller reads a model's contract off the listing (PRD sections 4.3 and 6.2)."""
+    """A caller reads a model's contract off the listing."""
     declared = registry(image_block(IMAGE_GEN_CAPABILITIES="generation,editing"))
     undeclared = registry(image_block(IMAGE_GEN_CAPABILITIES="generation"))
 

@@ -1,5 +1,4 @@
-"""Tests for the image endpoints: ``POST /v1/images/generations`` (PRD
-sections 4.6, 6.2, 9.5, 10 and 14.1).
+"""Tests for the image endpoints: ``POST /v1/images/generations``.
 
 The handlers are exercised through a real BlackSheep application, so what is
 tested is the route, the wire translation and the error mapping together.
@@ -163,7 +162,7 @@ async def post_generations(client, body: object):
 
 
 class TestTheHappyPath:
-    """The documented request and the documented response (PRD section 4.6)."""
+    """The documented request and the documented response."""
 
     async def test_a_generation_request_is_served(self, client, provider) -> None:
         response = await post_generations(client, payload())
@@ -266,7 +265,7 @@ class TestTheHappyPath:
 
 
 class TestTheRequestBoundary:
-    """A parameter the gateway does not understand is refused, never ignored (PRD 4)."""
+    """A parameter the gateway does not understand is refused, never ignored."""
 
     async def test_an_unknown_parameter_is_refused(self, client) -> None:
         response = await post_generations(client, payload(truncate="END"))
@@ -517,7 +516,7 @@ class TestTheMalformedAnswer:
 
 
 class TestTheFactory:
-    """The routes the server actually runs are registered (PRD sections 4.6 and 19)."""
+    """The routes the server actually runs are registered."""
 
     async def test_the_factory_registers_the_generations_endpoint(self) -> None:
         """``create_app`` answers ``POST /v1/images/generations``, not just a hand-built app.
@@ -587,7 +586,7 @@ class TestTheFactory:
 
 class TestTheStartupCheck:
     """What refuses the start: an unverified dialect, an advertised unimplemented
-    capability (PRD 6.2, 14.1, 4.6)."""
+    capability."""
 
     def test_an_image_route_with_an_unverified_dialect_refuses_the_start(self) -> None:
         """The binding cannot run the dialect, so the deployment must not start.
@@ -595,10 +594,9 @@ class TestTheStartupCheck:
         The text and embeddings operations are checked the same way; the image
         operation was excluded only because it had no binding, and a binding
         now exists. ``azure`` is refused because its path discards the injected
-        client outright (PRD section 14.1). The refusal happens at startup
-        rather than on the first caller, because a deployment whose
-        configuration the transport controls cannot survive should not reach the
-        point of serving requests (PRD section 14.1).
+        client outright. The refusal happens at startup rather than on the first
+        caller, because a deployment whose configuration the transport controls
+        cannot survive should not reach the point of serving requests.
         """
         registry = ModelRegistry(
             (
@@ -630,8 +628,7 @@ class TestTheStartupCheck:
         so no route can be handed an edit however its capabilities read. A
         deployment can still declare the capability publicly, so the gateway
         refuses to start with it declared, and the message says editing is not
-        implemented rather than that this route cannot serve it (PRD sections
-        4.6, 6.2 and 9.5).
+        implemented rather than that this route cannot serve it.
         """
         registry = make_registry(editing=True)
 

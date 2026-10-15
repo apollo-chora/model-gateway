@@ -1,5 +1,4 @@
-"""The inference service's image path: the same policy, a different operation
-(PRD 4.6, 6.2, 9.5, 10, 11.2 and 15).
+"""The inference service's image path: the same policy, a different operation.
 
 The image entry point is the non-streaming text entry point applied to a
 different operation, so these tests are about the two things that differ and
@@ -206,7 +205,7 @@ class TestTheModelAndTheCapability:
         The primary declares nothing; a fallback that declares ``generation``
         does not make the model advertise it, and the request is refused
         naming the missing capability rather than served by the route that
-        happens to have it (PRD section 9.5).
+        happens to have it.
         """
         routes = (
             route(capabilities=frozenset()),
@@ -555,7 +554,7 @@ class _TickingClock:
 
 
 class TestConcurrency:
-    """The wait for a slot is bounded by the invocation deadline (PRD 15)."""
+    """The wait for a slot is bounded by the invocation deadline."""
 
     async def test_the_limiter_is_handed_what_is_left_of_the_deadline(self) -> None:
         limiter = _RecordingLimiter()
