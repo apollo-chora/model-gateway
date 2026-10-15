@@ -147,7 +147,7 @@ def _canonical_member(table: Mapping[int, Enum], where: str, value: int) -> Enum
 # Canonical JSON
 # --------------------------------------------------------------------------- #
 #
-# Arbitrary canonical JSON crosses the boundary as its JSON text, and the
+# Arbitrary canonical-domain JSON crosses the boundary as its JSON text, and the
 # helpers below are the whole of how. A well-known protobuf type was tried for
 # each of these fields and rejected: ``Struct`` and ``Value`` represent every
 # number as a double, so a JSON integer arrives as a float and one beyond 2^53 is
