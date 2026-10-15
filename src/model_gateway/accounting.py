@@ -96,6 +96,9 @@ that distinction for the caller, and a record that collapsed the two would repor
 a failure the stream never declared.
 """
 
+_STATUSES = frozenset({STATUS_COMPLETED, STATUS_FAILED, STATUS_INCOMPLETE})
+"""Every status a record may carry; a value outside this set is a programming defect."""
+
 _PRICED_CATEGORIES = frozenset({"input", "output", "cached"})
 """The token categories a price entry may quote.
 
@@ -544,6 +547,33 @@ class InvocationOutcome:
     usage: Usage
     status: str = STATUS_COMPLETED
     error_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        """Refuse a status and a reason that cannot both be true.
+
+        The vocabulary is only meaningful if the two fields agree, and a value
+        object that let a caller state ``failed`` with no reason, or a reason
+        beside a status that declared no failure, would put a record in front of
+        an operator that says less than it appears to. The service produces
+        consistent pairs, but the outcome is a public value of this module and the
+        invariant belongs to it rather than to the call sites that happen to
+        honour it.
+        """
+        if self.status not in _STATUSES:
+            raise ValueError(
+                f"an invocation outcome's status must be one of "
+                f"{', '.join(sorted(_STATUSES))}, got {self.status!r}"
+            )
+        if self.status == STATUS_FAILED and not self.error_reason:
+            raise ValueError(
+                "a failed outcome must carry the gateway reason it failed under; a failure "
+                "with no reason is a status the record cannot stand behind"
+            )
+        if self.status != STATUS_FAILED and self.error_reason is not None:
+            raise ValueError(
+                f"only a failed outcome carries an error reason; a {self.status} outcome "
+                f"declared no failure, so it cannot carry {self.error_reason!r}"
+            )
 
 
 class AccountingRecorder:

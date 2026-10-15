@@ -10,6 +10,7 @@ than swallowed or propagated, and that the projection of a record covers every
 field the record declares.
 """
 
+import asyncio
 import dataclasses
 from datetime import UTC
 
@@ -39,6 +40,7 @@ from model_gateway.config.settings import ConfigurationError
 from model_gateway.domain import FinishReason, InvocationResponse, TextPart, Usage
 from model_gateway.domain.streaming import StreamEvent, StreamEventKind
 from model_gateway.http.auth import create_auth_middleware
+from model_gateway.http.chat import register_chat_routes
 from model_gateway.http.embeddings import register_embeddings_routes
 from model_gateway.http.errors import register_error_handlers
 from model_gateway.inference import InferenceService
@@ -1118,7 +1120,10 @@ class _ScriptedStreamProvider:
 
     An item is a :class:`StreamEvent`, which is yielded, or an exception, which is
     raised at that point — so a script can yield some events and then fail
-    mid-stream, or produce nothing at all.
+    mid-stream, or produce nothing at all. Each event is stamped with the
+    invocation identifier the attempt was handed, which is what a real provider
+    does: the gateway's identifier is the one the attempt context carries, and a
+    scripted event does not get to name its own invocation.
     """
 
     def __init__(self, *scripts):
@@ -1131,7 +1136,7 @@ class _ScriptedStreamProvider:
         for item in script:
             if isinstance(item, Exception):
                 raise item
-            yield item
+            yield dataclasses.replace(item, invocation_id=context.invocation_id)
 
 
 def _streaming_service(provider, sink, **overrides) -> InferenceService:
@@ -1358,3 +1363,204 @@ async def test_two_credentials_record_under_two_namespaces_through_the_http_surf
     # The canonical embeddings request states no tenant, so neither record does —
     # the principal is carried by the namespace and not invented as a tenant.
     assert [record.tenant for record in sink.records] == [None, None]
+
+
+# --------------------------------------------------------------------------- #
+# The accounting attempt survives the teardown
+# --------------------------------------------------------------------------- #
+
+
+class _BlockingCloseProvider:
+    """A streaming provider that parks while it is being closed.
+
+    It is how a test gets a cancellation to land inside the teardown: the provider
+    yields one event and then blocks in its own ``finally``, so closing the
+    service's stream — and every generator between it and this one — is suspended
+    when the consumer is cancelled.
+    """
+
+    def __init__(self, closing, release):
+        self._closing = closing
+        self._release = release
+
+    async def stream(self, route, request, context):
+        try:
+            yield dataclasses.replace(
+                _event(StreamEventKind.CONTENT, 0, text="hel"),
+                invocation_id=context.invocation_id,
+            )
+        finally:
+            self._closing.set()
+            await self._release.wait()
+
+
+async def test_a_stream_cancelled_while_it_is_being_closed_is_still_recorded():
+    """A caller cancelled mid-teardown must not take the record with it.
+
+    The stream is closed before the record is written and that close is awaited,
+    so a cancellation delivered while it is in flight is exactly the case that
+    would otherwise skip the accounting attempt: the gateway would have called the
+    provider and recorded nothing. The record is written anyway, the status says
+    the stream stopped without a terminal event, and the cancellation still
+    propagates — nothing here swallows it.
+    """
+    sink = MemoryAccountingSink()
+    closing = asyncio.Event()
+    release = asyncio.Event()
+    service = _streaming_service(_BlockingCloseProvider(closing, release), sink)
+
+    async def consume():
+        # The close is awaited inside this task on purpose: a consumer that only
+        # breaks out of the loop leaves the generator to be finalised by the event
+        # loop in another task, and the cancellation would then have nothing to
+        # interrupt.
+        stream = service.invoke_stream(
+            _request(invocation_id="inv-stream-1"), namespace="cred-digest"
+        )
+        await stream.__anext__()
+        await stream.aclose()
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(closing.wait(), timeout=5.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5.0)
+    release.set()
+
+    assert len(sink.records) == 1
+    assert sink.records[0].status == STATUS_INCOMPLETE
+    assert sink.records[0].namespace == "cred-digest"
+
+
+async def test_a_streamed_invocation_without_an_identifier_is_given_one():
+    """The gateway mints the identifier, so the events and the record name one invocation."""
+    sink = MemoryAccountingSink()
+    service = _streaming_service(
+        _ScriptedStreamProvider(
+            [_event(StreamEventKind.FINISH, 0, finish_reason=FinishReason.STOP)]
+        ),
+        sink,
+    )
+
+    events = await _drain(service.invoke_stream(_request(), namespace="cred-digest"))
+
+    record = sink.records[0]
+    assert record.invocation_id
+    assert record.invocation_id == events[0].invocation_id
+
+
+async def test_a_failed_stream_records_the_reason_its_terminal_event_carries():
+    """One normalised failure, so the event and the record cannot disagree about why."""
+    from model_gateway.errors import UnavailableError
+
+    sink = MemoryAccountingSink()
+    service = _streaming_service(
+        _ScriptedStreamProvider(
+            [
+                _event(StreamEventKind.CONTENT, 0, text="hel"),
+                UnavailableError("the upstream went away"),
+            ]
+        ),
+        sink,
+    )
+
+    events = []
+    with pytest.raises(UnavailableError):
+        async for event in service.invoke_stream(
+            _request(invocation_id="inv-stream-1"), namespace="cred-digest"
+        ):
+            events.append(event)
+
+    terminal = events[-1]
+    record = sink.records[0]
+    assert terminal.kind is StreamEventKind.ERROR
+    assert record.status == STATUS_FAILED
+    assert record.error_reason == terminal.error_reason
+
+
+def test_an_outcome_refuses_a_status_and_a_reason_that_cannot_both_be_true():
+    """The vocabulary is only meaningful if the two fields agree."""
+    with pytest.raises(ValueError, match="must be one of"):
+        outcome(status="finished")
+    with pytest.raises(ValueError, match="must carry the gateway reason"):
+        outcome(status=STATUS_FAILED)
+    with pytest.raises(ValueError, match="only a failed outcome"):
+        outcome(status=STATUS_COMPLETED, error_reason="provider_unavailable")
+    with pytest.raises(ValueError, match="only a failed outcome"):
+        outcome(status=STATUS_INCOMPLETE, error_reason="provider_unavailable")
+
+
+def _chat_app(sink, provider) -> Application:
+    """An application serving only the chat endpoint, with authentication on.
+
+    The streaming counterpart of :func:`_embeddings_app`: the embeddings test
+    proves the identity reaches a record through the non-streaming surface, and
+    this proves it through the streaming one, which is a different handler and
+    therefore a different wiring to regress.
+    """
+    settings = Settings.from_env(
+        {
+            "GATEWAY_AUTH_ENABLED": "true",
+            "GATEWAY_API_KEYS": f"{_KEY_A}:tenant-a,{_KEY_B}:tenant-b",
+        }
+    )
+    service = InferenceService(
+        ModelRegistry((route(),)),
+        provider,
+        accounting=AccountingRecorder(sink, PricingTable()),
+    )
+    app = Application(router=Router())
+    register_error_handlers(app)
+    register_chat_routes(app.router, service)
+    app.middlewares.append(
+        create_auth_middleware(
+            ApiKeySet.from_settings(settings),
+            auth_enabled=True,
+            allow_anonymous_health=True,
+        )
+    )
+    return app
+
+
+async def test_two_credentials_record_under_two_namespaces_through_the_streaming_surface():
+    """The streaming handler forwards the identity too.
+
+    A test of the non-streaming surface would keep passing if the streaming branch
+    stopped forwarding the principal, because the two are different handlers.
+    """
+    sink = MemoryAccountingSink()
+    app = _chat_app(
+        sink,
+        _ScriptedStreamProvider(
+            [_event(StreamEventKind.FINISH, 0, finish_reason=FinishReason.STOP)]
+        ),
+    )
+
+    await app.start()
+    try:
+        client = TestClient(app)
+        for key in (_KEY_A, _KEY_B):
+            response = await client.post(
+                "/v1/chat/completions",
+                content=JSONContent(
+                    {
+                        "model": "text-default",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "stream": True,
+                    }
+                ),
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            assert response.status == 200
+            assert await response.text()
+
+        assert len(sink.records) == 2
+        namespaces = [record.namespace for record in sink.records]
+        assert all(namespaces)
+        assert namespaces[0] != namespaces[1]
+        assert [record.status for record in sink.records] == [
+            STATUS_COMPLETED,
+            STATUS_COMPLETED,
+        ]
+    finally:
+        await app.stop()
