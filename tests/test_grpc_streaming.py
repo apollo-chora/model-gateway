@@ -1,4 +1,4 @@
-"""The InvokeStream RPC over a real in-process gRPC listener (PRD 5.3, 16).
+"""The InvokeStream RPC over a real in-process gRPC listener.
 
 These tests drive a real gRPC server and a real client rather than a stub of
 either, because the behaviour under test is the transport's own: which chunks a
@@ -296,7 +296,7 @@ async def wait_for(condition: Callable[[], bool], timeout: float = 5.0) -> None:
 
 
 class TestTheAnswerStream:
-    """What a caller reads from a completed stream (PRD 5.3)."""
+    """What a caller reads from a completed stream."""
 
     async def test_a_streamed_answer_arrives_as_fragments_numbered_from_zero(self, serve):
         provider = ScriptedStreamProvider(
@@ -484,7 +484,7 @@ class TestTheAnswerStream:
 
 
 class TestTheEndOfTheStream:
-    """What ends a stream, and what a caller is shown when it does (PRD 16)."""
+    """What ends a stream, and what a caller is shown when it does."""
 
     async def test_a_provider_failure_mid_stream_ends_with_one_error_chunk(self, serve):
         """One failure, reported once: the error chunk, then a clean end.
@@ -567,7 +567,7 @@ class TestTheEndOfTheStream:
         The provider fails before its first event, so the invocation has produced
         nothing a caller could be shown: the call ends with the error's own status
         and no chunk at all, and the reason a caller branches on is the taxonomy's
-        in the aborted payload (PRD section 16).
+        in the aborted payload.
         """
         provider = MockProvider(
             stream=MockStreamSpec(error=UnavailableError("the upstream is down"))
@@ -600,7 +600,7 @@ class TestTheEndOfTheStream:
 
 
 class TestARefusal:
-    """A refusal is an error status and no stream at all (PRD 16)."""
+    """A refusal is an error status and no stream at all."""
 
     async def test_a_claimed_tenant_that_disagrees_is_refused(self, serve):
         provider = ScriptedStreamProvider([content_event("Recursion", 0)])
@@ -662,7 +662,7 @@ class TestARefusal:
         """A request field cannot create a tenant: an anonymous call has none.
 
         Authentication disabled, so the call proceeds anonymously and the claimed
-        tenant is discarded rather than propagated (PRD 5.1).
+        tenant is discarded rather than propagated.
         """
         provider = MockProvider(stream=MockStreamSpec(chunks=("Recursion",)))
         stub = await serve(provider, auth_enabled=False)
@@ -825,7 +825,7 @@ IDEMPOTENCY_KEY = "trace-7"
 
 
 class TestIdempotency:
-    """A keyed request is still served as a stream, never as a replay (PRD 12).
+    """A keyed request is still served as a stream, never as a replay.
 
     Idempotency is a property of the non-streaming invocation: a replayed stream
     would present an answer that was never produced token by token in this call as

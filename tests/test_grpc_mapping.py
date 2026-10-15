@@ -1,4 +1,4 @@
-"""The protobuf↔canonical translation, asserted field by field (PRD section 5).
+"""The protobuf↔canonical translation, asserted field by field.
 
 Every test here drives the mappers in :mod:`model_gateway.grpc.mapping` directly
 with generated protobuf messages, so what is asserted is what crosses the wire:

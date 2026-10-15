@@ -1,4 +1,4 @@
-"""Tests for the ListModels RPC (PRD sections 4.3 and 5).
+"""Tests for the ListModels RPC.
 
 Every test drives the RPC over a real in-process gRPC server rather than calling
 the handler directly, because the transport is part of what they pin: that the

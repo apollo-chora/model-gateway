@@ -1,4 +1,4 @@
-"""The gRPC listener wired into the application the server runs (PRD 5, 18).
+"""The gRPC listener wired into the application the server runs.
 
 The four RPC modules are tested on their own. These tests prove the seams
 between them: that the application the entrypoint builds starts the listener on

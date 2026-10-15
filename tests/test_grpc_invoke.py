@@ -1,4 +1,4 @@
-"""The Invoke RPC, driven the way a caller drives it (PRD sections 5, 5.1, 5.2 and 5.4).
+"""The Invoke RPC, driven the way a caller drives it.
 
 Every test here runs against a real ``grpc.aio`` server on an ephemeral loopback
 port, reached through the generated :class:`ModelGatewayServiceStub`, so what is
@@ -21,8 +21,8 @@ contract carries the same shapes, so the inference service's text path — which
 stamps the gateway's own facts onto the provider's answer and changes nothing
 else — hands all three to the caller. Nothing on this path raises a capability
 error for what an *answer* carries: the capability rules are request-side, and
-they refuse what the caller stated before any provider is called (PRD section
-9.5). The three tests named for those answers pin the behaviour that actually
+they refuse what the caller stated before any provider is called. The three tests
+named for those answers pin the behaviour that actually
 happens, which is the opposite of refusing a provider's own successful answer.
 
 The refusal tests assert the status a caller reads, which is what catches an

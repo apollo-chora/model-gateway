@@ -1,4 +1,4 @@
-"""Tests for the Embed RPC: the embeddings operation over gRPC (PRD sections 4.7, 5.1 and 9.5).
+"""Tests for the Embed RPC: the embeddings operation over gRPC.
 
 The handler is exercised through a real in-process gRPC server and the generated
 stub, so what is tested is the RPC, its wire translation, its authentication and
@@ -358,7 +358,7 @@ async def test_embed_serves_an_anonymous_call_when_authentication_is_disabled():
 
 
 async def test_the_embeddings_request_carries_no_tenant_claim():
-    """PRD section 5.1 has nothing to reconcile on this RPC, and that is pinned here.
+    """There is nothing to reconcile on this RPC, and that is pinned here.
 
     Neither ``EmbedRequest`` nor the canonical embeddings request has a tenant
     field, so no call can claim a tenant and none can be refused with

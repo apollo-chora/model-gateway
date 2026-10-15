@@ -1,4 +1,4 @@
-"""The standard health protocol the listener serves (PRD section 5).
+"""The standard health protocol the listener serves.
 
 The servicer is the ``grpcio-health-checking`` package's own, so these tests do
 not re-test the package's state machine. They test the listener's side of the
