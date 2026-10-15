@@ -234,6 +234,12 @@ _FIELDS: tuple[_Field, ...] = (
         _parse_non_negative_int,
     ),
     _Field(
+        "max_request_body_bytes",
+        "GATEWAY_MAX_REQUEST_BODY_BYTES",
+        "16777216",
+        _parse_positive_int,
+    ),
+    _Field(
         "shutdown_timeout_seconds",
         "GATEWAY_SHUTDOWN_TIMEOUT_SECONDS",
         "30",
@@ -273,6 +279,7 @@ class Settings:
     rate_limit_requests: int
     rate_limit_window_seconds: float
     tenant_max_concurrent_requests: int
+    max_request_body_bytes: int
     shutdown_timeout_seconds: float
 
     usage_tracking_enabled: bool
