@@ -55,6 +55,23 @@ flattened. The rule is about the ordering the shape cannot carry, not about how
 many items there are: an ordinary answer, a tool-call-only answer and the common
 "text then tool calls" answer all remain representable and are returned normally.
 
+**An idempotency key is a request field, and its status a response field.** A
+request may carry ``idempotency_key``: a plain string, optional, mapped onto the
+invocation's own key so a repeat of the same request can be answered from the
+gateway's record of the first answer rather than by asking the provider again.
+The key is not part of the request's fingerprint — it names the deduplication
+rather than the request — so a retry carrying a freshly minted invocation id is
+still the same request. The response carries ``idempotency_status`` at the top
+level, beside ``id`` and ``model``, rendered as the lowercase snake_case value
+of the canonical status, so a caller reading the answer can tell whether the
+provider was reached: ``not_applicable`` when the request carried no key,
+``new`` for the first answer given under one, ``replayed`` for a repeat answered
+from the gateway's own record, and ``indeterminate`` when the gateway cannot say
+which of those it did. Reporting it is a property of answering, not a second
+contract: the store, the fingerprint and the refusal to answer one key from
+another key's payload are the inference service's, not this module's (PRD
+section 12).
+
 Two canonical distinctions survive the translation because the OpenAI shape has
 room for them. A finish reason the gateway could not classify is reported as the
 provider's own raw reason rather than as an invented OpenAI value, and a token
@@ -134,6 +151,7 @@ _CHAT_REQUEST_KEYS = frozenset(
         "user",
         "metadata",
         "tenant_id",
+        "idempotency_key",
     }
 )
 
@@ -389,6 +407,9 @@ class ChatRequest:
                 tools=_as_tools(f"{where} 'tools'", body.get("tools")),
                 tool_choice=_as_tool_choice(f"{where} 'tool_choice'", body.get("tool_choice")),
                 metadata=_as_metadata(f"{where} 'metadata'", body.get("metadata")),
+                idempotency_key=_as_idempotency_key(
+                    f"{where} 'idempotency_key'", body.get("idempotency_key")
+                ),
             )
         except ValueError as error:
             raise InvalidArgumentError(f"invalid chat completion request: {error}") from error
@@ -447,14 +468,17 @@ class ChatCompletion:
     """An OpenAI chat completion response (PRD section 4.4).
 
     The gateway's own accounting — upstream model, attempt count, fallback use,
-    idempotency status, cost — is deliberately not in this payload: the OpenAI
-    chat completions shape has no field for it, and adding one would be a
-    contract the gateway invented. That accounting belongs to the gRPC contract
-    and to usage records (PRD sections 5.2 and 13).
+    cost — is deliberately not in this payload: the OpenAI chat completions
+    shape has no field for it, and adding one would be a contract the gateway
+    invented. That accounting belongs to the gRPC contract and to usage records
+    (PRD sections 5.2 and 13). ``idempotency_status`` is the one piece of it the
+    shape has a home for: it is rendered at the top level so a caller reading
+    the answer can tell whether the provider was reached (PRD section 12).
     """
 
     id: str
     model: str
+    idempotency_status: str
     message: ChatMessage
     usage: Usage
     created: int
@@ -487,6 +511,7 @@ class ChatCompletion:
         return cls(
             id=completion_id,
             model=response.model,
+            idempotency_status=response.idempotency_status.value,
             message=ChatMessage(
                 content=_message_content(response),
                 tool_calls=response.tool_calls,
@@ -503,6 +528,7 @@ class ChatCompletion:
             "object": _OBJECT_CHAT_COMPLETION,
             "created": self.created,
             "model": self.model,
+            "idempotency_status": self.idempotency_status,
             "choices": [
                 {
                     "index": 0,
@@ -986,6 +1012,21 @@ def _as_optional_text(where: str, value: object) -> str | None:
     if not isinstance(value, str):
         raise InvalidArgumentError(f"{where} must be a string, got {_json_type(value)}")
     return value or None
+
+
+def _as_idempotency_key(where: str, value: object) -> str | None:
+    """The caller's idempotency key, or ``None`` when the request carries none.
+
+    ``None`` is an optional parameter's wire default and asks for nothing. Any
+    other value must be a non-empty string: the format defines the key as one, so
+    a value of another type is malformed input naming the type that arrived, and
+    an empty string is no key at all rather than a key that happens to be empty.
+    Both are refused as invalid requests rather than read as an absent key (PRD
+    section 12).
+    """
+    if value is None:
+        return None
+    return _as_required_text(where, value)
 
 
 def _as_object(where: str, value: object) -> Mapping[str, object]:

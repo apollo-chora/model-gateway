@@ -29,8 +29,13 @@ receives an error it can act on instead of a false assurance that its request
 was honoured (PRD sections 4.5 and 9.5). ``stream`` is accepted only as
 ``false``, which is the default and asks for nothing; ``store: false`` is
 likewise the one value that matches what the gateway does, because it stores
-nothing. A recognised parameter is held to its wire type before anything else:
-a value of the wrong JSON type — ``{"store": 0}``, ``{"background": ""}``,
+nothing. ``idempotency_key`` is the caller's own deduplication key, mapped onto
+the invocation's so a repeat of the same request is answered from the gateway's
+record of the first answer rather than by asking the provider again; the
+response carries ``idempotency_status`` beside ``id``, ``object``, ``created_at``,
+``model`` and ``status``, so a caller can tell whether the provider was reached
+(PRD section 12). A recognised parameter is held to its wire type before
+anything else: a value of the wrong JSON type — ``{"store": 0}``, ``{"background": ""}``,
 ``{"include": "text"}`` — is an invalid-request error naming the parameter
 and the type actually supplied, because the test that decides whether a
 recognised parameter was actually requested runs on a validated value rather
@@ -183,6 +188,7 @@ _REQUEST_KEYS = frozenset(
         "response_format",
         "tool_choice",
         "metadata",
+        "idempotency_key",
     }
 )
 """The request fields ``POST /v1/responses`` accepts (PRD section 4.5).
@@ -461,6 +467,9 @@ class ResponsesRequest:
                 tools=_as_tools(f"{where} 'tools'", body.get("tools")),
                 tool_choice=_tool_choice_from(f"{where} 'tool_choice'", body.get("tool_choice")),
                 metadata=_metadata_from(f"{where} 'metadata'", body.get("metadata")),
+                idempotency_key=_as_idempotency_key(
+                    f"{where} 'idempotency_key'", body.get("idempotency_key")
+                ),
             )
         except ValueError as error:
             raise InvalidArgumentError(f"invalid responses request: {error}") from error
@@ -501,7 +510,10 @@ class ResponseObject:
     its status, its output and its usage. The gateway's own accounting — the
     upstream model, the attempt count, fallback use, cost — is deliberately not
     in it, because the Responses object has no field for it and adding one would
-    be a contract the gateway invented (PRD sections 5.2 and 13). The fields the
+    be a contract the gateway invented (PRD sections 5.2 and 13).
+    ``idempotency_status`` is the one piece of it the shape has a home for: it is
+    rendered beside ``status`` so a caller reading the answer can tell whether
+    the provider was reached (PRD section 12). The fields the
     Responses object carries that describe the *request* — ``instructions``,
     ``tools``, ``temperature`` — are left out for the same reason the chat
     endpoint leaves out its accounting: echoing a request back is not part of
@@ -511,6 +523,7 @@ class ResponseObject:
 
     id: str
     model: str
+    idempotency_status: str
     content: tuple[OutputItem, ...]
     usage: Usage
     created_at: int
@@ -539,6 +552,7 @@ class ResponseObject:
         return cls(
             id=response_id,
             model=response.model,
+            idempotency_status=response.idempotency_status.value,
             content=response.content,
             usage=response.usage,
             created_at=created_at,
@@ -551,6 +565,7 @@ class ResponseObject:
             "created_at": self.created_at,
             "model": self.model,
             "status": self.status,
+            "idempotency_status": self.idempotency_status,
             "output": _output_items(self.content, response_id=self.id),
             "usage": _usage_payload(self.usage),
         }
@@ -947,6 +962,20 @@ def _required_text(where: str, value: object) -> str:
         return as_required_text(where, value)
     except ValueError as error:
         raise InvalidArgumentError(str(error)) from error
+
+
+def _as_idempotency_key(where: str, value: object) -> str | None:
+    """The caller's idempotency key, or ``None`` when the request carries none.
+
+    ``None`` is an optional parameter's wire default and asks for nothing. Any
+    other value must be a non-empty string: the format defines the key as one, so
+    a value of another type is malformed input naming the type that arrived, and
+    an empty string is no key at all rather than a key that happens to be empty
+    (PRD section 12).
+    """
+    if value is None:
+        return None
+    return as_required_text(where, value)
 
 
 def _arguments_from(where: str, value: object) -> Mapping[str, JsonValue] | str | None:
