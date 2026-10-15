@@ -164,9 +164,28 @@ class PricingTable:
     model is priced for: input tokens, output tokens and cached input tokens. A
     model absent from the table has no configured price, so its usage is recorded
     with no cost rather than with an invented one.
+
+    The table validates itself, so every instance is a table the gateway can
+    price against and not only the one the environment produced. The configuration
+    parser is a caller like any other: a table built by hand — by an operator's
+    own wiring, or by a test — must not be able to carry a key that is not a model
+    ID or a value that is not a price, because :meth:`estimate` would then reach a
+    shape it cannot price and raise inside an invocation's accounting rather than
+    where the mistake was made.
     """
 
     prices: Mapping[str, ModelPrice] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.prices, Mapping):
+            raise ValueError("a pricing table's prices must be a mapping from model ID to price")
+        for model, price in self.prices.items():
+            if not isinstance(model, str) or not model.strip():
+                raise ValueError(
+                    f"a pricing table's keys must be non-empty public model IDs, got {model!r}"
+                )
+            if not isinstance(price, ModelPrice):
+                raise ValueError(f"the price for {model!r} must be a ModelPrice, got {price!r}")
 
     def estimate(self, usage: Usage, model: str) -> tuple[float | None, str | None]:
         """The cost of one usage report, or ``(None, None)`` when none can be stated.
