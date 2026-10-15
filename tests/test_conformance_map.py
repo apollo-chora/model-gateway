@@ -33,23 +33,33 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _defines(nodeid: str) -> bool:
-    """Whether the test module defines the function or class method ``nodeid`` names."""
+    """Whether the test module defines the function or method ``nodeid`` names, exactly once.
+
+    Once, rather than at least once, because a duplicate definition shadows an
+    earlier one and pytest collects the later: a name defined twice is ambiguous
+    evidence rather than evidence, and this check must not report a criterion as
+    covered on the strength of a definition the runner would not reach. The same
+    reasoning refuses a malformed structural path — a class method named where the
+    class is not, or a nested definition — because a name this module cannot place is
+    a name it cannot vouch for.
+    """
     relative, _, name = nodeid.partition("::")
     path = ROOT / relative
     if not name or not path.is_file():
         return False
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    matches = 0
     for node in tree.body:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == name:
-            return True
+            matches += 1
         if isinstance(node, ast.ClassDef):
-            for child in node.body:
-                if (
-                    isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef)
-                    and f"{node.name}::{child.name}" == name
-                ):
-                    return True
-    return False
+            matches += sum(
+                1
+                for child in node.body
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef)
+                and f"{node.name}::{child.name}" == name
+            )
+    return matches == 1
 
 
 CRITERIA: dict[int, tuple[str, tuple[str, ...]]] = {
@@ -243,13 +253,14 @@ def test_every_criterion_names_at_least_one_test():
 def test_every_named_test_exists():
     """The check that makes this a mapping rather than a document.
 
-    A named test that was renamed, deleted or moved fails here. The names are read
-    from the test modules themselves rather than from a collected session, so this
-    module is meaningful when it is run on its own and does not depend on the rest of
-    the suite having been collected first. What it proves is that the test *is
-    defined*; whether pytest would collect and run it is the runner's business, and a
-    test this suite defines but skips would be visible as a skip rather than hidden
-    here.
+    A named test that was renamed, deleted or moved fails here, and so does a name
+    that is defined twice, because a duplicate shadows the definition pytest would not
+    reach. The names are read from the test modules themselves rather than from a
+    collected session, so this module is meaningful when it is run on its own and does
+    not depend on the rest of the suite having been collected first. What it proves is
+    that the test *is defined*, exactly once, at the structural path named; it does
+    not reproduce pytest's collection rules and does not prove that the runner would
+    collect and execute it.
     """
     missing = sorted(
         f"criterion {number} names {nodeid}, which no test module defines"

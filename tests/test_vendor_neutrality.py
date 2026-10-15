@@ -25,6 +25,22 @@ direction the rule should move: the binding is where the vendor list lives, and 
 core is not allowed to know it. The vendor *library* names are listed here, because
 they are the two the binding imports and a library name is not something the binding
 discovers at runtime.
+
+**What this proves, and what it does not.** It prevents the forms of vendor coupling
+that are reviewable in source — an import, a literal, an implementation reached from
+the wrong module — and it makes the intended dependency boundary executable rather
+than a convention. It does **not** prove the absence of all vendor-specific logic,
+and no static check could: a core module could hold provider-specific behaviour
+behind a neutral name, or reach a vendor through an alias assembled at runtime, and
+neither is something a scanner can decide. A future violation of that kind should
+motivate a targeted rule rather than an arms race against string assembly, and
+saying so is more useful than implying this module closes the claim.
+
+The literal check reads every string constant, docstrings included, so a core module
+that *explained* a provider dialect in prose would fail it. That is stricter than
+preventing an executable branch, and it is deliberate: the architectural policy is
+that vendor names live in the binding, and a rule with an exception for prose is a
+rule whose exception is where the next coupling hides.
 """
 
 import ast
