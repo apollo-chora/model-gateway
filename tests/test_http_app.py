@@ -565,17 +565,55 @@ def test_two_applications_built_from_one_call_site_do_not_share_a_router():
     right. A caller that builds more than one application in a process is the one
     this protects, and a test suite is the caller that does.
     """
-    first = _build_an_application()
-    second = _build_an_application()
+    first = _build_an_application(FakeTextProvider())
+    second = _build_an_application(FakeTextProvider())
 
     assert first.router is not second.router
 
 
-def _build_an_application():
+async def test_each_application_answers_with_its_own_provider():
+    """The failure mode itself, not the mechanism that caused it.
+
+    The identity assertion above pins the factory's contract; this pins what
+    breaking it does to a caller. Two applications are built from one call site and
+    both are asked to serve, so a shared router shows up here as a duplicate-route
+    refusal while the second application is being built, and — in the shape that is
+    harder to notice — as one application's request reaching another's handlers
+    after a reset, where every status code is still 200 and a caller's own provider
+    is never reached.
+    """
+    first_provider = FakeTextProvider()
+    second_provider = FakeTextProvider()
+    first = _build_an_application(first_provider)
+    second = _build_an_application(second_provider)
+
+    assert await _chat(first) == 200
+    assert await _chat(second) == 200
+
+    assert first_provider.calls == 1
+    assert second_provider.calls == 1
+
+
+async def _chat(app) -> int:
+    """One chat request to ``app``, answered by whichever handlers it holds."""
+    await app.start()
+    try:
+        response = await TestClient(app).post(
+            "/v1/chat/completions",
+            content=JSONContent(
+                {"model": "text-default", "messages": [{"role": "user", "content": "hi"}]}
+            ),
+        )
+    finally:
+        await app.stop()
+    return response.status
+
+
+def _build_an_application(provider):
     """One application, built from the same call site as the next one."""
     models = registry()
     return create_app(
         Settings.from_env({}),
         registry=models,
-        service=InferenceService(models, FakeTextProvider()),
+        service=InferenceService(models, provider),
     )
