@@ -164,8 +164,11 @@ class IdempotencyStatus(StrEnum):
       with no idempotency support, and PRD section 12 forbids claiming
       exactly-once execution in that case.
 
-    A key reused with a different payload is a conflict rather than a status: it
-    is refused before the provider is called.
+    A key reused with a different payload is not a replay: the fingerprint differs,
+    so the second request is served as ``NEW`` and the provider is called again,
+    overwriting the record under that key. Answering it from the stored record
+    would give a caller the answer to a request it never made, which is the
+    accident the fingerprint exists to prevent.
     """
 
     NOT_APPLICABLE = "not_applicable"
