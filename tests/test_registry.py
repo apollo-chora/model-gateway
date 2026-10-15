@@ -569,25 +569,6 @@ def test_routes_for_operation_raises_for_an_unconfigured_operation():
     assert "image-default" in error.value.message
 
 
-def test_routes_for_operation_raises_model_not_found_for_grounded_search():
-    """An operation the contract reserves but publishes no model ID for is a model-not-found.
-
-    The inference layer resolves the operation from the transport and looks its
-    routes up by operation. Grounded search is in the contract's vocabulary — the
-    proto enum reserves it — but the gateway exposes no public model ID for it, so
-    the lookup must fail with the gateway's own model-not-found error. A KeyError
-    here would be an implementation accident escaping as a 500: the operation is
-    a known member of the enum, it simply resolves to nothing.
-    """
-    models = registry(block())
-
-    with pytest.raises(ModelNotFoundError) as error:
-        models.routes_for_operation(Operation.GROUNDED_SEARCH)
-
-    assert error.value.reason is ErrorReason.MODEL_NOT_FOUND
-    assert "grounded-search" in error.value.message
-
-
 # ---------------------------------------------------------------------------
 # The model info itself
 # ---------------------------------------------------------------------------

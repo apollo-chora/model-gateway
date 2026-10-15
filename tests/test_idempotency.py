@@ -137,13 +137,7 @@ def test_the_payload_states_exactly_which_fields_participate():
         "response_modality",
         "tenant",
     }
-    for excluded in (
-        "invocation_id",
-        "idempotency_key",
-        "metadata",
-        "fallback_models",
-        "model",
-    ):
+    for excluded in ("invocation_id", "idempotency_key", "metadata", "fallback_models"):
         assert excluded not in payload
 
 

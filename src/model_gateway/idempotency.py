@@ -116,7 +116,7 @@ def request_fingerprint(request: InvocationRequest) -> RequestFingerprint:
     requests, and answering one from the other would leak an answer across a
     boundary the gateway is required to hold.
 
-    Five fields are deliberately excluded, each for a stated reason:
+    Four fields are deliberately excluded, each for a stated reason:
 
     * ``invocation_id`` — the gateway mints its own identifier and discards a
       provider's, so it is not a property of what the caller asked. Fingerprinting
@@ -131,10 +131,6 @@ def request_fingerprint(request: InvocationRequest) -> RequestFingerprint:
       anything: the operation is resolved from the transport and the configured
       route order applies, so the field cannot change the answer and two requests
       differing only in it are the same request.
-    * ``model`` — the caller's model string is semantically irrelevant: the
-      operation is resolved from the transport and the response is stamped with
-      the gateway's fixed public model ID, so the field cannot change the answer
-      and two requests differing only in it are the same request.
     """
     digest = sha256(
         orjson.dumps(fingerprint_payload(request), option=orjson.OPT_SORT_KEYS)
