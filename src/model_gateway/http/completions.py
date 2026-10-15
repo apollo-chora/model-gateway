@@ -133,7 +133,7 @@ from model_gateway.domain.serialization import as_required_text, describe
 from model_gateway.errors import CapabilityError, ErrorReason, GatewayError, InvalidArgumentError
 from model_gateway.http.auth import get_identity
 from model_gateway.http.chat import _gateway_sse_response
-from model_gateway.security.identity import caller_namespace
+from model_gateway.security.identity import caller_namespace, caller_tenant
 
 if TYPE_CHECKING:
     from model_gateway.inference import InferenceService
@@ -477,7 +477,9 @@ def create_completions(service: InferenceService) -> CompletionsHandler:
 
         if not completion_request.stream:
             response = await service.invoke(
-                invocation, namespace=caller_namespace(identity)
+                invocation,
+                namespace=caller_namespace(identity),
+                tenant=caller_tenant(identity),
             )
             completion = TextCompletion.from_invocation(
                 response,
@@ -491,6 +493,7 @@ def create_completions(service: InferenceService) -> CompletionsHandler:
             invocation,
             completion_id=f"{_COMPLETION_ID_PREFIX}{invocation_id}",
             namespace=caller_namespace(identity),
+            tenant=caller_tenant(identity),
         )
 
     return completions
@@ -507,6 +510,7 @@ async def _stream_completion(
     *,
     completion_id: str,
     namespace: str,
+    tenant: str | None,
 ) -> Response:
     """Serve one streaming invocation as Server-Sent Events (PRD section 16).
 
@@ -535,7 +539,7 @@ async def _stream_completion(
     chunk shape cannot carry: it is refused as an ordinary capability error rather
     than streamed.
     """
-    event_iter = service.invoke_stream(invocation, namespace=namespace)
+    event_iter = service.invoke_stream(invocation, namespace=namespace, tenant=tenant)
 
     # Pull the first event to surface a pre-stream refusal — a GatewayError or a
     # tool call the shape cannot carry — before the SSE response commits to a 200

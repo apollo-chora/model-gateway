@@ -63,7 +63,7 @@ from model_gateway.grpc.errors import abort
 from model_gateway.grpc.identity import Authenticator
 from model_gateway.inference import InferenceService
 from model_gateway.security.authorization import reconcile_identity
-from model_gateway.security.identity import caller_namespace
+from model_gateway.security.identity import caller_namespace, caller_tenant
 
 __all__ = ["Embed"]
 
@@ -100,7 +100,9 @@ class Embed:
             reconcile_identity(identity, None)
             embedding_request = mapping.embed_request_from_proto(request)
             response = await self._service.embed(
-                embedding_request, namespace=caller_namespace(identity)
+                embedding_request,
+                namespace=caller_namespace(identity),
+                tenant=caller_tenant(identity),
             )
             return mapping.embedding_response_to_proto(response)
         except Exception as error:

@@ -14,8 +14,12 @@ sleeps is slow and flaky where one that advances a clock is exact.
 import asyncio
 
 import pytest
+from blacksheep import Application, JSONContent
+from blacksheep.server.routing import Router
+from blacksheep.testing import TestClient
 
 from model_gateway.capabilities import Capability
+from model_gateway.config import Settings
 from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import (
     FinishReason,
@@ -28,9 +32,13 @@ from model_gateway.domain import (
 )
 from model_gateway.domain.streaming import StreamEvent, StreamEventKind
 from model_gateway.errors import DeadlineExceededError, ErrorReason, ResourceExhaustedError
+from model_gateway.http.auth import create_auth_middleware
+from model_gateway.http.chat import register_chat_routes
+from model_gateway.http.errors import register_error_handlers
 from model_gateway.inference import InferenceService
 from model_gateway.limits import RateLimiter, TenantConcurrencyLimiter
 from model_gateway.registry import ModelRegistry
+from model_gateway.security.api_keys import ApiKeySet
 
 
 class _Clock:
@@ -517,3 +525,84 @@ async def test_a_streamed_invocation_is_admitted_too():
 
     assert refused.value.reason is ErrorReason.RATE_LIMITED
     assert len(provider.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# The tenant reaches the bound through the transport
+# --------------------------------------------------------------------------- #
+
+_KEY_A = "sk-gateway-key-a"
+_KEY_B = "sk-gateway-key-b"
+_SHARED_TENANT = "shared-tenant"
+
+
+def _chat_app(provider) -> Application:
+    """An application serving the chat endpoint, with two keys bound to one tenant.
+
+    Built by hand so the service can be handed a per-tenant bound and a provider
+    that holds its attempt open, which is what makes the bound observable.
+    """
+    settings = Settings.from_env(
+        {
+            "GATEWAY_AUTH_ENABLED": "true",
+            "GATEWAY_API_KEYS": f"{_KEY_A}:{_SHARED_TENANT},{_KEY_B}:{_SHARED_TENANT}",
+        }
+    )
+    service = InferenceService(
+        ModelRegistry((_route(),)),
+        provider,
+        tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4),
+    )
+    app = Application(router=Router())
+    register_error_handlers(app)
+    register_chat_routes(app.router, service)
+    app.middlewares.append(
+        create_auth_middleware(
+            ApiKeySet.from_settings(settings),
+            auth_enabled=True,
+            allow_anonymous_health=True,
+        )
+    )
+    return app
+
+
+async def test_two_credentials_of_one_tenant_share_its_concurrency_bound():
+    """The bound is per tenant, so two credentials bound to one tenant share it.
+
+    This is the test that proves the transport hands the service the tenant rather
+    than only the credential: keying the bound on the credential — which is what
+    happens when the tenant is not passed — would let both of these through, and
+    the assertion that the second is still waiting is what catches that.
+    """
+    provider = _BlockingProvider()
+    app = _chat_app(provider)
+    body = {"model": "text-default", "messages": [{"role": "user", "content": "hi"}]}
+
+    await app.start()
+    try:
+        client = TestClient(app)
+        first = asyncio.create_task(
+            client.post(
+                "/v1/chat/completions",
+                content=JSONContent(body),
+                headers={"Authorization": f"Bearer {_KEY_A}"},
+            )
+        )
+        await asyncio.wait_for(provider.entered.wait(), timeout=5.0)
+        second = asyncio.create_task(
+            client.post(
+                "/v1/chat/completions",
+                content=JSONContent(body),
+                headers={"Authorization": f"Bearer {_KEY_B}"},
+            )
+        )
+        await _yield_times()
+
+        assert not second.done()
+        assert len(provider.calls) == 1
+
+        provider.release.set()
+        responses = await asyncio.gather(first, second)
+        assert [response.status for response in responses] == [200, 200]
+    finally:
+        await app.stop()

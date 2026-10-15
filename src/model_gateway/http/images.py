@@ -61,7 +61,7 @@ from model_gateway.domain.serialization import (
 )
 from model_gateway.errors import InvalidArgumentError
 from model_gateway.http.auth import get_identity
-from model_gateway.security.identity import caller_namespace
+from model_gateway.security.identity import caller_namespace, caller_tenant
 
 if TYPE_CHECKING:
     from model_gateway.inference import InferenceService
@@ -155,7 +155,11 @@ def create_image_generations(service: InferenceService) -> ImagesHandler:
     async def image_generations(request: Request) -> Response:
         image_request = image_generation_request_from_payload(await _read_json_body(request))
         identity = get_identity(request)
-        response = await service.generate(image_request, namespace=caller_namespace(identity))
+        response = await service.generate(
+            image_request,
+            namespace=caller_namespace(identity),
+            tenant=caller_tenant(identity),
+        )
         return json(ImageGenerationResponse.from_image_response(response).to_dict())
 
     return image_generations
