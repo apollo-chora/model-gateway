@@ -1,4 +1,4 @@
-"""Distributed tracing (PRD section 17).
+"""Distributed tracing.
 
 The gateway supports **W3C Trace Context** and **OpenTelemetry**, and it names the
 propagation format rather than leaving it to the library's default: the contract is
@@ -14,7 +14,7 @@ that starts spans needs no branch of its own. ``OTEL_ENABLED`` on with no endpoi
 is a **configuration error at startup** rather than a gateway that quietly drops
 every span: a deployment that asked for tracing and gave it nowhere to send is
 misconfigured, and the same reasoning that makes a malformed price a startup error
-applies (PRD sections 6 and 17).
+applies.
 
 **The endpoint is a base and the signal path is appended here.** The OTLP/HTTP
 exporter takes a complete signal URL when one is passed to it and appends the path

@@ -1,7 +1,7 @@
-"""Redaction for what the gateway logs (PRD sections 14 and 17).
+"""Redaction for what the gateway logs.
 
-Section 17 requires that prompts, responses, credentials and private tool arguments
-are not logged by default. This module is the *enforcement* of that rule rather
+Prompts, responses, credentials and private tool arguments are not logged by
+default. This module is the *enforcement* of that rule rather
 than a convention the code happens to follow: today nothing logs those things, and
 nothing stopped the next change from doing so. A processor in the log chain means
 a value reaching a log call under one of these names is replaced before it is

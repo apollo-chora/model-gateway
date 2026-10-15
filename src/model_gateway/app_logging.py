@@ -32,7 +32,7 @@ def configure_logging(level: int | str = logging.INFO) -> None:
             structlog.processors.UnicodeDecoder(),
             # Last before rendering, so it sees the event as it will be written —
             # after the processors that add fields of their own — and nothing can
-            # put a value back after it has been redacted (PRD section 17).
+            # put a value back after it has been redacted.
             redact_event,
             structlog.processors.JSONRenderer(serializer=_orjson_dumps),
         ],

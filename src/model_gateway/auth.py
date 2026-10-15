@@ -2,7 +2,7 @@
 
 Provider-specific authentication — including Google ADC for Vertex routes —
 is handled by LiteLLM itself; these values only describe the transport of a
-credential the gateway has already been given (PRD section 7).
+credential the gateway has already been given.
 """
 
 from enum import StrEnum

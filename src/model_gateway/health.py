@@ -1,4 +1,4 @@
-"""Liveness and readiness endpoints for Kubernetes probes (PRD section 4)."""
+"""Liveness and readiness endpoints for Kubernetes probes."""
 
 import inspect
 from collections.abc import Awaitable, Callable
