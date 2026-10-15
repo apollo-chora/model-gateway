@@ -66,6 +66,8 @@ TENANT = "tenant-a"
 # A tenant no configured key is bound to, so a claim of it disagrees with every
 # credential this file's key set can produce.
 UNBOUND_TENANT = "tenant-no-key-is-bound-to"
+SECOND_KEY = "sk-gateway-second-credential"
+SECOND_TENANT = "tenant-b"
 UPSTREAM_ENDPOINT = "https://upstream.internal.example/v1"
 UPSTREAM_KEY = "sk-upstream-secret-key"
 PUBLIC_MODEL = "text-default"
@@ -185,6 +187,7 @@ async def serve(
     *,
     registry: ModelRegistry | None = None,
     auth_enabled: bool = True,
+    two_credentials: bool = False,
 ):
     """A real in-process gRPC server serving one ``Invoke`` handler, and a stub for it.
 
@@ -194,10 +197,13 @@ async def serve(
     for either. The port is reserved before the server starts, so the address the
     stub dials is the one this server bound and never a guess at a free port.
     """
+    keys = f"{API_KEY}:{TENANT}"
+    if two_credentials:
+        keys = f"{keys},SECOND_KEY:{SECOND_TENANT}"
     settings = Settings.from_env(
         {
             "GATEWAY_AUTH_ENABLED": "true" if auth_enabled else "false",
-            "GATEWAY_API_KEYS": f"{API_KEY}:{TENANT}",
+            "GATEWAY_API_KEYS": keys,
         }
     )
     authenticator = Authenticator(
@@ -895,3 +901,80 @@ async def test_a_failure_is_not_recorded_so_a_repeat_is_allowed_to_retry():
     assert raised.value.code() is grpc.StatusCode.UNAVAILABLE
     assert retried.idempotency_status == pb.IDEMPOTENCY_STATUS_NEW
     assert len(provider.calls) == 2
+
+
+async def test_two_credentials_sharing_a_key_are_two_independent_operations(provider):
+    """The same key under two credentials is two operations over a real gRPC call.
+
+    Credential A and credential B are separate trusted principals, so a key each
+    uses names an operation of its own: neither replays the other's answer, and a
+    repeat by A replays A's own. Both servers share one inference service and
+    therefore one store, which is what makes the namespace the thing that separates
+    them — two independent stores would not test the claim at all.
+    """
+    settings = Settings.from_env(
+        {
+            "GATEWAY_AUTH_ENABLED": "true",
+            "GATEWAY_API_KEYS": f"{API_KEY}:{TENANT},{SECOND_KEY}:{SECOND_TENANT}",
+        }
+    )
+    authenticator = Authenticator(
+        ApiKeySet.from_settings(settings),
+        auth_enabled=True,
+        allow_anonymous_health=False,
+    )
+    shared_service = InferenceService(make_registry(), provider)
+
+    server_a = grpc.aio.server()
+    port_a = server_a.add_insecure_port(f"{_HOST}:0")
+    server_b = grpc.aio.server()
+    port_b = server_b.add_insecure_port(f"{_HOST}:0")
+    for server in (server_a, server_b):
+        gateway_pb2_grpc.add_ModelGatewayServiceServicer_to_server(
+            _InvokeOnlyServicer(Invoke(authenticator, shared_service)), server
+        )
+    await server_a.start()
+    await server_b.start()
+    channel_a = grpc.aio.insecure_channel(f"{_HOST}:{port_a}")
+    channel_b = grpc.aio.insecure_channel(f"{_HOST}:{port_b}")
+    stub_a = gateway_pb2_grpc.ModelGatewayServiceStub(channel_a)
+    stub_b = gateway_pb2_grpc.ModelGatewayServiceStub(channel_b)
+    try:
+        shared = request(idempotency_key="shared-key")
+
+        first = await stub_a.Invoke(
+            shared, metadata=(("authorization", f"Bearer {API_KEY}"),)
+        )
+        second = await stub_b.Invoke(
+            shared, metadata=(("authorization", f"Bearer {SECOND_KEY}"),)
+        )
+        repeat = await stub_a.Invoke(
+            shared, metadata=(("authorization", f"Bearer {API_KEY}"),)
+        )
+    finally:
+        await channel_a.close()
+        await channel_b.close()
+        await server_a.stop(grace=None)
+        await server_b.stop(grace=None)
+
+    assert first.idempotency_status == pb.IDEMPOTENCY_STATUS_NEW
+    assert second.idempotency_status == pb.IDEMPOTENCY_STATUS_NEW
+    assert repeat.idempotency_status == pb.IDEMPOTENCY_STATUS_REPLAYED
+    assert len(provider.calls) == 2
+
+
+async def test_one_key_reused_for_another_payload_is_refused_over_grpc(stub, provider):
+    """Reuse is refused before any provider is called, and the record is left intact."""
+    await stub.Invoke(request(idempotency_key="key-1"), metadata=bearer())
+
+    with pytest.raises(grpc.aio.AioRpcError) as error:
+        await stub.Invoke(
+            request(
+                idempotency_key="key-1",
+                messages=(user_message("A different question entirely."),),
+            ),
+            metadata=bearer(),
+        )
+
+    assert error.value.code() == grpc.StatusCode.ALREADY_EXISTS
+    assert len(provider.calls) == 1
