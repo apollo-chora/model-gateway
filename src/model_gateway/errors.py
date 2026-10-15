@@ -78,6 +78,7 @@ __all__ = [
     "MalformedResponseError",
     "ModelNotFoundError",
     "NotFoundError",
+    "PayloadTooLargeError",
     "PermissionDeniedError",
     "ResourceExhaustedError",
     "UnauthenticatedError",
@@ -126,6 +127,7 @@ class ErrorReason(StrEnum):
     RESOURCE_NOT_FOUND = "resource_not_found"
     RATE_LIMITED = "rate_limited"
     CONCURRENCY_LIMIT_EXCEEDED = "concurrency_limit_exceeded"
+    PAYLOAD_TOO_LARGE = "payload_too_large"
     FAILED_PRECONDITION = "failed_precondition"
     DEADLINE_EXCEEDED = "deadline_exceeded"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
@@ -393,6 +395,23 @@ class ResourceExhaustedError(GatewayError):
         {ErrorReason.RATE_LIMITED, ErrorReason.CONCURRENCY_LIMIT_EXCEEDED}
     )
     _http_status: ClassVar[int] = 429
+    _grpc_code: ClassVar[GrpcStatus] = GrpcStatus.RESOURCE_EXHAUSTED
+
+
+class PayloadTooLargeError(GatewayError):
+    """The request body is larger than the deployment permits: 413 / RESOURCE_EXHAUSTED.
+
+    A body the gateway will not read is resource exhaustion rather than a malformed
+    request, which is why it shares gRPC's ``RESOURCE_EXHAUSTED`` with the rate and
+    concurrency refusals — that is the status gRPC itself reports for a message over
+    its receive bound, so the two transports agree on what happened. The HTTP status
+    is its own: 413 is the standard code for the condition, and a caller's retry
+    logic keys on the status rather than on the reason (PRD sections 5.4 and 14).
+    """
+
+    default_reason: ClassVar[ErrorReason] = ErrorReason.PAYLOAD_TOO_LARGE
+    allowed_reasons: ClassVar[frozenset[ErrorReason]] = frozenset({ErrorReason.PAYLOAD_TOO_LARGE})
+    _http_status: ClassVar[int] = 413
     _grpc_code: ClassVar[GrpcStatus] = GrpcStatus.RESOURCE_EXHAUSTED
 
 
