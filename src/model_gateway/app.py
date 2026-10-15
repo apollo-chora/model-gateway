@@ -56,6 +56,7 @@ from model_gateway.http import (
 )
 from model_gateway.http.auth import create_auth_middleware
 from model_gateway.inference import InferenceService
+from model_gateway.limits import RateLimiter, TenantConcurrencyLimiter
 from model_gateway.providers.litellm_image import ensure_supported_image_dialect
 from model_gateway.providers.litellm_provider import (
     LiteLLMProvider,
@@ -185,6 +186,36 @@ def _accounting(settings: Settings) -> AccountingRecorder | None:
     return AccountingRecorder(sink_for(settings.usage_storage), pricing)
 
 
+def _limits(
+    settings: Settings,
+) -> tuple[RateLimiter | None, TenantConcurrencyLimiter | None]:
+    """The admission decisions the deployment configured, either of which may be none.
+
+    A limit is built only when it was configured with something that bounds: a
+    request rate of zero and a per-tenant bound of zero are the deployment saying
+    it has not decided what its callers are entitled to, and building a limiter
+    that admits everything would be machinery no configuration asked for.
+
+    They are returned separately rather than as one value because they are keyed
+    differently — the rate per caller, the concurrency per tenant — and a
+    deployment may reasonably want one and not the other.
+    """
+    rate = (
+        RateLimiter(
+            requests=settings.rate_limit_requests,
+            window_seconds=settings.rate_limit_window_seconds,
+        )
+        if settings.rate_limit_requests > 0
+        else None
+    )
+    tenant = (
+        TenantConcurrencyLimiter(maximum=settings.tenant_max_concurrent_requests)
+        if settings.tenant_max_concurrent_requests > 0
+        else None
+    )
+    return rate, tenant
+
+
 def _orjson_dumps(obj) -> str:
     return orjson.dumps(obj).decode("utf-8")
 
@@ -236,6 +267,7 @@ def create_app(
     if service is None:
         _ensure_binding_can_run(registry)
         _ensure_editing_is_not_advertised(registry)
+        rate_limiter, tenant_limiter = _limits(settings)
         service = InferenceService(
             registry,
             LiteLLMProvider(),
@@ -244,6 +276,8 @@ def create_app(
             retry_backoff_ms=settings.provider_retry_backoff_ms,
             limiter=ConcurrencyLimiter(settings.provider_max_concurrent_requests),
             accounting=_accounting(settings),
+            rate_limiter=rate_limiter,
+            tenant_limiter=tenant_limiter,
         )
 
     api_keys = ApiKeySet.from_settings(settings)

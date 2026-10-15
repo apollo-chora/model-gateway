@@ -29,6 +29,7 @@ from model_gateway.domain import (
     Usage,
 )
 from model_gateway.inference import InferenceService
+from model_gateway.limits import RateLimiter, TenantConcurrencyLimiter
 from model_gateway.registry import ModelRegistry
 from model_gateway.reliability import ConcurrencyLimiter
 
@@ -308,6 +309,8 @@ async def test_the_factory_gives_the_built_service_the_configured_attempt_budget
             retry_backoff_ms=None,
             limiter=None,
             accounting=None,
+            rate_limiter=None,
+            tenant_limiter=None,
         ):
             captured["attempt_timeout"] = attempt_timeout
 
@@ -343,6 +346,8 @@ async def test_the_factory_gives_the_built_service_every_configured_reliability_
             retry_backoff_ms=None,
             limiter=None,
             accounting=None,
+            rate_limiter=None,
+            tenant_limiter=None,
         ):
             captured.update(
                 attempt_timeout=attempt_timeout,
@@ -350,6 +355,8 @@ async def test_the_factory_gives_the_built_service_every_configured_reliability_
                 retry_backoff_ms=retry_backoff_ms,
                 limiter=limiter,
                 accounting=accounting,
+                rate_limiter=rate_limiter,
+                tenant_limiter=tenant_limiter,
             )
 
     monkeypatch.setattr("model_gateway.app.InferenceService", RecordingService)
@@ -371,6 +378,81 @@ async def test_the_factory_gives_the_built_service_every_configured_reliability_
     assert captured["retry_backoff_ms"] == 250
     assert isinstance(captured["limiter"], ConcurrencyLimiter)
     assert captured["limiter"].maximum == 7
+
+
+async def test_the_factory_gives_the_built_service_the_configured_limits(monkeypatch):
+    """Both admission decisions reach the service, configured as the deployment asked.
+
+    A limit that is configured and silently not applied is worse than one that was
+    never configured: the operator believes their callers are bounded and they are
+    not.
+    """
+    captured = {}
+
+    class RecordingService:
+        def __init__(
+            self,
+            registry,
+            provider,
+            *,
+            attempt_timeout=None,
+            retry_count=None,
+            retry_backoff_ms=None,
+            limiter=None,
+            accounting=None,
+            rate_limiter=None,
+            tenant_limiter=None,
+        ):
+            captured.update(rate_limiter=rate_limiter, tenant_limiter=tenant_limiter)
+
+    monkeypatch.setattr("model_gateway.app.InferenceService", RecordingService)
+
+    settings = Settings.from_env(
+        {
+            "GATEWAY_RATE_LIMIT_REQUESTS": "120",
+            "GATEWAY_RATE_LIMIT_WINDOW_SECONDS": "30",
+            "GATEWAY_TENANT_MAX_CONCURRENT_REQUESTS": "4",
+        }
+    )
+    app = create_app(settings)
+    await app.start()
+    await app.stop()
+
+    assert isinstance(captured["rate_limiter"], RateLimiter)
+    assert captured["rate_limiter"].requests == 120
+    assert captured["rate_limiter"].window_seconds == 30.0
+    assert isinstance(captured["tenant_limiter"], TenantConcurrencyLimiter)
+    assert captured["tenant_limiter"].maximum == 4
+
+
+async def test_a_deployment_that_configures_no_limits_is_given_none(monkeypatch):
+    """Neither limit is invented for a deployment that did not ask for one."""
+    captured = {}
+
+    class RecordingService:
+        def __init__(
+            self,
+            registry,
+            provider,
+            *,
+            attempt_timeout=None,
+            retry_count=None,
+            retry_backoff_ms=None,
+            limiter=None,
+            accounting=None,
+            rate_limiter=None,
+            tenant_limiter=None,
+        ):
+            captured.update(rate_limiter=rate_limiter, tenant_limiter=tenant_limiter)
+
+    monkeypatch.setattr("model_gateway.app.InferenceService", RecordingService)
+
+    app = create_app(Settings.from_env({}))
+    await app.start()
+    await app.stop()
+
+    assert captured["rate_limiter"] is None
+    assert captured["tenant_limiter"] is None
 
 
 async def test_the_default_path_serves_an_application_with_the_real_binding():
