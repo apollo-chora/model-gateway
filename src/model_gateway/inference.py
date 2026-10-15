@@ -371,6 +371,14 @@ class _StreamFacts:
     then no answer to account for. ``state`` is the walk state at that same
     moment, which is where the attempt count and the fallback flag come from.
 
+    **Any event counts, not only one carrying answer content.** A usage report is
+    the provider stating it did work, so a stream that reached the provider is one
+    the gateway owes for whatever it carried; a stream that emitted nothing at all
+    is the only one with no answer to account for. That is deliberately the same
+    criterion the walk already applies to decide that no further fallback or retry
+    may occur (PRD sections 11.2 and 16), so the rule that ends the walk and the
+    rule that decides whether there is something to record cannot drift apart.
+
     ``usage`` is the last token report the provider sent, or ``None`` when it sent
     none — the canonical stream carries usage on events of its own rather than on
     the answer, so a provider that reports nothing leaves no counts rather than
@@ -671,6 +679,18 @@ class InferenceService:
         sent none. The canonical stream carries usage on events of its own, so a
         provider that reports nothing leaves a record with no counts rather than
         with invented ones.
+
+        ``upstream_model`` is the serving route's model ID. A stream reports no
+        upstream model of its own — the canonical events carry content, usage and a
+        finish reason and no model name — so the record names the route the
+        gateway sent the request to, which is the same value the non-streaming
+        path is stamped with. It is not an independently reported provider model
+        and is not presented as one.
+
+        This is one *attempt* to record, not a guarantee that a record was stored:
+        a sink that fails is logged rather than propagated, so a broken store
+        loses the record without failing the invocation, exactly as it does on the
+        non-streaming paths.
         """
         if facts.route is None:
             return
@@ -741,15 +761,32 @@ class InferenceService:
         ``idempotency_status`` stays ``NOT_APPLICABLE``.
 
         **A streamed answer is accounted for too.** A stream that produced output
-        leaves one record, written when the stream is over — whether it finished,
-        failed after output, or stopped without a terminal event — and a stream
-        that produced nothing leaves none, because there is no answer to account
-        for (PRD section 13). The record is written even when the caller goes away
-        mid-stream: the provider was called and the gateway owes for the output it
-        produced, and the record says ``incomplete`` rather than ``failed`` so it
-        reports what happened rather than what did not. ``namespace`` is the
-        trusted principal the invocation acted under, which the streaming request
-        does not carry and the authenticated caller does.
+        makes one record attempt, made when the stream is over — whether it
+        finished, failed after output, or stopped without a terminal event — and a
+        stream that produced nothing makes none, because there is no answer to
+        account for (PRD section 13). It is an attempt rather than a guarantee
+        that a record was stored, because a sink that fails is logged rather than
+        propagated, exactly as on the non-streaming paths. The attempt is made even
+        when the caller goes away mid-stream: the provider was called and the
+        gateway owes for the output it produced, and the record says
+        ``incomplete`` rather than ``failed`` so it reports what happened rather
+        than what did not. ``namespace`` is the trusted principal the invocation
+        acted under, which the streaming request does not carry and the
+        authenticated caller does.
+
+        **The accounting attempt survives the teardown.** The stream is closed
+        before the record is written, and that close is awaited, so a caller
+        cancelled while it is in flight would otherwise take the record with it —
+        the gateway would have called the provider and recorded nothing. The close
+        therefore sits in an inner ``finally`` and the recording in an outer one,
+        so the record is still written when the close is interrupted. Recording is
+        synchronous, so it cannot itself be interrupted, and the cancellation then
+        continues to propagate: nothing here swallows it.
+
+        ``invocation_id`` is minted here when the caller supplied none, exactly as
+        :meth:`invoke` mints it for an answer. The canonical stream event types its
+        identifier as required text, so a request without one could not be served
+        at all, and the record would name no invocation.
         """
         routes = self._registry.routes_for(request.model)
         if not isinstance(self._provider, StreamingTextProvider):
@@ -758,14 +795,18 @@ class InferenceService:
                 "streaming request with a non-streamed body, so the request is refused",
                 details={"capability": _STREAMING_CAPABILITY},
             )
+        if request.invocation_id is None:
+            request = replace(request, invocation_id=uuid4().hex)
         facts = _StreamFacts()
         started = time.monotonic()
         stream = self._invoke_stream_on(request, routes, facts)
         try:
-            async for event in stream:
-                yield event
+            try:
+                async for event in stream:
+                    yield event
+            finally:
+                await stream.aclose()
         finally:
-            await stream.aclose()
             self._record_stream(request, facts, namespace or "", started)
 
     async def embed(
