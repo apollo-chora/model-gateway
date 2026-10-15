@@ -132,6 +132,7 @@ from model_gateway.domain.serialization import (
 )
 from model_gateway.errors import CapabilityError, InvalidArgumentError
 from model_gateway.http.auth import get_identity
+from model_gateway.security.identity import caller_namespace
 
 if TYPE_CHECKING:
     from model_gateway.inference import InferenceService
@@ -583,7 +584,9 @@ def create_response(service: InferenceService) -> ResponsesHandler:
         invocation_id = uuid4().hex
         invocation = parsed.to_invocation(invocation_id=invocation_id, identity=identity)
 
-        answer = await service.invoke(invocation)
+        answer = await service.invoke(
+            invocation, namespace=caller_namespace(identity)
+        )
         return json(
             ResponseObject.from_invocation(
                 answer,

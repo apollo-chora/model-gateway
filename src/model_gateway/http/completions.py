@@ -133,6 +133,7 @@ from model_gateway.domain.serialization import as_required_text, describe
 from model_gateway.errors import CapabilityError, ErrorReason, GatewayError, InvalidArgumentError
 from model_gateway.http.auth import get_identity
 from model_gateway.http.chat import _gateway_sse_response
+from model_gateway.security.identity import caller_namespace
 
 if TYPE_CHECKING:
     from model_gateway.inference import InferenceService
@@ -475,7 +476,9 @@ def create_completions(service: InferenceService) -> CompletionsHandler:
         )
 
         if not completion_request.stream:
-            response = await service.invoke(invocation)
+            response = await service.invoke(
+                invocation, namespace=caller_namespace(identity)
+            )
             completion = TextCompletion.from_invocation(
                 response,
                 completion_id=f"{_COMPLETION_ID_PREFIX}{response.invocation_id or invocation_id}",
