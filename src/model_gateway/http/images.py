@@ -1,30 +1,29 @@
-"""The image endpoints: ``POST /v1/images/generations`` (PRD section 4.6).
+"""The image endpoints: ``POST /v1/images/generations``.
 
 The handlers are thin on purpose, exactly as the other endpoints' are. They
 decode the body, translate it into the canonical image request, call the
 inference service and render the canonical response back into the OpenAI
 shape. They resolve no route, retry nothing, count nothing and check nothing:
 routing, fallback, retry, the deadline and the image count are the gateway
-core's (PRD sections 4.6, 9.2 and 9.5), and a second copy of that logic on
-the HTTP path is how the two transports drift apart.
+core's, and a second copy of that logic on the HTTP path is how the two
+transports drift apart.
 
 **The accepted request is the documented subset, and nothing else is
 ignored.** The generations body is the canonical request's own fields —
 ``model``, ``prompt``, ``size``, ``response_format``, ``n`` and ``metadata``
 — and a key the gateway does not understand is refused with an
-invalid-request error naming it rather than dropped, which is the
-compatibility boundary of PRD section 4: a client SDK that serialises a new
+invalid-request error naming it rather than dropped — the gateway's
+compatibility boundary: a client SDK that serialises a new
 default parameter receives an error it can act on instead of an assurance
 that a request it did not make was honoured. ``size``, ``response_format``
 and ``n`` are the canonical request's own values, so an undocumented one is
-refused by the canonical type rather than silently substituted (PRD section
-9.1).
+refused by the canonical type rather than silently substituted.
 
 **Image editing is absent, not advertised-and-refused.** The gateway's
 canonical image request carries no field for an image input, so an edit
 cannot be forwarded to any route however its capabilities read, and an edit
-answered without it would report an image edited that never left the gateway
-(PRD section 9.5). The gateway therefore registers no edits endpoint at all:
+answered without it would report an image edited that never left the gateway.
+The gateway therefore registers no edits endpoint at all:
 an operation it categorically cannot perform is left out of the surface
 rather than published and guaranteed to fail, and a configured route that
 declares the ``editing`` capability is refused at startup by the application
@@ -35,8 +34,7 @@ assembled the answer and each entry of ``data`` carries the payload it was
 given — ``b64_json`` or ``url``, never both — beside ``revised_prompt`` when
 the upstream reported one. The gateway's own accounting — the invocation
 identifier, the upstream model, the attempt count — is deliberately not in
-this payload: the OpenAI image shape has no field for it (PRD sections 5.2
-and 13).
+this payload: the OpenAI image shape has no field for it.
 """
 
 from __future__ import annotations
@@ -81,16 +79,16 @@ _GENERATION_REQUEST_KEYS = frozenset(
 )
 """The request fields ``POST /v1/images/generations`` accepts.
 
-The set is closed on purpose, exactly as the other endpoints': PRD section 4
-makes the gateway's OpenAI compatibility a supported subset rather than
-drop-in compatibility, so a parameter the gateway does not understand is
-refused rather than ignored.
+The set is closed on purpose, exactly as the other endpoints': the gateway's
+OpenAI compatibility is a supported subset rather than drop-in compatibility,
+so a parameter the gateway does not understand is refused rather than
+ignored.
 """
 
 
 @dataclass(frozen=True)
 class ImageGenerationResponse:
-    """An OpenAI image generations response (PRD section 4.6).
+    """An OpenAI image generations response.
 
     ``created`` is when the gateway assembled the answer and ``data`` the
     images the upstream produced, each carrying the payload it was given and
@@ -128,8 +126,7 @@ def image_generation_request_from_payload(payload: object) -> ImageRequest:
     helpers is a validation failure of this request and becomes an
     invalid-request error carrying the domain's own gateway-authored message,
     which names the field that failed. An unknown key is refused the same
-    way: the boundary does not ignore a parameter it does not understand
-    (PRD section 4).
+    way: the boundary does not ignore a parameter it does not understand.
     """
     where = "the request body"
     try:
@@ -150,7 +147,7 @@ def image_generation_request_from_payload(payload: object) -> ImageRequest:
 
 
 def create_image_generations(service: InferenceService) -> ImagesHandler:
-    """Build the handler for ``POST /v1/images/generations`` (PRD section 4.6)."""
+    """Build the handler for ``POST /v1/images/generations``."""
 
     async def image_generations(request: Request) -> Response:
         image_request = image_generation_request_from_payload(await _read_json_body(request))
@@ -178,7 +175,7 @@ async def _read_json_body(request: Request) -> object:
     type never declared JSON at all. Both are malformed input for this
     endpoint, and both become an invalid-request error carrying the
     taxonomy's reason rather than the framework's plain-text body, so every
-    failure on this path answers in one shape (PRD section 5.4).
+    failure on this path answers in one shape.
     """
     try:
         payload = await request.json()
@@ -198,8 +195,8 @@ def _as_metadata(where: str, value: object) -> FrozenJsonObject | None:
 
     ``None`` is kept as ``None`` rather than folded into an empty object, so a
     request that carried no metadata does not acquire an empty one. The value
-    is never forwarded upstream: PRD section 5.1 makes request metadata caller
-    bookkeeping, and the binding sends none of it.
+    is never forwarded upstream: request metadata is caller bookkeeping, and the
+    binding sends none of it.
     """
     if value is None:
         return None

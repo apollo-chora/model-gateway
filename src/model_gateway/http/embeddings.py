@@ -1,18 +1,18 @@
-"""The embeddings endpoint: ``POST /v1/embeddings`` (PRD section 4.7).
+"""The embeddings endpoint: ``POST /v1/embeddings``.
 
 The handler is thin on purpose, exactly as the chat endpoint's is. It decodes the
 body, translates it into the canonical embeddings request, calls the inference
 service and renders the canonical response back into the OpenAI shape. It
 resolves no route, retries nothing, counts nothing and orders nothing: routing,
 fallback, retry, the deadline, the input ordering and the dimensionality check
-are the gateway core's (PRD sections 4.7, 9.2 and 11.3), and a second copy of
-that logic on the HTTP path is how the two transports drift apart.
+are the gateway core's, and a second copy of that logic on the HTTP path is
+how the two transports drift apart.
 
 **The accepted request is the documented subset, and nothing else is ignored.**
 The body is the canonical request's own fields — ``model``, ``input``,
 ``dimensions``, ``encoding_format``, ``user`` and ``metadata`` — so a parameter
 the gateway does not understand is refused with an invalid-request error naming
-it rather than dropped, which is the compatibility boundary of PRD section 4.
+it rather than dropped — the gateway's compatibility boundary.
 ``input`` is the one field whose wire form is wider than the canonical one: the
 OpenAI format accepts a single string or an array of strings, and both are
 normalised to the tuple of texts the canonical request holds, in the caller's
@@ -26,12 +26,12 @@ carries ``prompt_tokens`` and ``total_tokens``. The gateway's own accounting —
 the invocation identifier, the upstream model, the attempt count — is
 deliberately not in this payload: the OpenAI embeddings shape has no field for
 it, and adding one would be a contract the gateway invented. That accounting
-belongs to the gRPC contract and to usage records (PRD sections 5.2 and 13).
+belongs to the gRPC contract and to usage records.
 
 **The vectors are the float form.** The endpoint renders the canonical vectors,
 which are numbers, so a request asking for another wire encoding is refused by
-the gateway core with a capability error naming it rather than answered in floats
-(PRD section 9.5). The endpoint itself decides nothing about that: it translates,
+the gateway core with a capability error naming it rather than answered in
+floats. The endpoint itself decides nothing about that: it translates,
 and the policy lives where every other transport can reach it.
 
 The invocation identifier is minted by the inference service for this operation,
@@ -87,9 +87,9 @@ _REQUEST_KEYS = frozenset(
 )
 """The request fields this endpoint accepts, which are the canonical request's own.
 
-The set is closed on purpose: PRD section 4 makes the gateway's OpenAI
-compatibility a supported subset rather than drop-in compatibility, so a
-parameter the gateway does not understand is refused rather than ignored. A
+The set is closed on purpose: the gateway's OpenAI compatibility is a supported
+subset rather than drop-in compatibility, so a parameter the gateway does not
+understand is refused rather than ignored. A
 client SDK that serialises a new default receives an error it can act on instead
 of an assurance that a request it did not make was honoured.
 """
@@ -97,7 +97,7 @@ of an assurance that a request it did not make was honoured.
 
 @dataclass(frozen=True)
 class EmbeddingsResponse:
-    """An OpenAI embeddings response (PRD section 4.7).
+    """An OpenAI embeddings response.
 
     ``data`` is the vectors in the caller's input order, each carrying the
     position it was placed at, and ``usage`` is the token accounting of the call.
@@ -137,7 +137,7 @@ def embedding_request_from_payload(payload: object) -> EmbeddingRequest:
     is a validation failure of this request and becomes an invalid-request error
     carrying the domain's own gateway-authored message, which names the field
     that failed. An unknown key is refused the same way: the boundary does not
-    ignore a parameter it does not understand (PRD section 4).
+    ignore a parameter it does not understand.
     """
     where = "the request body"
     try:
@@ -160,7 +160,7 @@ def embedding_request_from_payload(payload: object) -> EmbeddingRequest:
 
 
 def create_embeddings(service: InferenceService) -> EmbeddingsHandler:
-    """Build the handler for ``POST /v1/embeddings`` (PRD section 4.7)."""
+    """Build the handler for ``POST /v1/embeddings``."""
 
     async def embeddings(request: Request) -> Response:
         embedding_request = embedding_request_from_payload(await _read_json_body(request))
@@ -188,7 +188,7 @@ async def _read_json_body(request: Request) -> object:
     declared JSON at all. Both are malformed input for this endpoint, and both
     become an invalid-request error carrying the taxonomy's reason rather than
     the framework's plain-text body, so every failure on this path answers in one
-    shape (PRD section 5.4).
+    shape.
     """
     try:
         payload = await request.json()
@@ -227,8 +227,8 @@ def _as_metadata(where: str, value: object) -> FrozenJsonObject | None:
 
     ``None`` is kept as ``None`` rather than folded into an empty object, so a
     request that carried no metadata does not acquire an empty one. The value is
-    never forwarded upstream: PRD section 5.1 makes request metadata caller
-    bookkeeping, and the binding sends none of it.
+    never forwarded upstream: request metadata is caller bookkeeping, and the
+    binding sends none of it.
     """
     if value is None:
         return None
@@ -252,8 +252,8 @@ def _usage_payload(usage: Usage) -> dict[str, int]:
     integers, so a count the provider never reported is presented as zero here;
     that presentation is the boundary's, not the record's, and the canonical
     :class:`~model_gateway.domain.Usage` keeps an unreported count apart from a
-    zero one (PRD section 13). A total the provider omitted is taken as the
-    prompt count, which is arithmetic the caller can repeat.
+    zero one. A total the provider omitted is taken as the prompt count, which is
+    arithmetic the caller can repeat.
     """
     prompt = 0 if usage.input_tokens is None else usage.input_tokens
     total = usage.total_tokens

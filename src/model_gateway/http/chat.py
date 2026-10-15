@@ -1,23 +1,23 @@
-"""The chat endpoint: ``POST /v1/chat/completions`` (PRD sections 4.4 and 16).
+"""The chat endpoint: ``POST /v1/chat/completions``.
 
 The handler is thin on purpose. It decodes the body, translates it into the
 canonical invocation, calls the inference service and renders the canonical
 response back into the OpenAI shape. It resolves no route, retries nothing and
-counts nothing: routing, fallback, retry and accounting are the gateway core's
-(PRD sections 9.2 and 11.3), and a second copy of that logic on the HTTP path is
-how the two transports drift apart.
+counts nothing: routing, fallback, retry and accounting are the gateway core's,
+and a second copy of that logic on the HTTP path is how the two transports
+drift apart.
 
 **Streaming is served as Server-Sent Events.** A request carrying ``stream:
 true`` is answered with an ``text/event-stream`` response whose chunks follow
 the OpenAI streaming shape. The stream is terminated by ``[DONE]`` only when it
 ended with a ``finish`` event: a stream that ended with an ``error`` event, or
 that ended with no terminal event at all, is closed without it, because the
-answer did not complete (PRD section 16). The gateway does not maintain
+answer did not complete. The gateway does not maintain
 per-provider streaming adapters: it consumes the stream the binding produces
 and re-normalises each chunk at the boundary. A provider that cannot stream is
 refused with a capability error naming ``streaming`` before the response starts,
 because answering a streaming request with a complete, non-streamed body would
-tell the caller it received something it did not (PRD sections 16 and 9.5).
+tell the caller it received something it did not.
 
 **The leading assistant-role delta is a transport detail, not a canonical
 event.** OpenAI-compatible clients conventionally expect the first SSE frame
@@ -48,7 +48,7 @@ request. The handler reconciles the body's ``tenant_id`` against it with
 :func:`~model_gateway.security.authorization.reconcile_identity` — the
 transport-independent policy — and hands the identity to
 :meth:`~model_gateway.http.dto.ChatRequest.to_invocation`, so the invocation
-carries the credential's tenant and never the body's (PRD section 5.1).
+carries the credential's tenant and never the body's.
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ async def _read_json_body(request: Request) -> object:
     declared JSON at all. Both are malformed input for this endpoint, and both
     become an invalid-request error carrying the taxonomy's reason rather than
     the framework's plain-text body, so every failure on this path answers in one
-    shape (PRD section 5.4).
+    shape.
     """
     try:
         payload = await request.json()
@@ -125,7 +125,7 @@ async def _read_json_body(request: Request) -> object:
 
 
 def create_chat_completion(service: InferenceService) -> ChatHandler:
-    """Build the handler for ``POST /v1/chat/completions`` (PRD section 4.4)."""
+    """Build the handler for ``POST /v1/chat/completions``."""
 
     async def chat_completions(request: Request) -> Response:
         chat_request = ChatRequest.from_payload(await _read_json_body(request))
@@ -168,7 +168,7 @@ async def _stream_chat_completion(
     namespace: str,
     tenant: str | None,
 ) -> Response:
-    """Serve one streaming invocation as Server-Sent Events (PRD section 16).
+    """Serve one streaming invocation as Server-Sent Events.
 
     The response is an ``text/event-stream`` whose chunks follow the OpenAI
     streaming shape. The events come from the inference service's own stream, so
@@ -258,7 +258,7 @@ class _GatewaySSEContent(StreamedContent):
     work to be stopped by garbage collection, which a client disconnect cannot
     wait for. This content closes the provider when the stream ends, whether
     it ends normally or because the consumer went away, so a disconnect stops
-    the upstream work deterministically (PRD section 16).
+    the upstream work deterministically.
     """
 
     def __init__(self, events_provider: Callable[[], AsyncIterator[ServerSentEvent]]) -> None:
@@ -282,7 +282,7 @@ class _GatewaySSEContent(StreamedContent):
 def _gateway_sse_response(
     events_provider: Callable[[], AsyncIterator[ServerSentEvent]],
 ) -> Response:
-    """The SSE response for one streaming invocation (PRD section 16).
+    """The SSE response for one streaming invocation.
 
     The headers are the ones Server-Sent Events calls for: a no-cache
     directive, because a stream is a live answer rather than a cacheable
@@ -328,7 +328,7 @@ def _role_delta_chunk(completion_id: str, created: int, model: str) -> dict[str,
 def _chunk_from_event(
     event: StreamEvent, *, completion_id: str, created: int, model: str
 ) -> dict[str, object]:
-    """One stream event as an OpenAI streaming chunk (PRD section 16).
+    """One stream event as an OpenAI streaming chunk.
 
     The chunk shape is the OpenAI-compatible one: an ``id``, ``object``,
     ``created`` and ``model`` carried on every chunk, and a single choice whose
@@ -371,7 +371,7 @@ def _tool_call_chunk(delta: ToolCallDelta) -> dict[str, object]:
     The fragment carries only the fields this event reported: the identifier,
     the name and the argument fragment are each present only when the event
     carried them, because a tool call arrives piece by piece and a consumer
-    accumulates the pieces by ``index`` (PRD sections 5.3 and 16).
+    accumulates the pieces by ``index``.
     """
     call: dict[str, object] = {"index": delta.index, "type": "function", "function": {}}
     function: dict[str, object] = call["function"]  # type: ignore[index]
@@ -389,7 +389,7 @@ def _usage_chunk(usage: Usage) -> dict[str, int]:
 
     A count the provider never reported is presented as zero because the OpenAI
     usage object types its counts as integers; the canonical record keeps the
-    difference between "none were used" and "nobody counted" (PRD section 13).
+    difference between "none were used" and "nobody counted".
     """
     prompt = 0 if usage.input_tokens is None else usage.input_tokens
     completion = 0 if usage.output_tokens is None else usage.output_tokens
@@ -404,7 +404,7 @@ def _finish_reason_chunk(event: StreamEvent) -> str | None:
 
     A finish event whose reason the gateway could not classify reports the raw
     reason verbatim rather than an invented OpenAI value, exactly as the
-    non-streaming response does (PRD sections 5.2 and 9.1). A failure after
+    non-streaming response does. A failure after
     output does not reach here: it ends the stream with an ``error`` event, not
     a ``finish`` event, so the gateway's own reason is never rendered as a
     finish reason.

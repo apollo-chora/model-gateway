@@ -1,13 +1,13 @@
-"""OpenAI-compatible request and response DTOs (PRD sections 4.3, 4.4, 9.1 and 9.5).
+"""OpenAI-compatible request and response DTOs.
 
 The HTTP surface speaks the OpenAI wire format and the gateway core speaks the
 canonical one; this module is the whole of the translation between them, in both
 directions.
 
 **Inbound, every field is mapped or refused.** Nothing the caller sent is
-dropped. PRD section 9.5 forbids silently discarding a parameter, and a caller
-told its request succeeded while a parameter was discarded has been misled about
-what the model was asked. A parameter the gateway recognises but cannot honour —
+dropped. Discarding a parameter silently would tell a caller its request
+succeeded while a parameter was ignored, misleading it about what the model was
+asked. A parameter the gateway recognises but cannot honour —
 ``n`` above one, ``logprobs``, the legacy ``functions`` family, ``audio`` — is
 answered with a capability error naming it, a recognised parameter whose value
 carries the wrong JSON type is answered with an invalid-request error naming
@@ -27,21 +27,21 @@ parameter is refused whatever its value.
 **Inbound images must be inline.** An ``image_url`` part is accepted only as a
 base64 data URI. A remote ``http`` or ``https`` URL is refused with a capability
 error naming ``remote_image_fetch``. The canonical image type documents a URL as
-one the URL policy has already admitted; PRD section 9.4 requires the gateway to
-screen it before the fetch, and section 14.1 requires the fetch itself to run
-under address pinning and redirect evaluation. None of that exists on this
-endpoint, and the screening cannot simply be added here: it resolves DNS, and a
-blocking resolution inside an async request handler stalls the event loop for
-every other request. Refusing the URL is the honest answer until the safe
-asynchronous validation and transport path exists (PRD section 9.5). Any other
-scheme, ``file`` included, is malformed input rather than a missing feature.
+one the URL policy has already admitted: the gateway must screen it before the
+fetch, and the fetch itself must run under address pinning and redirect
+evaluation. None of that exists on this endpoint, and the screening cannot
+simply be added here: it resolves DNS, and a blocking resolution inside an
+async request handler stalls the event loop for every other request. Refusing
+the URL is the honest answer until the safe asynchronous validation and
+transport path exists. Any other scheme, ``file`` included, is malformed input
+rather than a missing feature.
 
 **Outbound, every canonical item has a home or the response is refused.** Text,
 tool calls and refusals each have a field in the OpenAI completion message. An
 image does not: the chat completions shape has nowhere to put one, so a response
 carrying one is refused with a capability error rather than reported with the
 image missing. A caller must be able to tell that the answer it received is not
-the answer the model gave (PRD section 9.1).
+the answer the model gave.
 
 **Outbound, the order the model emitted must survive the translation.** Canonical
 output is an ordered sequence in which text, refusals and tool calls interleave —
@@ -69,15 +69,14 @@ provider was reached: ``not_applicable`` when the request carried no key,
 from the gateway's own record, and ``indeterminate`` when the gateway cannot say
 which of those it did. Reporting it is a property of answering, not a second
 contract: the store, the fingerprint and the refusal to answer one key from
-another key's payload are the inference service's, not this module's (PRD
-section 12).
+another key's payload are the inference service's, not this module's.
 
 Two canonical distinctions survive the translation because the OpenAI shape has
 room for them. A finish reason the gateway could not classify is reported as the
 provider's own raw reason rather than as an invented OpenAI value, and a token
 count the provider never reported is reported as zero only because the OpenAI
 usage object types its counts as integers — the canonical record keeps the
-difference between "none were used" and "nobody counted" (PRD section 13).
+difference between "none were used" and "nobody counted".
 """
 
 from __future__ import annotations
@@ -249,7 +248,7 @@ _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
     # parallel tool calls and ``false`` asks for a guarantee of sequential ones,
     # and this slice implements neither and models no distinction between them,
     # so accepting the parameter would advertise a capability the gateway does
-    # not have (PRD section 9.5). It is refused rather than mapped onto a
+    # not have. It is refused rather than mapped onto a
     # canonical field, because inventing that field is a contract change and not
     # a translation.
     "parallel_tool_calls": _Feature(
@@ -295,14 +294,14 @@ _INTERLEAVED_OUTPUT_CAPABILITY = "interleaved_output"
 
 @dataclass(frozen=True)
 class ModelCard:
-    """One entry of the ``GET /v1/models`` list (PRD section 4.3).
+    """One entry of the ``GET /v1/models`` list.
 
     A card carries the public model ID and the capability metadata a caller needs
     to choose a model, and nothing else. It is built from a
     :class:`~model_gateway.registry.ModelInfo`, which holds no route, endpoint or
     credential, so upstream configuration cannot reach a response through this
-    type. That is what makes acceptance criterion 12 structural rather than a
-    matter of remembering to strip fields: there is no field here to strip.
+    type. That is what makes the guarantee structural rather than a matter of
+    remembering to strip fields: there is no field here to strip.
 
     ``context_window``, ``max_output_tokens`` and ``dimensions`` are emitted only
     when the route states them. A field the deployment never configured is left
@@ -355,7 +354,7 @@ def model_list_payload(cards: Sequence[ModelCard]) -> dict[str, object]:
 
 @dataclass(frozen=True)
 class ChatRequest:
-    """A parsed ``POST /v1/chat/completions`` request (PRD section 4.4).
+    """A parsed ``POST /v1/chat/completions`` request.
 
     The parse is the gateway's, not the wire format's: by the time a caller has
     one of these, every field has a canonical home and every message is a
@@ -363,12 +362,12 @@ class ChatRequest:
     canonical fields that are not their namesakes — ``user`` is the caller's
     stable end-user identifier and becomes the invocation's ``actor_id``, and
     ``metadata`` becomes the invocation's non-sensitive request metadata, which
-    the gateway never forwards upstream (PRD section 5.1).
+    the gateway never forwards upstream.
 
     ``tenant_id`` maps onto the invocation's tenant, but is never trusted as
     one: the handler validates it against the tenant bound to the presented
     credential — and discards it when the caller is unauthenticated — before
-    the invocation is built (PRD section 5.1).
+    the invocation is built.
 
     The canonical request is built during the parse rather than afterwards, so
     the rules it enforces — a conversation with at least one message, metadata
@@ -378,9 +377,9 @@ class ChatRequest:
     unrepresentable halfway through an invocation.
 
     ``stream`` is carried rather than acted on. The endpoint refuses streaming
-    today (PRD section 16), and the refusal belongs to the endpoint, which knows
-    what it can serve; this type records what the caller asked for so that the
-    refusal can name it.
+    today, and the refusal belongs to the endpoint, which knows what it can
+    serve; this type records what the caller asked for so that the refusal can
+    name it.
     """
 
     invocation: InvocationRequest
@@ -427,8 +426,8 @@ class ChatRequest:
         ``identity`` is the trusted identity assigned by the authentication
         middleware. The invocation's ``tenant_id`` is that identity's tenant —
         never the request body's. A body ``tenant_id`` has already been checked
-        against the trusted tenant by the handler (PRD section 5.1), so the
-        body's value is discarded here rather than trusted: when there is no
+        against the trusted tenant by the handler, so the body's value is
+        discarded here rather than trusted: when there is no
         trusted identity, no tenant is propagated at all.
         """
         tenant = identity.tenant if identity is not None and identity.authenticated else None
@@ -437,7 +436,7 @@ class ChatRequest:
 
 @dataclass(frozen=True)
 class ChatMessage:
-    """The assistant message of an OpenAI chat completion (PRD section 4.4).
+    """The assistant message of an OpenAI chat completion.
 
     ``content`` is the concatenated text of the model's output and is ``None``
     when the answer was only tool calls, which is how OpenAI spells that case.
@@ -445,8 +444,7 @@ class ChatMessage:
     text and tool calls never reaches this type: :class:`ChatCompletion` refuses
     it (see :func:`_reject_unrepresentable_order`). ``refusal`` carries the
     provider's own refusal text, kept apart from ordinary text because a provider
-    declining on safety grounds is a different event from a model answering
-    (PRD section 5.2).
+    declining on safety grounds is a different event from a model answering.
     """
 
     content: str | None
@@ -465,15 +463,15 @@ class ChatMessage:
 
 @dataclass(frozen=True)
 class ChatCompletion:
-    """An OpenAI chat completion response (PRD section 4.4).
+    """An OpenAI chat completion response.
 
     The gateway's own accounting — upstream model, attempt count, fallback use,
     cost — is deliberately not in this payload: the OpenAI chat completions
     shape has no field for it, and adding one would be a contract the gateway
-    invented. That accounting belongs to the gRPC contract and to usage records
-    (PRD sections 5.2 and 13). ``idempotency_status`` is the one piece of it the
-    shape has a home for: it is rendered at the top level so a caller reading
-    the answer can tell whether the provider was reached (PRD section 12).
+    invented. That accounting belongs to the gRPC contract and to usage records.
+    ``idempotency_status`` is the one piece of it the shape has a home for: it
+    is rendered at the top level so a caller reading the answer can tell whether
+    the provider was reached.
     """
 
     id: str
@@ -499,7 +497,7 @@ class ChatCompletion:
         nowhere to put it, and one whose text and tool calls interleave, because
         the shape cannot record their order. Both refusals are capability errors,
         so a caller learns which feature is missing instead of receiving an
-        answer that is not the one the model gave (PRD sections 9.1 and 9.5).
+        answer that is not the one the model gave.
         """
         if response.images:
             raise CapabilityError(
@@ -550,9 +548,9 @@ def _reject_unrepresentable_order(response: InvocationResponse) -> None:
     interleave, and a response that interleaves them — text, a call, more text —
     therefore has no representation here: joining the text and hoisting the calls
     would report "said did said" as "said said, did", which is a different answer
-    from the one the model gave (PRD section 9.1). Every content item before
-    every tool call is the one grouping that survives, and anything else is a
-    capability the response shape does not have (PRD section 9.5).
+    from the one the model gave. Every content item before every tool call is the
+    one grouping that survives, and anything else is a capability the response
+    shape does not have.
     """
     seen_tool_call = False
     for item in response.content:
@@ -594,8 +592,7 @@ def _finish_reason(response: InvocationResponse) -> str | None:
     A reason the gateway could not classify is reported verbatim rather than
     replaced by an OpenAI value the provider never gave. ``UNKNOWN`` beside a raw
     reason means the gateway did not recognise it, and the raw reason is what
-    upstream actually said (PRD sections 5.2 and 9.1). ``None`` means the
-    provider reported no reason at all.
+    upstream actually said. ``None`` means the provider reported no reason at all.
     """
     if response.finish_reason is FinishReason.UNKNOWN:
         return response.raw_finish_reason
@@ -627,7 +624,7 @@ def _tool_call_payload(call: ToolCall) -> dict[str, object]:
     parsed, the raw string when they did not, and ``None`` when the provider
     reported none. All three are reported as the string OpenAI expects, so an
     argument payload the gateway could not parse is returned to the caller
-    unchanged rather than repaired into an empty object (PRD section 9.3).
+    unchanged rather than repaired into an empty object.
     """
     return {
         "id": call.id,
@@ -653,7 +650,7 @@ def _reject_unsupported_parameters(body: Mapping[str, object]) -> None:
     type supplied, which is a different error from the unsupported parameter.
     A correctly typed value that asks for something this gateway has no
     representation for is a capability the route cannot provide — the request is
-    well formed and the refusal is about the feature (PRD section 9.5).
+    well formed and the refusal is about the feature.
     """
     for name in sorted(set(body) - _CHAT_REQUEST_KEYS):
         feature = _UNSUPPORTED_FEATURES.get(name)
@@ -763,7 +760,7 @@ def _image_part_from(where: str, value: object) -> ImagePart:
     means resolving the hostname and rejecting loopback, private, link-local and
     metadata addresses — a blocking DNS lookup this async handler must not
     perform, and one that would only screen the URL, not pin the connection or
-    evaluate redirects as PRD section 14.1 requires. Remote image fetching
+    evaluate redirects. Remote image fetching
     arrives with that safe asynchronous validation and transport path; until then
     only inline content is accepted. Any other scheme, ``file`` included, is
     malformed input rather than a missing feature.
@@ -830,7 +827,7 @@ def _arguments_from(where: str, value: object) -> Mapping[str, JsonValue] | str 
     OpenAI encodes arguments as a JSON string. Storing the parsed object when it
     is one keeps the canonical representation useful, and keeping the raw string
     when it is not means a malformed argument payload is relayed rather than
-    repaired into an empty object the caller never sent (PRD section 9.3).
+    repaired into an empty object the caller never sent.
     """
     if value is None or isinstance(value, Mapping):
         return value
@@ -905,7 +902,7 @@ def _generation_config(body: Mapping[str, object]) -> GenerationConfig:
     ``max_tokens`` becomes ``max_output_tokens``: the OpenAI name counts the
     model's output, which is exactly what the canonical field bounds. Every
     parameter the caller omitted stays unset, so the provider's own default
-    applies rather than a value the gateway invented (PRD section 5.1).
+    applies rather than a value the gateway invented.
     """
     return GenerationConfig(
         temperature=body.get("temperature"),
@@ -966,7 +963,7 @@ def _schema_document(where: str, value: object) -> Mapping[str, JsonValue] | boo
 
     The canonical type refuses a schema a mode cannot consult, so a
     ``json_schema`` response format without one is an invalid request rather than
-    a requirement the gateway quietly drops (PRD section 9.5).
+    a requirement the gateway quietly drops.
     """
     if isinstance(value, bool):
         return value
@@ -1021,8 +1018,7 @@ def _as_idempotency_key(where: str, value: object) -> str | None:
     other value must be a non-empty string: the format defines the key as one, so
     a value of another type is malformed input naming the type that arrived, and
     an empty string is no key at all rather than a key that happens to be empty.
-    Both are refused as invalid requests rather than read as an absent key (PRD
-    section 12).
+    Both are refused as invalid requests rather than read as an absent key.
     """
     if value is None:
         return None

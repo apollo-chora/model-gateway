@@ -1,4 +1,4 @@
-"""The metrics endpoint: ``GET /metrics`` (PRD section 17).
+"""The metrics endpoint: ``GET /metrics``.
 
 The exposition surface for :mod:`model_gateway.metrics`. It is a module of its own
 because the registry is policy — which numbers the gateway keeps and what each one
@@ -10,7 +10,7 @@ negotiates on it, and serving the text as ``text/plain`` without the version wou
 tell a client that understands OpenMetrics that this is plain text it should not
 try to parse as anything else.
 
-**The endpoint is authenticated like every other path.** PRD section 14.2 exempts
+**The endpoint is authenticated like every other path.** The deployment exempts
 exactly two paths, ``/healthz`` and ``/readyz``, and a metrics scrape is not one
 of them: the exemption exists so a probe can reach a gateway that is unwell, and
 an operator's scraper can carry a credential the way any other client does.
@@ -18,7 +18,7 @@ Publishing the gateway's counts to an unauthenticated caller would also publish
 how much traffic it is carrying, which is not a health signal. What the body
 carries is counts and durations and no request content, which is what makes it
 safe to publish at all — the same rule that keeps prompts and credentials out of
-the logs (PRD section 17).
+the logs.
 """
 
 from collections.abc import Awaitable, Callable

@@ -1,7 +1,7 @@
-"""The middleware that continues an inbound trace (PRD section 17).
+"""The middleware that continues an inbound trace.
 
-Section 17 asks for W3C Trace Context support, and for a gateway that means
-something specific: an inbound ``traceparent`` is the parent of the span the
+Support for W3C Trace Context means something specific for a gateway: an inbound
+``traceparent`` is the parent of the span the
 gateway produces, so a caller's trace reaches the upstream through the gateway
 rather than stopping at it. This middleware is where that happens — it extracts the
 context from the request headers and attaches it for the duration of the request,

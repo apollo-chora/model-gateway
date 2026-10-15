@@ -1,14 +1,14 @@
-"""The Responses endpoint: ``POST /v1/responses`` (PRD sections 4.5, 9.1, 9.5 and 16).
+"""The Responses endpoint: ``POST /v1/responses``.
 
 The handler is thin on purpose, exactly as the other endpoints' are. It decodes
 the body, normalises it into the canonical invocation, calls the inference
 service and renders the canonical answer back into the Responses representation.
 It resolves no route, retries nothing and counts nothing: routing, fallback,
-retry, the deadline and the capability contract are the gateway core's (PRD
-sections 9.2, 9.5 and 11.2), and a second copy of that logic on the HTTP path is
-how the two transports drift apart.
+retry, the deadline and the capability contract are the gateway core's, and a
+second copy of that logic on the HTTP path is how the two transports drift
+apart.
 
-**A Responses-compatible upstream is not required** (PRD section 4.5). This
+**A Responses-compatible upstream is not required.** This
 endpoint is served by the ordinary chat provider: the canonical invocation is
 the one ``POST /v1/chat/completions`` builds and the canonical answer is the one
 the chat binding produces. The Responses representation is the *caller-facing*
@@ -19,22 +19,22 @@ Responses API serve the endpoint without lying about what it returned.
 **The accepted request is a documented subset, and nothing else is ignored.**
 The body carries ``model``, ``input``, ``instructions``, ``tools``,
 ``temperature``, ``top_p``, ``max_output_tokens``, ``stream``,
-``response_format``, ``tool_choice`` and ``metadata``, and that set is closed
-(PRD section 4.5). A key the gateway does not understand is refused with an
+``response_format``, ``tool_choice`` and ``metadata``, and that set is closed.
+A key the gateway does not understand is refused with an
 invalid-request error naming it; a key the Responses format defines and this
 endpoint does not carry — ``previous_response_id``, ``store``, ``text`` and
 the rest — is refused with a capability error naming the feature it would
 request. Neither is dropped, so a client SDK that serialises a parameter
 receives an error it can act on instead of a false assurance that its request
-was honoured (PRD sections 4.5 and 9.5). ``stream`` is accepted only as
+was honoured. ``stream`` is accepted only as
 ``false``, which is the default and asks for nothing; ``store: false`` is
 likewise the one value that matches what the gateway does, because it stores
 nothing. ``idempotency_key`` is the caller's own deduplication key, mapped onto
 the invocation's so a repeat of the same request is answered from the gateway's
 record of the first answer rather than by asking the provider again; the
 response carries ``idempotency_status`` beside ``id``, ``object``, ``created_at``,
-``model`` and ``status``, so a caller can tell whether the provider was reached
-(PRD section 12). A recognised parameter is held to its wire type before
+``model`` and ``status``, so a caller can tell whether the provider was reached.
+A recognised parameter is held to its wire type before
 anything else: a value of the wrong JSON type — ``{"store": 0}``, ``{"background": ""}``,
 ``{"include": "text"}`` — is an invalid-request error naming the parameter
 and the type actually supplied, because the test that decides whether a
@@ -66,7 +66,7 @@ hold, and one whose content continues after a tool call. The second is refused
 because a Responses ``output`` is *one assistant turn*, and a turn that calls a
 function ends there — splitting the content into a second ``message`` item
 would present one turn as two, and joining it would report "said did said" as
-"said said, did", which is not the answer the model gave (PRD section 9.1).
+"said said, did", which is not the answer the model gave.
 
 **Streaming is refused, not faked.** ``stream: true`` is answered with a
 capability error naming ``streaming``, before any provider is called. The
@@ -78,14 +78,14 @@ streams text as ``response.output_text.delta`` and closes with
 ``response.completed`` carrying the whole final response object. Every event
 carries an item id, an output index, a content index and a monotonic sequence
 number, and the ``added``/``done`` events carry the complete item. The canonical
-stream (PRD section 16) has none of that: its five kinds report a text fragment,
-a tool-call fragment, a usage snapshot, a terminal finish and a terminal error,
-and it carries no item identity and no item boundary. Emitting the lifecycle
-events would therefore mean the transport inventing item ids and item boundaries
-the canonical vocabulary deliberately does not carry, and inventing event types
-is exactly what the gateway must not do. The gateway will not answer a streaming
+stream has none of that: its five kinds report a text fragment, a tool-call
+fragment, a usage snapshot, a terminal finish and a terminal error, and it
+carries no item identity and no item boundary. Emitting the lifecycle events
+would therefore mean the transport inventing item ids and item boundaries the
+canonical vocabulary deliberately does not carry, and inventing event types is
+exactly what the gateway must not do. The gateway will not answer a streaming
 request with a complete, non-streamed body either, because that would tell the
-caller it received tokens as they were produced when it did not (PRD section 16),
+caller it received tokens as they were produced when it did not,
 so the request is refused. This is a documented subset limitation: the endpoint
 serves the non-streaming Responses representation only.
 """
@@ -192,12 +192,11 @@ _REQUEST_KEYS = frozenset(
         "idempotency_key",
     }
 )
-"""The request fields ``POST /v1/responses`` accepts (PRD section 4.5).
+"""The request fields ``POST /v1/responses`` accepts.
 
-The set is closed on purpose, exactly as the other endpoints' are: PRD section
-4.5 makes the gateway's OpenAI compatibility a supported subset rather than
-drop-in compatibility, so a parameter the gateway does not understand is refused
-rather than ignored.
+The set is closed on purpose, exactly as the other endpoints' are: the gateway's
+OpenAI compatibility is a supported subset rather than drop-in compatibility, so
+a parameter the gateway does not understand is refused rather than ignored.
 """
 
 _MESSAGE_KEYS = frozenset({"type", "role", "content", "id", "status"})
@@ -225,7 +224,7 @@ A nested object's key set is otherwise closed and an unlisted key is malformed
 input, exactly as the chat endpoint's nested objects are. These five are listed
 separately because they are not malformed: each names a feature the Responses
 format defines, so refusing one is a capability refusal rather than a complaint
-about the request (PRD section 9.5).
+about the request.
 """
 
 _IGNORED_ITEM_KEYS = ("id", "status")
@@ -233,11 +232,11 @@ _IGNORED_ITEM_KEYS = ("id", "status")
 
 Both are the Responses format's own item bookkeeping rather than answer
 semantics: ``id`` is the upstream's item identity, and the gateway stamps its own
-identity on the items it returns (PRD section 5.2), while ``status`` describes
-the lifecycle of an item whose content is already complete. They are accepted so
-that a caller can feed an answer's ``output`` array back as the next request's
-``input``, which is the pattern the Responses API is built around, and neither
-changes what the gateway sends upstream (PRD section 9.1).
+identity on the items it returns, while ``status`` describes the lifecycle of an
+item whose content is already complete. They are accepted so that a caller can
+feed an answer's ``output`` array back as the next request's ``input``, which is
+the pattern the Responses API is built around, and neither changes what the
+gateway sends upstream.
 """
 
 
@@ -322,7 +321,7 @@ _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
     # parallel tool calls and ``false`` asks for a guarantee of sequential ones,
     # and this slice implements neither and models no distinction between them,
     # so accepting the parameter would advertise a capability the gateway does
-    # not have (PRD section 9.5). The chat endpoint refuses it for the same
+    # not have. The chat endpoint refuses it for the same
     # reason, and the two endpoints must agree about it.
     "parallel_tool_calls": _Feature(
         "parallel_tool_calls", _Wire(frozenset({_WIRE_BOOLEAN, _WIRE_NULL}), None)
@@ -354,7 +353,7 @@ _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
     # ``store: false`` is accepted because it is the one value that agrees with
     # what the gateway does — it stores nothing — while ``true`` asks for the
     # Responses format's own default of a retained response, which the gateway
-    # cannot provide (PRD section 9.5).
+    # cannot provide.
     "store": _Feature("response_storage", _Wire(frozenset({_WIRE_BOOLEAN}), False)),
     "stream_options": _Feature("streaming", _Wire(frozenset({_WIRE_OBJECT}), {})),
     "text": _Feature(
@@ -374,7 +373,7 @@ Every entry is a parameter the Responses format defines, beside the documented
 subset this endpoint accepts, whose feature the canonical invocation has no way
 to ask for, or no way to ask for *here*. None of them is dropped, because a
 caller told its request succeeded while a parameter was discarded has been
-misled about what the model was asked (PRD section 9.5). Each entry's wire
+misled about what the model was asked. Each entry's wire
 contract states the JSON types the value may carry and the one correctly-typed
 value that asks for nothing; a value of any other type is malformed input,
 refused as an invalid request naming the parameter and the type supplied.
@@ -423,7 +422,7 @@ def _is_default(value: object, default: object) -> bool:
 
 @dataclass(frozen=True)
 class ResponsesRequest:
-    """A parsed ``POST /v1/responses`` request (PRD section 4.5).
+    """A parsed ``POST /v1/responses`` request.
 
     The parse is the gateway's, not the wire format's: by the time a caller has
     one of these, every field has a canonical home and every rule the canonical
@@ -437,7 +436,7 @@ class ResponsesRequest:
 
     The invocation carries no tenant from the body. This endpoint's documented
     subset has no tenant field, so the tenant is the one bound to the presented
-    credential and nothing else (PRD section 5.1).
+    credential and nothing else.
     """
 
     invocation: InvocationRequest
@@ -489,7 +488,7 @@ class ResponsesRequest:
         middleware, and the invocation's ``tenant_id`` is that identity's tenant.
         There is no body tenant to reconcile against, because the documented
         subset carries no tenant field: when there is no trusted identity, no
-        tenant is propagated at all (PRD section 5.1).
+        tenant is propagated at all.
         """
         tenant = identity.tenant if identity is not None and identity.authenticated else None
         return replace(self.invocation, invocation_id=invocation_id, tenant_id=tenant)
@@ -497,7 +496,7 @@ class ResponsesRequest:
 
 @dataclass(frozen=True)
 class ResponseObject:
-    """An OpenAI Responses object (PRD section 4.5).
+    """An OpenAI Responses object.
 
     ``output`` is the ordered array of items the answer produced, rendered from
     the canonical output sequence content-first: one ``message`` item carrying
@@ -511,10 +510,9 @@ class ResponseObject:
     its status, its output and its usage. The gateway's own accounting — the
     upstream model, the attempt count, fallback use, cost — is deliberately not
     in it, because the Responses object has no field for it and adding one would
-    be a contract the gateway invented (PRD sections 5.2 and 13).
-    ``idempotency_status`` is the one piece of it the shape has a home for: it is
-    rendered beside ``status`` so a caller reading the answer can tell whether
-    the provider was reached (PRD section 12). The fields the
+    be a contract the gateway invented. ``idempotency_status`` is the one piece of
+    it the shape has a home for: it is rendered beside ``status`` so a caller
+    reading the answer can tell whether the provider was reached. The fields the
     Responses object carries that describe the *request* — ``instructions``,
     ``tools``, ``temperature`` — are left out for the same reason the chat
     endpoint leaves out its accounting: echoing a request back is not part of
@@ -547,7 +545,7 @@ class ResponseObject:
         tool call, because a Responses ``output`` is one assistant turn and a
         turn that calls a function ends there. Both refusals are capability
         errors, so a caller learns which feature is missing instead of receiving
-        an answer that is not the one the model gave (PRD sections 9.1 and 9.5).
+        an answer that is not the one the model gave.
         """
         _reject_unrepresentable_output(response)
         return cls(
@@ -573,7 +571,7 @@ class ResponseObject:
 
 
 def create_response(service: InferenceService) -> ResponsesHandler:
-    """Build the handler for ``POST /v1/responses`` (PRD section 4.5)."""
+    """Build the handler for ``POST /v1/responses``."""
 
     async def responses(request: Request) -> Response:
         parsed = ResponsesRequest.from_payload(await _read_json_body(request))
@@ -606,7 +604,7 @@ def register_responses_routes(router: Router, service: InferenceService) -> None
 
 
 def _streaming_refusal() -> CapabilityError:
-    """The refusal for ``stream: true`` (PRD sections 4.5 and 16).
+    """The refusal for ``stream: true``.
 
     The refusal names ``streaming`` and says which protocol is missing, because
     the feature the caller asked for is the Responses streaming protocol rather
@@ -634,7 +632,7 @@ async def _read_json_body(request: Request) -> object:
     declared JSON at all. Both are malformed input for this endpoint, and both
     become an invalid-request error carrying the taxonomy's reason rather than
     the framework's plain-text body, so every failure on this path answers in one
-    shape (PRD section 5.4).
+    shape.
     """
     try:
         payload = await request.json()
@@ -660,7 +658,7 @@ def _reject_unsupported_parameters(body: Mapping[str, object]) -> None:
     correctly-typed value that is not the one this gateway already behaves like
     asks for something this endpoint has no representation for, and is a
     capability the route cannot provide — the request is well formed and the
-    refusal is about the feature (PRD section 9.5).
+    refusal is about the feature.
     """
     for name in sorted(set(body) - _REQUEST_KEYS):
         feature = _UNSUPPORTED_FEATURES.get(name)
@@ -692,7 +690,7 @@ def _reject_nested_keys(where: str, body: Mapping[str, object], supported: froze
     A nested object's key set is closed, exactly as the chat endpoint's are. A
     key the Responses format defines is refused as a capability the endpoint does
     not have rather than as malformed input, because the request is well formed
-    and the refusal is about the feature (PRD section 9.5).
+    and the refusal is about the feature.
     """
     for key in sorted(set(body) - supported):
         feature = _NESTED_FEATURES.get(key)
@@ -725,7 +723,7 @@ def _as_flag(where: str, value: object) -> bool:
 
 
 def _as_messages(where: str, value: object) -> tuple[Message, ...]:
-    """The canonical conversation from a Responses ``input`` (PRD section 4.5).
+    """The canonical conversation from a Responses ``input``.
 
     A string is the one user message it spells. An array is an ordered sequence
     of input items, and their order is the conversation's order, so the items are
@@ -758,7 +756,7 @@ def _messages_from_item(where: str, payload: object) -> tuple[Message, ...]:
     ``function_call_output`` is the tool message answering it. Any other item
     type is a feature this endpoint does not carry and is refused naming it,
     rather than skipped, because a dropped item changes the conversation the
-    model sees (PRD sections 4.5 and 9.1).
+    model sees.
     """
     body = _as_object(where, payload)
     kind = body.get("type")
@@ -801,7 +799,7 @@ def _role(where: str, value: object) -> Role:
     type's: the Responses input message carries no tool-call identifier, so a
     tool result belongs to a ``function_call_output`` item, which names the call
     it answers. A message the gateway cannot match to a call is not a
-    conversation it can send (PRD section 9.3).
+    conversation it can send.
     """
     if not isinstance(value, str):
         raise InvalidArgumentError(f"{where} must be a string, got {describe(value)}")
@@ -839,8 +837,7 @@ def _content_part_from(where: str, payload: object) -> TextPart | ImagePart:
     ``vision`` capability to carry. Anything else is refused rather than
     approximated: a part type this endpoint does not carry is a feature the
     gateway has no representation for, and it is named so the caller learns
-    what is missing instead of sending a message the model never saw (PRD
-    sections 9.1 and 9.5).
+    what is missing instead of sending a message the model never saw.
     """
     body = _as_object(where, payload)
     kind = body.get("type")
@@ -877,7 +874,7 @@ def _image_part_from(where: str, value: object) -> ImagePart:
     means resolving the hostname and rejecting loopback, private, link-local and
     metadata addresses — a blocking DNS lookup this async handler must not
     perform, and one that would only screen the URL, not pin the connection or
-    evaluate redirects as PRD section 14.1 requires. Remote image fetching
+    evaluate redirects. Remote image fetching
     arrives with that safe asynchronous validation and transport path; until
     then only inline content is accepted. Any other scheme, ``file`` included,
     is malformed input rather than a missing feature.
@@ -921,7 +918,7 @@ def _reject_annotations(where: str, value: object) -> None:
     input. A populated one carries citations — a URL the provider consulted, a
     file it read — which the canonical content representation has no field for,
     and a text part returned without them would report the model's words while
-    losing what they pointed at (PRD section 9.1).
+    losing what they pointed at.
     """
     if not value:
         return
@@ -975,8 +972,7 @@ def _as_idempotency_key(where: str, value: object) -> str | None:
     ``None`` is an optional parameter's wire default and asks for nothing. Any
     other value must be a non-empty string: the format defines the key as one, so
     a value of another type is malformed input naming the type that arrived, and
-    an empty string is no key at all rather than a key that happens to be empty
-    (PRD section 12).
+    an empty string is no key at all rather than a key that happens to be empty.
     """
     if value is None:
         return None
@@ -990,7 +986,7 @@ def _arguments_from(where: str, value: object) -> Mapping[str, JsonValue] | str 
     format does. Storing the parsed object when it is one keeps the canonical
     representation useful, and keeping the raw string when it is not means a
     malformed argument payload is relayed rather than repaired into an empty
-    object the caller never sent (PRD section 9.3).
+    object the caller never sent.
     """
     if value is None or isinstance(value, Mapping):
         return value
@@ -1020,8 +1016,8 @@ def _tool_from(where: str, payload: object) -> ToolDefinition:
     ``parameters`` — rather than the chat format's nested ``function`` object,
     and the canonical definition is built from the flat form. A hosted tool is
     refused naming its type, because the gateway relays function tools and hosts
-    none (PRD section 9.3), and ``strict`` is refused when it asks for schema
-    enforcement the canonical declaration cannot request.
+    none, and ``strict`` is refused when it asks for schema enforcement the
+    canonical declaration cannot request.
     """
     body = _as_object(where, payload)
     kind = body.get("type")
@@ -1061,8 +1057,7 @@ def _tool_choice_from(where: str, value: object) -> ToolChoice | None:
     as an object naming one function, and both shapes map onto the canonical
     policy: the chat endpoint accepts the same two and the binding forwards the
     policy upstream, so accepting it here keeps the two endpoints in agreement
-    about what a caller may ask the model to do with its tools (PRD section
-    9.3).
+    about what a caller may ask the model to do with its tools.
     """
     if value is None:
         return None
@@ -1090,14 +1085,13 @@ def _tool_choice_from(where: str, value: object) -> ToolChoice | None:
 def _metadata_from(where: str, value: object) -> Mapping[str, JsonValue]:
     """A Responses ``metadata`` object as the canonical request metadata.
 
-    PRD section 5.1 defines ``metadata`` as request metadata, and the canonical
-    request carries it as arbitrary JSON held as an immutable mapping, so the
-    value is forwarded to the canonical type and nothing is invented here. The
-    canonical type's own rules bound it and are enforced there rather than
-    restated: a key naming a canonical invocation field or a generation
-    parameter is refused, because metadata is never forwarded to a model or a
-    provider and a model parameter parked there would be a semantic the gateway
-    neither represents nor sends (PRD section 9.1).
+    ``metadata`` is request metadata, and the canonical request carries it as
+    arbitrary JSON held as an immutable mapping, so the value is forwarded to the
+    canonical type and nothing is invented here. The canonical type's own rules
+    bound it and are enforced there rather than restated: a key naming a canonical
+    invocation field or a generation parameter is refused, because metadata is
+    never forwarded to a model or a provider and a model parameter parked there
+    would be a semantic the gateway neither represents nor sends.
     """
     if value is None:
         return {}
@@ -1110,7 +1104,7 @@ def _generation_config(where: str, body: Mapping[str, object]) -> GenerationConf
     ``max_output_tokens`` is the canonical field's own name, and ``temperature``
     and ``top_p`` map onto themselves. Every parameter the caller omitted stays
     unset, so the provider's own default applies rather than a value the
-    gateway invented (PRD section 5.1).
+    gateway invented.
     """
     try:
         return GenerationConfig(
@@ -1128,11 +1122,11 @@ def _generation_config(where: str, body: Mapping[str, object]) -> GenerationConf
 def _as_response_format(where: str, value: object) -> ResponseFormat | None:
     """A structured-output requirement in the shape the chat endpoint accepts.
 
-    PRD section 4.5 gives this endpoint ``response_format``, and the shape it
-    takes is the one ``POST /v1/chat/completions`` takes, so the gateway's
-    structured-output contract reads the same on both endpoints. The requirement
-    itself is enforced at the gateway core against the primary route's advertised
-    capabilities (PRD section 9.5), never here.
+    This endpoint carries ``response_format``, and the shape it takes is the one
+    ``POST /v1/chat/completions`` takes, so the gateway's structured-output
+    contract reads the same on both endpoints. The requirement itself is enforced
+    at the gateway core against the primary route's advertised capabilities, never
+    here.
     """
     if value is None:
         return None
@@ -1169,7 +1163,7 @@ def _schema_document(where: str, value: object) -> Mapping[str, JsonValue] | boo
 
     The canonical type refuses a schema a mode cannot consult, so a
     ``json_schema`` response format without one is an invalid request rather than
-    a requirement the gateway quietly drops (PRD section 9.5).
+    a requirement the gateway quietly drops.
     """
     if isinstance(value, bool):
         return value
@@ -1177,7 +1171,7 @@ def _schema_document(where: str, value: object) -> Mapping[str, JsonValue] | boo
 
 
 def _reject_unrepresentable_output(response: InvocationResponse) -> None:
-    """Refuse output the Responses object cannot carry (PRD sections 9.1 and 9.5).
+    """Refuse output the Responses object cannot carry.
 
     Two cases, and they are refused for different reasons. An image has no home
     at all: a Responses ``message`` item's content holds output text and
@@ -1211,7 +1205,7 @@ def _reject_unrepresentable_output(response: InvocationResponse) -> None:
 
 
 def _output_items(content: tuple[OutputItem, ...], *, response_id: str) -> list[dict[str, object]]:
-    """The ordered ``output`` array for one canonical answer (PRD section 4.5).
+    """The ordered ``output`` array for one canonical answer.
 
     The rendering is content-first: every content part becomes the content list
     of one ``message`` item, in the order the model emitted them, and then every
@@ -1243,8 +1237,7 @@ def _message_item(
 
     A refusal keeps its own variant rather than being folded into text, because a
     provider declining on safety grounds is a different event from a model
-    answering (PRD section 5.2), and the Responses content union has a variant
-    for each.
+    answering, and the Responses content union has a variant for each.
     """
     return {
         "id": f"{_MESSAGE_ID_PREFIX}{response_id}",
@@ -1275,7 +1268,7 @@ def _function_call_item(call: ToolCall, *, response_id: str, index: int) -> dict
     ``call_id`` is the canonical call's own identifier, which is what a caller
     matches a ``function_call_output`` against; ``id`` is the item's identity,
     which the gateway mints because the canonical call carries none and the
-    Responses representation is the gateway's to stamp (PRD section 5.2).
+    Responses representation is the gateway's to stamp.
     """
     return {
         "id": f"{_FUNCTION_CALL_ID_PREFIX}{response_id}_{index}",
@@ -1294,7 +1287,7 @@ def _arguments_payload(arguments: Mapping[str, JsonValue] | str | None) -> str:
     parsed, the raw string when they did not, and ``None`` when the provider
     reported none. All three are reported as the string the shape expects, so an
     argument payload the gateway could not parse is returned to the caller
-    unchanged rather than repaired into an empty object (PRD section 9.3).
+    unchanged rather than repaired into an empty object.
     """
     if arguments is None:
         return ""
@@ -1312,7 +1305,7 @@ def _usage_payload(usage: Usage) -> dict[str, object]:
     cannot preserve the canonical record's difference between "none were used"
     and "nobody counted", so the gateway reports zero rather than inventing an
     omission the shape has no field for, and a caller cannot recover from the
-    response alone which of the two a zero is (PRD section 13). A total the
+    response alone which of the two a zero is. A total the
     provider omitted is summed from the two counts it did report, which is
     arithmetic the caller can repeat.
 
@@ -1322,7 +1315,7 @@ def _usage_payload(usage: Usage) -> dict[str, object]:
     model does not track at all, so the gateway has never observed one and
     reports zero for them rather than omitting a field the shape requires; a
     binding that met either would refuse the upstream response as unrepresentable
-    rather than pass it on (PRD section 9.1).
+    rather than pass it on.
     """
     prompt = 0 if usage.input_tokens is None else usage.input_tokens
     completion = 0 if usage.output_tokens is None else usage.output_tokens

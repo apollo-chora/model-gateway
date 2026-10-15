@@ -1,7 +1,8 @@
-"""The inbound body-size limit (PRD section 14).
+"""The inbound body-size limit.
 
-Section 14 requires request-body size limits, and this is where the HTTP transport
-applies one. The bound is the deployment's, from ``GATEWAY_MAX_REQUEST_BODY_BYTES``,
+A request-body size limit is a deployment concern, and this is where the HTTP
+transport applies one. The bound is the deployment's, from
+``GATEWAY_MAX_REQUEST_BODY_BYTES``,
 and it exists because the gateway reads a body into memory before it can validate
 anything in it: without a bound, the size of a caller's request is the amount of
 memory the gateway will spend on it, and that is true before authentication has
@@ -24,7 +25,7 @@ limit a caller evades by declining to state a size.
 a well-formed request the deployment will not carry, which is what 413 is for, and
 gRPC reports the same condition as ``RESOURCE_EXHAUSTED``. The reason is
 ``payload_too_large`` so the two can be told apart from the rate and concurrency
-refusals they share a gRPC status with (PRD sections 5.4 and 14).
+refusals they share a gRPC status with.
 
 **The limit is applied after authentication.** Both checks are cheap and neither
 reads the body, so the order is a statement about what an unidentified caller is

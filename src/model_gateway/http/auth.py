@@ -1,7 +1,7 @@
 """Inbound HTTP authentication: credential extraction, scope and trusted identity.
 
 This module is the whole of the gateway's inbound authentication on the HTTP
-surface (PRD sections 7 and 14). It extracts the credential and decides scope,
+surface. It extracts the credential and decides scope,
 and nothing else:
 
 **Who is calling?** A credential is extracted from the request — ``Authorization:
@@ -9,7 +9,7 @@ Bearer <key>`` or ``x-api-key: <key>`` — and validated against the configured
 key set. The result is a :class:`~model_gateway.security.identity.Identity`:
 the one trusted-identity type the rest of the gateway switches on. The identity
 is derived from the credential alone, so a tenant is a property of the key and
-never of the request (PRD section 5.1).
+never of the request.
 
 **May they call this?** When authentication is enabled, every endpoint
 requires a valid credential — not only the ``/v1/*`` surface but every path a
@@ -29,7 +29,7 @@ with respect to identity is to extract the credential and assign the identity it
 yields.
 
 The presented key is never logged, published or echoed. Log records carry the
-non-secret ``key_label`` instead (PRD section 17).
+non-secret ``key_label`` instead.
 """
 
 from collections.abc import Awaitable, Callable
@@ -134,7 +134,7 @@ def create_auth_middleware(
     The middleware assigns the trusted identity to the request as the
     ``gateway_identity`` attribute before the handler runs, so handlers read
     the identity the credential produced rather than anything a request body
-    claims (PRD section 5.1). It decides nothing else: routing, body parsing
+    claims. It decides nothing else: routing, body parsing
     and response shaping stay with the handlers.
     """
 

@@ -1,4 +1,4 @@
-"""Error mapping from the gateway taxonomy onto HTTP responses (PRD sections 5.4, 9.5 and 14).
+"""Error mapping from the gateway taxonomy onto HTTP responses.
 
 The taxonomy in :mod:`model_gateway.errors` already knows which HTTP status each
 category carries, so this module decides nothing about status codes. It has two
@@ -11,7 +11,7 @@ exception, a bug in the gateway, a decoding failure — none of those may reach 
 caller as a traceback, a provider message or an HTML error page, because a
 traceback carries the code path and a provider message carries whatever the
 provider chose to include: an upstream URL, a request id, sometimes the prompt
-itself (PRD section 14). :func:`~model_gateway.errors.normalise_exception` turns
+itself. :func:`~model_gateway.errors.normalise_exception` turns
 any such failure into an internal gateway error with a fixed, gateway-authored
 message, and this module returns that instead.
 
@@ -22,7 +22,7 @@ those through a separate lookup that stops at ``HTTPException`` before reaching
 the handlers registered here, so a 404 for an unknown path or a 400 for an
 unreadable body keeps the framework's behaviour.
 
-Logging follows PRD section 17. The record names the reason and the exception
+Logging follows the same rule. The record names the reason and the exception
 *type*; it does not format the exception chain, because
 ``normalise_exception`` keeps the original exception as ``__cause__`` and that
 chain may hold a prompt, a response or a credential. A log line that would help
@@ -62,7 +62,7 @@ async def handle_gateway_error(
 async def handle_unexpected_error(
     app: Application, request: Request, error: Exception
 ) -> Response:
-    """Turn any unclassified failure into a sanitised 500 (PRD section 14).
+    """Turn any unclassified failure into a sanitised 500.
 
     The original exception is discarded from the response and kept only as
     ``__cause__``, so the provider's message, type name and traceback cannot

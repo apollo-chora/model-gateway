@@ -1,11 +1,11 @@
-"""The legacy completions endpoint: ``POST /v1/completions`` (PRD sections 4 and 16).
+"""The legacy completions endpoint: ``POST /v1/completions``.
 
 The handler is thin on purpose, exactly as the other endpoints' are. It decodes
 the body, translates it into the canonical invocation, calls the inference
 service and renders the canonical response back into the OpenAI shape. It
 resolves no route, retries nothing and counts nothing: routing, fallback, retry
-and accounting are the gateway core's (PRD sections 9.2 and 11.3), and a second
-copy of that logic on the HTTP path is how the two transports drift apart.
+and accounting are the gateway core's, and a second copy of that logic on the
+HTTP path is how the two transports drift apart.
 
 **The accepted request is the documented subset, and nothing else is ignored.**
 A legacy completion has no roles, so the prompt becomes a single canonical user
@@ -13,8 +13,8 @@ message; the sampling parameters (``max_tokens``, ``temperature``, ``top_p``,
 ``stop``) map onto the canonical generation config. A key the gateway does not
 understand is refused with an invalid-request error naming it rather than
 dropped, and a key it recognises but cannot honour is refused with a capability
-error naming the feature (PRD section 4's compatibility boundary, applied to
-this endpoint's own documented subset):
+error naming the feature — the compatibility boundary applied to this endpoint's
+own documented subset:
 
 * ``n`` above one asks for several completions, and this endpoint answers one;
   ``n: 1`` is the gateway's own default and is accepted.
@@ -32,8 +32,7 @@ this endpoint's own documented subset):
   invocation's so a repeat of the same request is answered from the gateway's
   record of the first answer rather than by asking the provider again. It is a
   plain string and optional; the response carries ``idempotency_status`` beside
-  ``id`` and ``model`` so a caller can tell whether the provider was reached
-  (PRD section 12).
+  ``id`` and ``model`` so a caller can tell whether the provider was reached.
 
 **A recognised parameter's wire type is checked before its value is judged.**
 Each parameter in that subset has one JSON type on the wire, and a value of
@@ -43,7 +42,7 @@ Python's ``bool`` subclasses ``int`` — and ``{"echo": 0}`` is not ``echo:
 false``. Neither value is read as asking for nothing, and neither is refused as
 a missing capability: a capability refusal would tell the caller the request was
 understood when it was not. An ill-typed value is an invalid-request error
-naming the parameter and the type that arrived (PRD sections 4 and 9.5).
+naming the parameter and the type that arrived.
 
 **An array prompt is refused, not narrowed.** The OpenAI format accepts a
 ``prompt`` that is a string or an array of strings, and an array asks for one
@@ -53,7 +52,7 @@ representation here: the gateway does not silently use the first element (which
 would answer a request it never received) and does not join the elements (which
 would send the model one prompt the caller never sent). The refusal is a
 capability error naming ``multiple_prompts``, so a caller learns the shape
-cannot carry what it asked for (PRD section 9.1).
+cannot carry what it asked for.
 
 **The response is the documented shape, and the whole answer must fit it.** The
 OpenAI legacy completion carries one ``text`` per choice, so the answer is the
@@ -61,10 +60,10 @@ canonical output's text. A canonical answer can also carry tool calls, refusals
 or images, and the legacy shape has no field for any of them: a caller told the
 answer was delivered when part of it was dropped has been misled, so an answer
 carrying any of those is refused with a capability error naming it rather than
-returned without it (PRD sections 9.1 and 9.5). The gateway's own accounting —
-the invocation identifier, the upstream model, the attempt count — is
-deliberately not in this payload, because the legacy shape has no field for it
-(PRD sections 5.2 and 13). ``idempotency_status`` is the one piece of it the
+returned without it. The gateway's own accounting — the invocation identifier,
+the upstream model, the attempt count — is deliberately not in this payload,
+because the legacy shape has no field for it. ``idempotency_status`` is the one
+piece of it the
 shape has a home for, and it is rendered beside ``id`` and ``model``.
 
 **Streaming is served as Server-Sent Events in the legacy chunk shape.** A
@@ -73,7 +72,7 @@ response whose chunks carry the fragment the event reports under
 ``choices[0].text``, and the stream is terminated by ``[DONE]`` only when it
 ended with a ``finish`` event: a stream that ended with an ``error`` event, or
 that ended with no terminal event at all, is closed without it, because the
-answer did not complete (PRD section 16). The events come from the inference
+answer did not complete. The events come from the inference
 service's own stream, so routing, retry, fallback, the deadline and the
 no-fallback-after-first-output rule are the gateway core's, not duplicated
 here. The Server-Sent Events response itself is the gateway's shared builder,
@@ -82,7 +81,7 @@ transports' stream teardown — a client disconnect stops the upstream work —
 cannot drift apart. A provider that cannot stream is refused with a capability
 error naming ``streaming`` before the response starts, because answering a
 streaming request with a complete, non-streamed body would tell the caller it
-received something it did not (PRD sections 16 and 9.5).
+received something it did not.
 
 **A streamed tool call ends the stream rather than being dropped.** The legacy
 chunk shape has no place for a tool call, exactly as the non-streaming shape has
@@ -99,8 +98,7 @@ caller's completion with the gateway's own logs and usage records.
 
 The request shape carries no tenant field — the legacy completions format has
 none — so there is no claimed tenant to reconcile; the invocation's tenant comes
-from the authenticated identity alone, exactly as on the other endpoints
-(PRD section 5.1).
+from the authenticated identity alone, exactly as on the other endpoints.
 """
 
 from __future__ import annotations
@@ -173,10 +171,10 @@ _REQUEST_KEYS = frozenset(
 )
 """The request fields ``POST /v1/completions`` recognises.
 
-The set is closed on purpose, exactly as the other endpoints': PRD section 4
-makes the gateway's OpenAI compatibility a supported subset rather than drop-in
-compatibility, so a parameter the gateway does not understand is refused rather
-than ignored. The set is this endpoint's documented subset — a legacy
+The set is closed on purpose, exactly as the other endpoints': the gateway's
+OpenAI compatibility is a supported subset rather than drop-in compatibility, so
+a parameter the gateway does not understand is refused rather than ignored. The
+set is this endpoint's documented subset — a legacy
 completion carries no roles, no tools, no metadata and no tenant — and each
 parameter in it is either honoured or refused with a capability error naming
 the feature, never silently dropped.
@@ -288,7 +286,7 @@ sample the gateway already produces, ``logprobs: false`` and ``echo: false`` ask
 for the absence of something the gateway never adds, and ``suffix: null`` states
 nothing at all. A value of the right type that is not that default asks for the
 feature, and is refused with a capability error naming it; a value of the wrong
-type is malformed input, and is refused as an invalid request (PRD section 9.5).
+type is malformed input, and is refused as an invalid request.
 """
 
 
@@ -354,7 +352,7 @@ class CompletionRequest:
         middleware. The invocation's ``tenant_id`` is that identity's tenant;
         the request shape carries no tenant claim of its own, so there is nothing
         to reconcile and the body's absence of a tenant is the whole of that rule
-        here (PRD section 5.1).
+        here.
         """
         tenant = identity.tenant if identity is not None and identity.authenticated else None
         return replace(self.invocation, invocation_id=invocation_id, tenant_id=tenant)
@@ -385,10 +383,10 @@ class TextCompletion:
     The gateway's own accounting — upstream model, attempt count, fallback use,
     cost — is deliberately not in this payload: the legacy completions shape has
     no field for it, and adding one would be a contract the gateway invented.
-    That accounting belongs to the gRPC contract and to usage records (PRD
-    sections 5.2 and 13). ``idempotency_status`` is the one piece of it the shape
-    has a home for: it is rendered beside ``id`` and ``model`` so a caller
-    reading the answer can tell whether the provider was reached (PRD section 12).
+    That accounting belongs to the gRPC contract and to usage records.
+    ``idempotency_status`` is the one piece of it the shape has a home for: it is
+    rendered beside ``id`` and ``model`` so a caller reading the answer can tell
+    whether the provider was reached.
     """
 
     id: str
@@ -413,7 +411,7 @@ class TextCompletion:
         legacy choice shape has nowhere to put any of them and the gateway does
         not return a partial answer. The refusal is a capability error, so a
         caller learns which feature is missing instead of receiving an answer
-        that is not the one the model gave (PRD sections 9.1 and 9.5).
+        that is not the one the model gave.
         """
         _reject_unrepresentable_answer(response)
         return cls(
@@ -457,8 +455,7 @@ def completion_request_from_payload(payload: object) -> CompletionRequest:
     carrying the domain's own gateway-authored message, which names the field
     that failed. A recognised parameter this endpoint cannot honour is refused
     with a capability error naming the feature, and a key the endpoint does not
-    recognise is an invalid-request error naming that key (PRD sections 4 and
-    9.5).
+    recognise is an invalid-request error naming that key.
     """
     return CompletionRequest.from_payload(payload)
 
@@ -512,7 +509,7 @@ async def _stream_completion(
     namespace: str,
     tenant: str | None,
 ) -> Response:
-    """Serve one streaming invocation as Server-Sent Events (PRD section 16).
+    """Serve one streaming invocation as Server-Sent Events.
 
     The response is an ``text/event-stream`` whose chunks follow the OpenAI
     legacy streaming shape: each chunk carries the fragment the event reports
@@ -557,7 +554,7 @@ async def _stream_completion(
     if first_event is not None and first_event.kind is StreamEventKind.TOOL_CALL:
         # A leading tool call is a capability gap discovered before anything was
         # delivered, so it is refused as an ordinary error response rather than
-        # a stream (PRD section 16).
+        # a stream.
         await event_iter.aclose()
         error = _tool_call_capability_error()
         return json(error.to_payload(), status=error.http_status)
@@ -627,7 +624,7 @@ def _chunk_envelope(completion_id: str, created: int, model: str) -> dict[str, o
 def _chunk_from_event(
     event: StreamEvent, *, completion_id: str, created: int, model: str
 ) -> dict[str, object]:
-    """One stream event as an OpenAI legacy streaming chunk (PRD section 16).
+    """One stream event as an OpenAI legacy streaming chunk.
 
     The chunk shape is the OpenAI-compatible one: an ``id``, ``object``,
     ``created`` and ``model`` carried on every chunk, and a single choice whose
@@ -660,7 +657,7 @@ def _tool_call_error_fields() -> dict[str, str]:
 
     The same refusal the non-streaming path raises, so a caller learns the same
     fact from either path: the legacy shape has no field for a tool call, and
-    the gateway does not silently drop model output (PRD sections 9.1 and 9.5).
+    the gateway does not silently drop model output.
     """
     return {
         "reason": ErrorReason.UNSUPPORTED_CAPABILITY.value,
@@ -678,7 +675,7 @@ def _tool_call_error_event(
     ends with the gateway's own stable reason — the capability refusal a
     tool-carrying answer is refused with on the non-streaming path — and the
     same message, on a chunk with no choice, so the caller is not told the
-    answer completed (PRD sections 9.1 and 16).
+    answer completed.
     """
     chunk = _chunk_envelope(completion_id, created, model)
     chunk["choices"] = []
@@ -699,7 +696,7 @@ def _finish_reason_chunk(event: StreamEvent) -> str | None:
 
     A finish event whose reason the gateway could not classify reports the raw
     reason verbatim rather than an invented OpenAI value, exactly as the
-    non-streaming response does (PRD sections 5.2 and 9.1). A failure after
+    non-streaming response does. A failure after
     output does not reach here: it ends the stream with an ``error`` event, not
     a ``finish`` event, so the gateway's own reason is never rendered as a
     finish reason.
@@ -715,9 +712,8 @@ def _reject_unrepresentable_answer(response: InvocationResponse) -> None:
     The legacy choice holds one ``text`` and nothing else, so a canonical answer
     carrying a tool call, a refusal or an image has no representation here.
     Returning it without the unrepresentable part would tell the caller the
-    answer was delivered when part of it was dropped, which PRD section 9.5
-    forbids; the refusal names the feature so the caller learns what the shape
-    is missing (PRD section 9.1).
+    answer was delivered when part of it was dropped; the refusal names the
+    feature so the caller learns what the shape is missing.
     """
     if response.tool_calls:
         raise _tool_call_capability_error()
@@ -743,8 +739,7 @@ def _finish_reason(response: InvocationResponse) -> str | None:
     A reason the gateway could not classify is reported verbatim rather than
     replaced by an OpenAI value the provider never gave. ``UNKNOWN`` beside a raw
     reason means the gateway did not recognise it, and the raw reason is what
-    upstream actually said (PRD sections 5.2 and 9.1). ``None`` means the
-    provider reported no reason at all.
+    upstream actually said. ``None`` means the provider reported no reason at all.
     """
     if response.finish_reason is FinishReason.UNKNOWN:
         return response.raw_finish_reason
@@ -756,10 +751,9 @@ def _usage_payload(usage: Usage) -> dict[str, int]:
 
     A count the provider never reported is presented as zero because the OpenAI
     usage object types its counts as integers; the canonical record keeps the
-    difference between "none were used" and "nobody counted" (PRD section 13).
-    On a streaming chunk the same counts appear on a chunk with no choice,
-    because a usage report is a fact about the answer, not a fragment of it
-    (PRD section 16).
+    difference between "none were used" and "nobody counted". On a streaming
+    chunk the same counts appear on a chunk with no choice, because a usage
+    report is a fact about the answer, not a fragment of it.
     """
     prompt = 0 if usage.input_tokens is None else usage.input_tokens
     completion = 0 if usage.output_tokens is None else usage.output_tokens
@@ -779,9 +773,8 @@ def _reject_unsupported_parameters(body: Mapping[str, object]) -> None:
     request for the echo feature. A value of the right type that asks for
     something this gateway has no representation for is a capability the shape
     cannot provide — the request is well formed and the refusal is about the
-    feature (PRD section 9.5) — and a value that is the OpenAI default is
-    accepted, because refusing it would reject a request the gateway can serve in
-    full.
+    feature — and a value that is the OpenAI default is accepted, because
+    refusing it would reject a request the gateway can serve in full.
     """
     unknown = sorted(set(body) - _REQUEST_KEYS)
     if unknown:
@@ -835,8 +828,7 @@ def _as_idempotency_key(where: str, value: object) -> str | None:
     ``None`` is an optional parameter's wire default and asks for nothing. Any
     other value must be a non-empty string: the format defines the key as one, so
     a value of another type is malformed input naming the type that arrived, and
-    an empty string is no key at all rather than a key that happens to be empty
-    (PRD section 12).
+    an empty string is no key at all rather than a key that happens to be empty.
     """
     if value is None:
         return None
@@ -864,7 +856,7 @@ def _generation_config(body: Mapping[str, object]) -> GenerationConfig:
     ``max_tokens`` becomes ``max_output_tokens``: the OpenAI name counts the
     model's output, which is exactly what the canonical field bounds. Every
     parameter the caller omitted stays unset, so the provider's own default
-    applies rather than a value the gateway invented (PRD section 5.1).
+    applies rather than a value the gateway invented.
     """
     return GenerationConfig(
         temperature=body.get("temperature"),
@@ -909,7 +901,7 @@ async def _read_json_body(request: Request) -> object:
     declared JSON at all. Both are malformed input for this endpoint, and both
     become an invalid-request error carrying the taxonomy's reason rather than
     the framework's plain-text body, so every failure on this path answers in one
-    shape (PRD section 5.4).
+    shape.
     """
     try:
         payload = await request.json()
