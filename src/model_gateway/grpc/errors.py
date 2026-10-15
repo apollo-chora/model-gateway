@@ -1,4 +1,4 @@
-"""Translate a gateway failure into a gRPC status (PRD section 5.4).
+"""Translate a gateway failure into a gRPC status.
 
 The error taxonomy already carries a gRPC status name on every category and
 already sanitises every message and detail, so the transport has exactly one
@@ -60,8 +60,8 @@ async def abort(context: grpc.ServicerContext, error: BaseException) -> None:
 
     ``grpc.aio``'s ``abort`` is a coroutine, so it is awaited. Called without the
     await it builds and discards the coroutine, the handler returns ``None`` and
-    the caller reads ``UNKNOWN`` instead of the category's status — the opposite of
-    what PRD section 5.4 requires.
+    the caller reads ``UNKNOWN`` instead of the category's status, which is the
+    opposite of what this mapping exists to do.
 
     Raises gRPC's own abort error to terminate the handler; it returns nothing.
     """

@@ -1,4 +1,4 @@
-"""The ``ListModels`` RPC: the gateway's model listing over gRPC (PRD sections 4.3 and 5).
+"""The ``ListModels`` RPC: the gateway's model listing over gRPC.
 
 The listing is the registry's, not the inference service's. The registry is the
 only thing that maps a public model ID onto the routes configured for its
@@ -14,21 +14,20 @@ answers that could drift apart.
 **What the listing carries, and what it cannot.** A ``ModelInfo`` holds no route,
 so no upstream endpoint, credential, upstream model ID or extra header can reach
 a caller through this RPC: that is a property of the type rather than a matter of
-remembering to strip fields, exactly as it is on the HTTP path (PRD section 4.3,
-acceptance criterion 12). The one thing logged here is the set of public model
-IDs, which is public by definition.
+remembering to strip fields, exactly as it is on the HTTP path. The one thing
+logged here is the set of public model IDs, which is public by definition.
 
-**The listing is authenticated when the deployment authenticates.** PRD section
-14.2 requires a valid credential on every endpoint but the health endpoints, and
+**The listing is authenticated when the deployment authenticates.** Every
+endpoint but the health endpoints requires a valid credential, and
 ``ListModels`` is not one of them, so the call is authenticated before any
 configured state is read. The request carries no identity claim of its own —
 ``ListModelsRequest`` is empty — so there is no claimed tenant to reconcile here;
-the rule of PRD section 5.1 is what the RPCs carrying an invocation apply, and
-this one has nothing a caller could claim a tenant with.
+the tenant rule is what the RPCs carrying an invocation apply, and this one has
+nothing a caller could claim a tenant with.
 
 **A failure is a gateway error, not an exception.** A refused credential is
 aborted with the taxonomy's own status and sanitised payload rather than answered
-as a gRPC ``UNKNOWN`` (PRD section 5.4), and a failure raised by the registry or
+as a gRPC ``UNKNOWN``, and a failure raised by the registry or
 the mapping is classified the same way, so a caller reads a gateway reason
 whichever transport it used.
 """
@@ -50,7 +49,7 @@ logger = structlog.get_logger(__name__)
 
 
 class ListModels:
-    """The model listing, read from the registry (PRD sections 4.3 and 5).
+    """The model listing, read from the registry.
 
     It holds the authenticator and the registry and nothing else. The listing is
     a read of configured state rather than an inference, so there is no service
@@ -64,14 +63,14 @@ class ListModels:
     async def list_models(
         self, request: pb.ListModelsRequest, context: grpc.ServicerContext
     ) -> pb.ListModelsResponse:
-        """Answer one ``ListModels`` call (PRD sections 4.3 and 5).
+        """Answer one ``ListModels`` call.
 
         The call is authenticated first, so a call that presents no credential
         is refused before any configured state is read when the deployment
         requires one. The registry is then read and its entries rendered in the
         registry's own canonical operation order, which is the order the HTTP
         listing uses too: one entry per configured operation, and no entry for an
-        operation the deployment configured no route for (PRD section 6).
+        operation the deployment configured no route for.
         """
         try:
             self._authenticator.identity(context)

@@ -1,4 +1,4 @@
-"""The standard gRPC Health Checking Protocol (PRD section 5).
+"""The standard gRPC Health Checking Protocol.
 
 The protocol is the one load balancers, service meshes and orchestrators probe:
 ``Check`` answers one of three serving states for a service name, and ``Watch``

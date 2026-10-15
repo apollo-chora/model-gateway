@@ -1,4 +1,4 @@
-"""Assemble, start and stop the gRPC listener (PRD sections 5 and 18).
+"""Assemble, start and stop the gRPC listener.
 
 The listener is built from the same objects the HTTP application holds — the
 inference service, the model registry, the settings and the configured key set —
@@ -6,9 +6,9 @@ so a gRPC call and an HTTP request reach identical policy. Nothing here decides
 what a caller may do; the servicer classes beside this module translate, and
 the inference service decides.
 
-The listener binds an insecure socket on ``CHORA_GRPC_PORT``, default ``9090``
-(PRD section 5). Transport security is not offered: the gateway terminates no
-TLS, and a deployment that needs it terminates it in front, the same way the HTTP
+The listener binds an insecure socket on ``CHORA_GRPC_PORT``, default ``9090``.
+Transport security is not offered: the gateway terminates no TLS, and a
+deployment that needs it terminates it in front, the same way the HTTP
 listener expects. Binding is verified rather than assumed —
 ``add_insecure_port`` returns ``0`` when the address cannot be bound, and
 answering a probe on an unbound port would report a listener the deployment does
@@ -65,7 +65,7 @@ class GrpcServer:
         # The same bound the HTTP transport applies, in this transport's own unit:
         # gRPC bounds a message rather than a body, and reports one over the bound
         # as RESOURCE_EXHAUSTED — the status the taxonomy maps for this condition —
-        # so one configured value bounds both transports (PRD section 14). The
+        # so one configured value bounds both transports. The
         # refusal a caller reads for an oversized message is the library's own
         # rather than the gateway's: it shares that status but not the gateway's
         # reason or payload, which is a property of where the bound is enforced

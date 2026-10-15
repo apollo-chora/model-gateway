@@ -1,4 +1,4 @@
-"""The InvokeStream RPC: one request, a stream of chunks (PRD section 5.3).
+"""The InvokeStream RPC: one request, a stream of chunks.
 
 A streamed invocation is the same invocation as ``Invoke``, under the same policy:
 the model is resolved first, the route's capability contract is enforced, one
@@ -14,9 +14,9 @@ Five rules shape the handler.
 ``tenant_id`` is reconciled against it by
 :func:`~model_gateway.security.authorization.reconcile_identity` — the same
 transport-independent policy the HTTP layer calls — and the invocation is built
-from the credential's tenant, never from the request field (PRD section 5.1).
-An empty ``tenant_id`` reads as no claim, for the reason the Invoke handler
-gives: the protobuf field is not ``optional``, so an absent claim and an empty
+from the credential's tenant, never from the request field. An empty
+``tenant_id`` reads as no claim, for the reason the Invoke handler gives: the
+protobuf field is not ``optional``, so an absent claim and an empty
 one are the same wire fact and neither is evidence of anything.
 
 **The service's events are translated, never re-decided.** Every
@@ -37,9 +37,9 @@ beside it would promise a stream the invocation never produced.
 **A failure after the first event ends the stream with one terminal chunk.** The
 inference service reports such a failure as a terminal ``ERROR`` event and then
 raises it, and the event is the authoritative report: the exception is
-control-flow metadata that ends the iteration, never a second failure
-(PRD section 16). This handler therefore ends the stream at the raise and yields
-nothing further — re-raising would report the one failure twice, and a second
+control-flow metadata that ends the iteration, never a second failure. This
+handler therefore ends the stream at the raise and yields nothing further —
+re-raising would report the one failure twice, and a second
 error chunk would contradict the one the caller was already shown. A failure
 outside the taxonomy is not a gateway failure at all: it is aborted as the
 internal error it is rather than published as an event, and the provider's own
@@ -92,14 +92,14 @@ class InvokeStream:
     async def invoke_stream(
         self, request: pb.InvokeRequest, context: grpc.ServicerContext
     ) -> AsyncIterator[pb.InvokeChunk]:
-        """Stream the answer to one invocation, or refuse it (PRD section 5.3).
+        """Stream the answer to one invocation, or refuse it.
 
         The order is the rule: the identity is established first, the claimed
         tenant is reconciled against it second, and only then is the canonical
         invocation built — from the credential's tenant. A request that fails
         authentication or claims a tenant its credential is not bound to never
         reaches the mapper, so no part of such a request can influence what the
-        invocation says about who is calling (PRD section 5.1).
+        invocation says about who is calling.
         """
         try:
             identity = self._authenticator.identity(context)
@@ -128,7 +128,7 @@ class InvokeStream:
             if delivered == 0:
                 # The refusal reached the caller before the stream produced
                 # anything, so it is an ordinary error response rather than a
-                # stream (PRD section 16).
+                # stream.
                 await _abort(context, error, method="InvokeStream")
             else:
                 # The service has already emitted the terminal ERROR event and
@@ -160,7 +160,7 @@ async def _abort(context: grpc.ServicerContext, error: Exception, *, method: str
     is recorded with its type name and nothing else before it is aborted — the
     same record the HTTP error handler keeps — because the aborted payload is
     sanitised and the type is the only thing about such a failure an operator
-    may see (PRD section 14).
+    may see.
 
     The abort is awaited because grpc.aio's ``ServicerContext.abort`` is a
     coroutine: a call to it that is not awaited never aborts anything, and the

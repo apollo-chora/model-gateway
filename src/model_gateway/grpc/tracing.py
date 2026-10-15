@@ -1,4 +1,4 @@
-"""Continuing a caller's trace over gRPC (PRD section 17).
+"""Continuing a caller's trace over gRPC.
 
 gRPC carries propagation in the call's metadata, which is the same key-and-value
 shape the HTTP middleware reads out of headers — so the two transports continue a

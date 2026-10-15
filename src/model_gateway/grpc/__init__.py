@@ -1,4 +1,4 @@
-"""The gRPC northbound transport (PRD section 5).
+"""The gRPC northbound transport.
 
 The service is the gateway's own versioned contract, defined in
 ``proto/gateway/v1/gateway.proto`` and served on ``CHORA_GRPC_PORT`` beside the
@@ -19,13 +19,12 @@ is.
 **A claimed tenant is never trusted.** ``tenant_id`` in a request is a claim,
 not evidence. :func:`~model_gateway.security.authorization.reconcile_identity`
 refuses one that disagrees with the tenant bound to the credential, and the
-invocation is always built from the credential's tenant, never from the body
-(PRD section 5.1).
+invocation is always built from the credential's tenant, never from the body.
 
 **A failure is a gateway error, not an exception.** Every abort carries the
 stable ``reason`` and sanitised ``message`` the taxonomy already computed, mapped
 onto the gRPC status name the category declares — so a caller branches on the
-same reason whichever transport it used (PRD section 5.4).
+same reason whichever transport it used.
 
 The standard gRPC Health Checking Protocol is served on the same port. It is the
 liveness probe infrastructure uses; it carries no gateway data and is served

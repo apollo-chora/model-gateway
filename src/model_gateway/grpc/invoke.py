@@ -1,4 +1,4 @@
-"""The Invoke RPC: one request, one complete answer (PRD section 5).
+"""The Invoke RPC: one request, one complete answer.
 
 ``Invoke`` is the text operation's unary entry point on the gRPC transport, and
 this module is the whole of it: authenticate the call, reconcile the tenant it
@@ -7,7 +7,7 @@ claims, translate the request into the canonical invocation, hand that to
 back. No policy is decided here — model resolution, capability enforcement, the
 deadline, retry, fallback and cancellation all run in the inference service,
 exactly as they do for an HTTP request, so a caller reaches the same behaviour
-over either transport (PRD section 5.2).
+over either transport.
 
 Four rules shape the handler.
 
@@ -16,7 +16,7 @@ Four rules shape the handler.
 ``tenant_id`` is reconciled against it by
 :func:`~model_gateway.security.authorization.reconcile_identity` — the same
 transport-independent policy the HTTP layer calls — and the invocation is built
-from the credential's tenant, never from the request field (PRD section 5.1). An
+from the credential's tenant, never from the request field. An
 empty ``tenant_id`` reads as no claim: the protobuf field is not ``optional``,
 so an absent claim and an empty one are the same wire fact and neither is
 evidence of anything.
@@ -29,14 +29,14 @@ substituted. A caller that states none is answered with none.
 
 **A failure is aborted, never raised.** Every failure leaves through the
 taxonomy's own status and already-sanitised payload, so a caller branches on the
-same stable ``reason`` whichever transport it used (PRD section 5.4). The body
+same stable ``reason`` whichever transport it used. The body
 catches ``Exception`` and never ``BaseException``: a caller that disconnects
 cancels the call with :exc:`asyncio.CancelledError`, which is not a failure the
 gateway answers with a status, and swallowing it would leave an abandoned
 invocation running. A failure that is not a gateway error is recorded with its
 type name and nothing else before it is aborted — the same record the HTTP
 error handler keeps — because the aborted payload is sanitised and the type is
-the only thing about such a failure an operator may see (PRD section 14).
+the only thing about such a failure an operator may see.
 
 The abort is *awaited*, and that is a property of this transport rather than a
 preference. ``grpc.aio``'s ``ServicerContext.abort`` is a coroutine, so a call
@@ -55,8 +55,8 @@ part, which may be text, an image or a refusal, and a tool call — so an answer
 carrying any of them crosses the boundary faithfully. This is deliberately not
 the request side's rule: a *request* a route cannot honour is refused before any
 provider is called, because the gateway cannot silently drop a tool or an image
-the caller stated (PRD section 9.5), whereas an *answer* is the provider's own
-and the gateway has nothing to enforce about it beyond the capability contract
+the caller stated, whereas an *answer* is the provider's own and the gateway
+has nothing to enforce about it beyond the capability contract
 the request already passed. What the provider returned is what the caller
 reads.
 """
@@ -103,7 +103,7 @@ class Invoke:
         invocation built — from the credential's tenant. A request that fails
         authentication or claims a tenant its credential is not bound to never
         reaches the mapper, so no part of such a request can influence what the
-        invocation says about who is calling (PRD section 5.1).
+        invocation says about who is calling.
         """
         try:
             identity = self._authenticator.identity(context)

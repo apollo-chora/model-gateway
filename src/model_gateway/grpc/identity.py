@@ -1,10 +1,9 @@
 """Inbound authentication and tenant isolation on the gRPC transport.
 
 The transport-independent rules live elsewhere, and this module is the whole of
-the gateway's inbound authentication on the gRPC surface (PRD sections 5.1 and
-7): it extracts the credential, validates it and yields the trusted identity.
-Nothing here decides what a caller may do — only who the gateway believes the
-caller is.
+the gateway's inbound authentication on the gRPC surface: it extracts the
+credential, validates it and yields the trusted identity. Nothing here decides
+what a caller may do — only who the gateway believes the caller is.
 
 **Who is calling?** A call presents ``authorization: Bearer <key>`` or
 ``x-api-key`` metadata, and the presentation is validated against the configured
@@ -19,12 +18,12 @@ presenting different keys are refused rather than resolved by picking one.
 evidence. The transport-independent rule that a claimed tenant must never become
 or override the authenticated tenant lives in
 :mod:`model_gateway.security.authorization`, so the HTTP and gRPC transports call
-the same code rather than each reimplementing it (PRD section 5.1). Every RPC
+the same code rather than each reimplementing it. Every RPC
 handler reconciles the claim through it before it builds an invocation, and the
 invocation's tenant is always the credential's, never the caller's.
 
 The presented key is never logged, published or echoed; log records carry the
-non-secret ``key_label`` instead (PRD section 17).
+non-secret ``key_label`` instead.
 """
 
 from collections.abc import Iterable

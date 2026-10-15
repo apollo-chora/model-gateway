@@ -1,4 +1,4 @@
-"""Translation between the protobuf contract and the canonical domain (PRD 5).
+"""Translation between the protobuf contract and the canonical domain.
 
 This module is the whole of the gRPC transport's *translation*. Every RPC handler
 builds a canonical request with the request-side mappers and renders a canonical
@@ -349,14 +349,14 @@ def invocation_request_from_proto(request: pb.InvokeRequest, *, identity) -> Inv
     ``identity`` is the trusted identity the transport authenticated, not a value
     read from the request: the tenant the invocation acts under is the
     credential's, and a claimed ``tenant_id`` has already been reconciled against
-    it by the caller (PRD section 5.1).
+    it by the caller.
 
     ``idempotency_key`` is read through ``HasField`` rather than defaulted, for
     the same reason the generation config's optional fields are: the field is
     ``optional``, so a request that states no key and one that states an empty
     key are different statements, and the canonical record draws the same line —
     an absent key is ``None``, and an empty one is refused rather than read as
-    no key at all (PRD sections 5.1 and 12).
+    no key at all.
 
     Every canonical constructor this mapping reaches — each message, the tool
     declarations, the generation config and its response format, the tool choice
@@ -587,7 +587,7 @@ def chunk_from_event(event: StreamEvent) -> pb.InvokeChunk:
     """One protobuf chunk carrying one canonical stream event.
 
     The terminal event is exactly one of finish and error, and the stream
-    contract of PRD section 16 carries over unchanged: a chunk carrying a finish
+    contract carries over unchanged: a chunk carrying a finish
     payload ends a completed stream, one carrying an error payload ends a stream
     that failed after output began, and a stream that stopped without reporting a
     finish reason produces neither.
