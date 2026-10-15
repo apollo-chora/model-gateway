@@ -77,7 +77,7 @@ from model_gateway.errors import GatewayError, InvalidArgumentError
 from model_gateway.http.auth import get_identity
 from model_gateway.http.dto import ChatCompletion, ChatRequest
 from model_gateway.security.authorization import reconcile_identity
-from model_gateway.security.identity import caller_namespace
+from model_gateway.security.identity import caller_namespace, caller_tenant
 
 if TYPE_CHECKING:
     from model_gateway.inference import InferenceService
@@ -138,7 +138,9 @@ def create_chat_completion(service: InferenceService) -> ChatHandler:
 
         if not chat_request.stream:
             response = await service.invoke(
-                invocation, namespace=caller_namespace(identity)
+                invocation,
+                namespace=caller_namespace(identity),
+                tenant=caller_tenant(identity),
             )
             completion = ChatCompletion.from_invocation(
                 response,
@@ -152,6 +154,7 @@ def create_chat_completion(service: InferenceService) -> ChatHandler:
             invocation,
             completion_id=f"{_COMPLETION_ID_PREFIX}{invocation_id}",
             namespace=caller_namespace(identity),
+            tenant=caller_tenant(identity),
         )
 
     return chat_completions
@@ -163,6 +166,7 @@ async def _stream_chat_completion(
     *,
     completion_id: str,
     namespace: str,
+    tenant: str | None,
 ) -> Response:
     """Serve one streaming invocation as Server-Sent Events (PRD section 16).
 
@@ -186,7 +190,7 @@ async def _stream_chat_completion(
     its own status, before the SSE response commits to a 200 the caller cannot be
     given back.
     """
-    event_iter = service.invoke_stream(invocation, namespace=namespace)
+    event_iter = service.invoke_stream(invocation, namespace=namespace, tenant=tenant)
 
     # Pull the first event to surface a pre-stream refusal before the SSE
     # response commits to a 200 the caller cannot be given back.

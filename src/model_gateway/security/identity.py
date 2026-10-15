@@ -26,7 +26,7 @@ Four rules define the type:
 
 from dataclasses import dataclass
 
-__all__ = ["Identity"]
+__all__ = ["Identity", "caller_namespace", "caller_tenant"]
 
 
 @dataclass(frozen=True)
@@ -135,3 +135,17 @@ def caller_namespace(identity: Identity | None) -> str:
     request field could reach.
     """
     return identity.idempotency_namespace if identity is not None else ""
+
+
+def caller_tenant(identity: Identity | None) -> str | None:
+    """The tenant a caller's invocation acts under, or ``None`` when there is none.
+
+    Read from the identity the transport established and never from the request: a
+    tenant is a property of the credential (PRD section 5.1). ``None`` is a caller
+    with no tenant at all — an anonymous one, or an authenticated credential the
+    operator bound to no tenant — and a per-tenant bound falls back to the
+    credential identifier for such a caller, because a tenant-less credential is
+    its own principal (PRD section 14.2) and a shared empty key would let one of
+    them consume the bound the others are entitled to.
+    """
+    return identity.tenant if identity is not None else None

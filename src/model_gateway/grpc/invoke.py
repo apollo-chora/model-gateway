@@ -73,7 +73,7 @@ from model_gateway.grpc.errors import abort
 from model_gateway.grpc.identity import Authenticator
 from model_gateway.inference import InferenceService
 from model_gateway.security.authorization import reconcile_identity
-from model_gateway.security.identity import caller_namespace
+from model_gateway.security.identity import caller_namespace, caller_tenant
 
 __all__ = ["Invoke"]
 
@@ -110,7 +110,9 @@ class Invoke:
             reconcile_identity(identity, request.tenant_id or None)
             invocation = mapping.invocation_request_from_proto(request, identity=identity)
             response = await self._service.invoke(
-                invocation, namespace=caller_namespace(identity)
+                invocation,
+                namespace=caller_namespace(identity),
+                tenant=caller_tenant(identity),
             )
             return mapping.invoke_response_to_proto(response)
         except Exception as error:
