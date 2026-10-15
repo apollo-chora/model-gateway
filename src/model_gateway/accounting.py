@@ -1,9 +1,9 @@
-"""Usage and cost accounting (PRD section 13).
+"""Usage and cost accounting.
 
 Every invocation that produces an answer leaves a record naming what was asked,
 what answered, how long it took and what it cost. The record is the gateway's own:
 the public payloads deliberately omit it, because none of the wire shapes has a
-field for it (§5.2, §13).
+field for it.
 
 Three rules shape the module.
 
@@ -36,7 +36,7 @@ than multiplied into a number the gateway would then stand behind.
 Storage is in memory by default, which is the honest scope for a single-instance
 deployment: records are lost when the process stops, and a deployment that needs
 them to survive restarts or be shared configures durable storage, which is a
-separate concern requiring configured persistence (§13).
+separate concern requiring configured persistence.
 """
 
 from __future__ import annotations
@@ -91,9 +91,9 @@ STATUS_INCOMPLETE = "incomplete"
 """The invocation produced output and then stopped without reaching a terminal event.
 
 A caller that went away, a transport that was lost, or an upstream that ended
-without reporting a finish reason. It is deliberately not ``failed``: §16 draws
-that distinction for the caller, and a record that collapsed the two would report
-a failure the stream never declared.
+without reporting a finish reason. It is deliberately not ``failed``: the
+stream's own contract draws that distinction for the caller, and a record that
+collapsed the two would report a failure the stream never declared.
 """
 
 _STATUSES = frozenset({STATUS_COMPLETED, STATUS_FAILED, STATUS_INCOMPLETE})
@@ -340,7 +340,7 @@ class UsageRecord:
     the model the answer reports having come from. They coincide today, because the
     gateway sends the route's model ID upstream and stamps the answer with it, but
     they are separate facts — the route is the deployment's configured entry, the
-    upstream model is what answered — and §13 asks for both. Keeping them apart
+    upstream model is what answered — and the record asks for both. Keeping them apart
     means a route that later names its upstream differently does not silently
     change what either field means.
 
@@ -359,7 +359,7 @@ class UsageRecord:
     terminal event. ``error_reason`` carries the gateway reason for a ``failed``
     outcome and is ``None`` for the other two. A non-streaming invocation that
     produced an answer is always ``completed``: a failure there produces no answer
-    to record, so the other two values are the streaming walk's (§16).
+    to record, so the other two values are the streaming walk's.
     """
 
     invocation_id: str
@@ -533,7 +533,7 @@ class InvocationOutcome:
     path as a completed one instead of through a second, parallel one.
 
     ``status`` names exactly what happened rather than collapsing two cases into
-    one (PRD sections 13 and 16): ``completed`` for an answer that reached its
+    one: ``completed`` for an answer that reached its
     finish, ``failed`` for one that produced output and then failed, and
     ``incomplete`` for one that produced output and then stopped without ever
     reaching a terminal event — a caller that went away, a transport that was
@@ -621,23 +621,23 @@ class AccountingRecorder:
 
         ``attempts`` and ``fallback_used`` are supplied by the caller rather than
         read off the answer, because only the text answer carries them: the
-        canonical embeddings and image answers have no field for either (PRD
-        section 5.2), while the record §13 asks for does. They come from the same
+        canonical embeddings and image answers have no field for either, while
+        the record asks for both. They come from the same
         walk state the text response is stamped from, so the two agree wherever
         both exist.
 
         ``tenant`` is the tenant the request stated, and only the text request can
         state one: the canonical embeddings and image requests carry no tenant
-        field, because the tenant an invocation acts under is the credential's
-        (PRD section 5.1). It is therefore ``None`` for those operations rather
-        than borrowed from somewhere it was never stated.
+        field, because the tenant an invocation acts under is the credential's. It
+        is therefore ``None`` for those operations rather than borrowed from
+        somewhere it was never stated.
 
         ``latency_ms`` is the invocation's elapsed time as the service measured
         it, from the call that began the invocation to the moment this record was
         built. It therefore includes route walking, retries, fallbacks and any
         wait for a concurrency slot — it is *not* time spent inside the provider
         alone, and the field is named for what it measures rather than for the
-        narrower quantity §13's list calls provider latency.
+        narrower quantity the record's field list calls provider latency.
         """
         _require_matching_operation(request, route)
         usage = outcome.usage

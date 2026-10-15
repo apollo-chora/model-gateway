@@ -1,4 +1,4 @@
-"""Per-client request-rate limits and per-tenant concurrency limits (PRD section 14).
+"""Per-client request-rate limits and per-tenant concurrency limits.
 
 Two admission decisions, both taken before an invocation reaches any provider and
 both keyed on the trusted principal rather than on anything a request carries.
@@ -9,7 +9,7 @@ authenticated identity — rather than one this module guesses at.
 **A request rate is a property of the caller.** One credential's burst must not
 consume the capacity the others are entitled to, so the bucket is per principal.
 The principal the gateway already keys policy on is the credential identifier —
-the namespace idempotency uses (PRD sections 7, 12 and 14.2) — and never a
+the namespace idempotency uses — and never a
 caller-supplied field: a limit keyed on a request value is evaded by changing that
 value, and a caller-supplied value is not a principal at all.
 
@@ -26,7 +26,7 @@ upstream work may be in flight, and whose work it is.
 **A refusal is taken before the walk, not inside it.** The rate limit is checked
 at the invocation's entry, before a route is selected and before any provider is
 called. That is not merely an optimisation. The walk treats a ``RATE_LIMITED``
-failure as route-local and therefore fallback-eligible (PRD section 11.2), because
+failure as route-local and therefore fallback-eligible, because
 an *upstream's* rate limit belongs to the route that answered it — another route
 is not necessarily limited. The gateway's own limit is a property of the caller
 and of no route, so raising it inside the walk would make the gateway walk a
@@ -54,7 +54,7 @@ is what authentication is for.
 that configures no request rate and no per-tenant bound is one that has not said
 what its callers are entitled to, and inventing a bound would refuse requests no
 configuration said to refuse — the same reasoning that makes an absent optional
-capability disabled rather than fatal (PRD section 6).
+capability disabled rather than fatal.
 """
 
 from __future__ import annotations
@@ -150,8 +150,7 @@ class RateLimiter:
         Raises :class:`~model_gateway.errors.ResourceExhaustedError` with reason
         ``RATE_LIMITED`` when the bucket is empty. The refusal names neither the
         principal nor any credential material: it is a fact about the caller's own
-        rate, and the caller already knows which credential it presented
-        (PRD section 17).
+        rate, and the caller already knows which credential it presented.
         """
         now = self._clock()
         bucket = self._buckets.get(principal)
@@ -190,7 +189,7 @@ class TenantConcurrencyLimiter:
 
     What the key should be belongs to the caller, and the caller is expected to key
     on the tenant the credential is bound to. A credential bound to no tenant is
-    its own principal (PRD section 14.2), so keying such a caller on its credential
+    its own principal, so keying such a caller on its credential
     identifier rather than on a shared empty tenant is what keeps one tenant-less
     caller from consuming the bound the others are entitled to.
     """

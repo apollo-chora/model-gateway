@@ -1,4 +1,4 @@
-"""Idempotency: one key, one answer, no duplicate accounting (PRD section 12).
+"""Idempotency: one key, one answer, no duplicate accounting.
 
 An invocation may carry an idempotency key. A repeat of the same request is
 answered from the gateway's own record of the first answer rather than by asking
@@ -13,7 +13,7 @@ by a namespace derived from the credential — its identifier and its tenant —
 the caller's key. Two tenants using the same key are two independent operations,
 and letting one overwrite the other's record is a cross-tenant interference
 channel: the second silently destroys the first's replay. A tenant is a property of
-the credential, never of the request (PRD section 5.1), so the namespace comes from
+the credential, never of the request, so the namespace comes from
 the transport's identity rather than from anything the caller states.
 
 **A key names one operation, so reuse is a conflict, not a re-run.** Once a key has
@@ -33,7 +33,7 @@ not cancel the invocation it is waiting on.
 transient failure is allowed to retry. A waiter coalesced onto a failed invocation
 receives that invocation's failure rather than starting another provider attempt
 inside the same request. The gateway therefore claims no exactly-once upstream
-execution (PRD section 11.3).
+execution.
 
 The fingerprint is taken over a canonical JSON encoding of the request's semantic
 content, never over ``repr()``: a dataclass's repr is an implementation
@@ -116,7 +116,7 @@ def request_fingerprint(request: InvocationRequest) -> RequestFingerprint:
     choice, the modality, the permitted fallbacks and the tenant the request acts
     under. The tenant is included because the same key under two tenants is two
     requests, and answering one from the other would leak an answer across a
-    boundary the gateway is required to hold (PRD section 7).
+    boundary the gateway is required to hold.
 
     Three fields are deliberately excluded, each for a stated reason:
 
@@ -234,7 +234,7 @@ class MemoryIdempotencyStore:
     The bound weakens the replay guarantee in a stated way: a repeat is deduplicated
     only while its record remains available in this instance. A deployment that needs
     the guarantee across restarts or instances configures durable storage, which is a
-    separate concern requiring configured persistence (PRD section 12).
+    separate concern requiring configured persistence.
     """
 
     def __init__(self, *, capacity: int = _DEFAULT_CAPACITY) -> None:
