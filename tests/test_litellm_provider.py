@@ -69,7 +69,7 @@ from model_gateway.errors import (
     UnauthenticatedError,
     UnavailableError,
 )
-from model_gateway.providers.base import AttemptContext, TextProvider
+from model_gateway.providers.base import AttemptContext, ImageProvider, TextProvider
 from model_gateway.providers.litellm_provider import SUPPORTED_DIALECTS, LiteLLMProvider
 from model_gateway.security.transport import PinnedAddressTransport
 
@@ -1269,6 +1269,19 @@ class TestTheProtocol:
         response = await provider.complete(make_route(), make_request(), make_context())
 
         assert response.model == "text-default"
+
+    def test_the_provider_also_carries_the_image_operation(self) -> None:
+        """The production service holds one provider, so every operation is on it.
+
+        Without the image entry point the image operation has no provider at all:
+        the core refuses every image request as unsupported however the routes are
+        configured, so a deployment advertises an endpoint it cannot serve. The
+        dialect checks the factory already runs at startup would not catch it,
+        because they validate the routes rather than the object the core holds.
+        """
+        provider = LiteLLMProvider()
+
+        assert isinstance(provider, ImageProvider)
 
 
 # ---------------------------------------------------------------------------

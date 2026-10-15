@@ -176,6 +176,7 @@ import httpx
 from model_gateway.config.routes import Route
 from model_gateway.domain import InvocationRequest, InvocationResponse
 from model_gateway.domain.embeddings import Embedding, EmbeddingRequest, EmbeddingResponse
+from model_gateway.domain.images import ImageRequest, ImageResponse
 from model_gateway.domain.streaming import StreamEvent, StreamEventKind
 from model_gateway.errors import (
     FailedPreconditionError,
@@ -184,6 +185,7 @@ from model_gateway.errors import (
 )
 from model_gateway.providers._litellm import AsyncHTTPHandler, litellm, openai
 from model_gateway.providers.base import AttemptContext
+from model_gateway.providers.litellm_image import LiteLLMImageProvider
 from model_gateway.providers.litellm_translation import (
     from_litellm_chunk,
     from_litellm_embedding_usage,
@@ -417,10 +419,21 @@ class LiteLLMProvider:
         once per attempt — which transport performs the socket I/O. The client
         they are inputs *to* is always the binding's own per-dialect
         construction, so supplying them cannot substitute for it.
+
+        The image entry point is built here over the same three inputs, so a
+        caller injects one seam rather than one per operation.
         """
         self._resolver = resolver
         self._verify = verify
         self._inner_factory = inner_factory
+        # The production service holds one provider for every operation it serves
+        # (PRD sections 9 and 23), so the image entry point has to live on this
+        # object or the image operation has no provider at all and every image
+        # request is refused as unsupported. Sharing the transport inputs is what
+        # keeps one injection point covering both bindings.
+        self._images = LiteLLMImageProvider(
+            resolver=resolver, verify=verify, inner_factory=inner_factory
+        )
 
     async def complete(
         self,
@@ -620,6 +633,23 @@ class LiteLLMProvider:
         return _from_litellm_embedding(
             route, request, response, invocation_id=context.invocation_id
         )
+
+    async def generate(
+        self,
+        route: Route,
+        request: ImageRequest,
+        context: AttemptContext,
+    ) -> ImageResponse:
+        """Perform the one image attempt for this route (PRD sections 4.6 and 9.6).
+
+        Delegated to the image binding, which owns the image dialects' HTTP paths
+        and their per-dialect client construction. It is an entry point on *this*
+        object because the production service is handed one provider for every
+        operation (PRD section 23): the image operation's dialect refusals, its
+        translation and its client injection are the image binding's, while the
+        object the core holds stays the same whichever operation a request names.
+        """
+        return await self._images.generate(route, request, context)
 
     def _attempt_client(
         self, route: Route, budget: float | None
