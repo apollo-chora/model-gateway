@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from opentelemetry import trace
 from opentelemetry.baggage.propagation import W3CBaggagePropagator
 from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -73,6 +74,13 @@ def configure_tracing(settings: Settings) -> TracerProvider | None:
             "nowhere to send its spans. Set the endpoint, or set OTEL_ENABLED=false"
         )
     provider = TracerProvider(resource=Resource.create({"service.name": SERVICE_NAME}))
+    # Installed as the process's provider, not just handed back. Without this the
+    # OpenTelemetry API keeps handing out its default tracer, which records
+    # nothing: a span would still be started and would still carry a correct
+    # parent, but it would never reach the exporter, so a deployment that asked
+    # for tracing would receive nothing and would have no way to tell. Keeping
+    # the provider returned as well lets a caller shut it down explicitly.
+    trace.set_tracer_provider(provider)
     provider.add_span_processor(
         BatchSpanProcessor(OTLPSpanExporter(endpoint=_traces_endpoint(endpoint)))
     )
