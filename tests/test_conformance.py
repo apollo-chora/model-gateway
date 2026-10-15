@@ -40,7 +40,6 @@ from typing import Any
 import httpx
 import pytest
 from blacksheep import JSONContent
-from blacksheep.server.routing import Router
 from blacksheep.testing import TestClient
 
 from model_gateway.app import create_app
@@ -264,7 +263,7 @@ def gateway(wire: UpstreamWire):
     registry = ModelRegistry.from_env(dict(ENVIRONMENT))
     binding = LiteLLMProvider(resolver=_public_resolver, inner_factory=lambda: wire)
     service = InferenceService(registry, binding)
-    return create_app(settings, registry=registry, service=service, router=Router())
+    return create_app(settings, registry=registry, service=service)
 
 
 class _Running:

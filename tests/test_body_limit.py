@@ -24,7 +24,6 @@ import grpc
 import pytest
 from blacksheep import JSONContent, Request, Response
 from blacksheep.contents import Content
-from blacksheep.server.routing import Router
 from blacksheep.testing import TestClient
 
 from model_gateway.config import ConfigurationError, Settings
@@ -192,13 +191,7 @@ def _app():
     settings = Settings.from_env(ENVIRONMENT)
     registry = ModelRegistry.from_env(dict(ENVIRONMENT))
     service = InferenceService(registry, MockProvider())
-    # Its own router: the framework keys applications by their router's identity,
-    # so an application built on the framework's default router shares it with
-    # every other such application in the process and the second one built resets
-    # the first's routes. A suite that builds more than one gives each its own.
-    return create_app(
-        settings, registry=registry, service=service, router=Router()
-    )
+    return create_app(settings, registry=registry, service=service)
 
 
 def _chat(content: str) -> dict[str, object]:
