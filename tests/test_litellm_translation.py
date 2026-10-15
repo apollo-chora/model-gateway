@@ -1257,3 +1257,67 @@ class TestMapLitellmError:
         assert url not in str(payload)
         assert "openai" not in str(payload)
         assert mapped.message == "the upstream rejected the route's credentials"
+
+
+# ---------------------------------------------------------------------------
+# The refusal the library records on every OpenAI answer
+# ---------------------------------------------------------------------------
+
+
+class TestTheRecordedRefusal:
+    """A refusal is a canonical semantic, so it is mapped — never refused, never dropped.
+
+    These pin the shape the pinned library actually produces, which is not the
+    shape the field's name suggests: on the OpenAI SDK path the refusal is recorded
+    inside ``provider_specific_fields`` rather than on the message, and every
+    answer carries the key, with ``null`` when the model did not decline. A real
+    OpenAI message always states it, which is why the payloads here do too.
+    """
+
+    @staticmethod
+    def payload(refusal: object) -> dict[str, object]:
+        """An OpenAI answer whose message states the refusal field, as a real one does."""
+        payload = completion_payload()
+        payload["choices"][0]["message"]["refusal"] = refusal
+        return payload
+
+    def test_the_library_records_the_field_in_the_provider_specific_fields(self):
+        """The premise of the two tests below, asserted rather than assumed.
+
+        If the library ever stops carrying the field there, this fails first and
+        the other two are re-read as statements about a shape that no longer
+        exists.
+        """
+        message = response_from(self.payload(None)).choices[0].message
+
+        assert getattr(message, "provider_specific_fields", None) == {"refusal": None}
+
+    def test_an_answer_that_did_not_decline_is_an_ordinary_answer(self):
+        """A present-but-null refusal is not a refusal, and not an unrepresentable field.
+
+        Treating the field as a provider semantic the canonical model cannot carry
+        refuses *every* OpenAI-compatible answer — which is what the binding did
+        until this was pinned.
+        """
+        answer = from_litellm_response(
+            make_route(), make_request(), response_from(self.payload(None))
+        )
+
+        assert answer.text == "Recursion is a technique..."
+        assert answer.refusals == ()
+
+    def test_a_refusal_becomes_a_canonical_refusal_part(self):
+        """A refusal keeps its own part, because collapsing it into text loses it.
+
+        A declining provider sends no content, so the payload clears it: the answer
+        is the refusal and nothing else.
+        """
+        payload = self.payload("I can't help with that.")
+        payload["choices"][0]["message"]["content"] = None
+        payload["choices"][0]["finish_reason"] = "content_filter"
+
+        answer = from_litellm_response(
+            make_route(), make_request(), response_from(payload)
+        )
+
+        assert answer.content == (RefusalPart(text="I can't help with that."),)
