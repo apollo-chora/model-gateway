@@ -1,4 +1,4 @@
-"""Per-client rate limits and per-tenant concurrency limits (PRD section 14).
+"""Per-client rate limits and per-tenant concurrency limits.
 
 These tests prove the two decisions are taken per principal rather than per
 deployment: one caller's burst cannot consume another's entitlement, a bucket

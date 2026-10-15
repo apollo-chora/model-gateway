@@ -1,4 +1,4 @@
-"""The inference service: gateway-owned policy around one provider call (PRD 4.3, 9.5, 10, 11.2).
+"""The inference service: gateway-owned policy around one provider call.
 
 The service owns policy and the provider owns translation, so these tests are
 about the policy: a public model ID resolves to configured routes before any
@@ -8,7 +8,7 @@ route — the one whose capabilities the public model advertises — so a fallba
 may preserve the advertised capabilities but never expand them, and the
 provider's answer comes back stamped with the gateway's own facts.
 
-They are also the reliability loop's tests (PRD 11.3 and 15): one deadline per
+They are also the reliability loop's tests: one deadline per
 invocation that every attempt draws its budget from, retries on the same route
 bounded by the configured count and gated on the gateway's own retryability
 classification, a fallback walked only when a failure says another route is
@@ -736,7 +736,7 @@ async def test_an_unset_budget_is_no_budget_rather_than_zero():
 
 
 async def test_the_attempt_context_carries_no_routing_policy():
-    """The route travels beside the context, never inside it (PRD section 9.2)."""
+    """The route travels beside the context, never inside it."""
     provider = MockProvider()
     inference = InferenceService(ModelRegistry((route(),)), provider)
 
@@ -1401,8 +1401,8 @@ async def test_cancellation_is_never_turned_into_an_upstream_failure():
         await inference.invoke(request())
 
 
-# The inference library has internal retry paths no supported knob disables (PRD
-# section 11.3), so "the gateway made no further attempt" is not the same claim
+# The inference library has internal retry paths no supported knob disables, so
+# "the gateway made no further attempt" is not the same claim
 # as "no further wire request was made". These two tests are about the second
 # claim, and they are driven through the real binding and the real library over a
 # fake wire: the transport below is injected as the binding's inner transport, so

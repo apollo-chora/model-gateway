@@ -1,4 +1,4 @@
-"""Idempotency in the inference service's non-streaming invocation (PRD section 12).
+"""Idempotency in the inference service's non-streaming invocation.
 
 These tests drive the real :class:`~model_gateway.inference.InferenceService` over
 a :class:`~model_gateway.providers.mock.MockProvider`, so what is asserted is the

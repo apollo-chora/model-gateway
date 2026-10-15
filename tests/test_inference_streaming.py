@@ -1,12 +1,11 @@
-"""The streaming inference orchestration: gateway policy around a provider stream
-(PRD 5.3, 11.2, 11.3, 15, 16).
+"""The streaming inference orchestration: gateway policy around a provider stream.
 
 The streaming entry point applies the same policy as the non-streaming one —
 capability enforcement, one deadline, the concurrency limiter with its bounded
 wait, cancellation that propagates — and one rule a non-streaming invocation
 never had to enforce: once an event has been yielded to the caller, no fallback
 may occur, because switching providers after a caller has seen output produces
-a contradictory answer (PRD 11.2 and 11.3).
+a contradictory answer.
 
 These tests pin that rule and its control case (a fallback before any output is
 still allowed), the strictly increasing sequence numbers, exactly one terminal
@@ -159,8 +158,8 @@ class NonStreamingProvider:
 
     It is the control case for the streaming capability rule: a provider with no
     ``stream`` method at all is not a streaming provider, so the gateway refuses a
-    streaming request rather than answering it with a complete, non-streamed body
-    (PRD 16). :class:`MockProvider` can stream, so it no longer stands in for this
+    streaming request rather than answering it with a complete, non-streamed body.
+    :class:`MockProvider` can stream, so it no longer stands in for this
     case — an accidental absence is not a premise a capability test should rest on.
     """
 
@@ -193,7 +192,7 @@ def service(routes: tuple[Route, ...], provider, **overrides) -> InferenceServic
 
 
 class TestTheCapability:
-    """Streaming is a separate capability, refused rather than faked (PRD 16)."""
+    """Streaming is a separate capability, refused rather than faked."""
 
     async def test_a_provider_that_cannot_stream_is_refused(self):
         inference = service((route(),), NonStreamingProvider())
@@ -357,7 +356,7 @@ class TestTheHappyPath:
 
 
 class TestNoFallbackAfterOutput:
-    """The rule PRD 11.2 states and a non-streaming invocation never enforced."""
+    """The rule a non-streaming invocation never enforced."""
 
     async def test_a_failure_after_the_first_output_ends_the_stream_without_falling_back(self):
         """Route 1 streams one event then fails; route 2 is never tried.
@@ -575,7 +574,7 @@ class TestAMidStreamFailure:
         sanitisation as the only defence: a failure outside the taxonomy is
         normalised before the event is built, so the event carries the
         normalised message — here the taxonomy's fixed internal-failure text —
-        and the provider's own wording appears nowhere in it (PRD 5.4).
+        and the provider's own wording appears nowhere in it.
         """
         provider = ScriptedStreamProvider(
             [
@@ -606,7 +605,7 @@ class TestAMidStreamFailure:
         the raised error's reason and message are the event's own, because
         both describe the same single failure. A consumer reads the event as
         the failure's report and the exception as the iteration ending —
-        never as a second failure (PRD 5.4 and 16).
+        never as a second failure.
         """
         provider = ScriptedStreamProvider(
             [[content_event("Hello", 0), UnavailableError("the connection dropped")]]

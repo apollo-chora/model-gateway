@@ -1,4 +1,4 @@
-"""Tests for the reliability primitives (PRD sections 11.3 and 15).
+"""Tests for the reliability primitives.
 
 The primitives are pure policy, so these are unit tests throughout. The
 :class:`~model_gateway.reliability.Deadline` tests pin the arithmetic to an
@@ -219,7 +219,7 @@ class TestMalformedResponseClassification:
     structurally wrong. Retrying the route that just answered wrongly is
     unlikely to produce a different answer, but the same request to a
     different provider may well succeed — the two decisions the taxonomy
-    keeps separate (PRD section 11.2).
+    keeps separate.
     """
 
     def test_a_malformed_upstream_response_is_not_retried_on_the_same_route(self):

@@ -1,4 +1,4 @@
-"""The idempotency store and its fingerprint (PRD section 12).
+"""The idempotency store and its fingerprint.
 
 These tests prove the three rules the module is built on — the fingerprint covers
 the payload and not the key, the gateway's own identifier is not part of it, and a
@@ -91,7 +91,7 @@ def test_the_fingerprint_covers_the_tenant():
     """The same request under two tenants has two fingerprints.
 
     Answering one from the other would leak an answer across a boundary the gateway
-    is required to hold (PRD section 7), so the tenant is part of what makes a
+    is required to hold, so the tenant is part of what makes a
     request the request it is.
     """
     assert request_fingerprint(request(tenant_id="acme")).digest != request_fingerprint(
