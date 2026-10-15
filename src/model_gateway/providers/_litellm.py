@@ -1,4 +1,4 @@
-"""The one seam through which the binding reaches LiteLLM (PRD section 6).
+"""The one seam through which the binding reaches LiteLLM.
 
 Importing ``litellm`` calls ``dotenv.load_dotenv()`` at import time while
 ``LITELLM_MODE`` is ``DEV``, its default: any ``.env`` in the working directory

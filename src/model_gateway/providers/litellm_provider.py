@@ -1,11 +1,11 @@
-"""The LiteLLM text provider: one gateway attempt through the pinned binding (PRD section 9).
+"""The LiteLLM text provider: one gateway attempt through the pinned binding.
 
 This is the production :class:`~model_gateway.providers.base.TextProvider`. It
 adds execution to the transport-agnostic translation of
 :mod:`model_gateway.providers.litellm_translation`: build the call's parameters,
 perform one gateway attempt through ``litellm.acompletion`` with the safe
 outbound client injected, and normalise the answer into the canonical
-response. What it owns is PRD section 9's boundary and nothing more — routing,
+response. What it owns is the provider boundary and nothing more — routing,
 retry policy, accounting, identity and the public contract stay in the gateway
 core (:mod:`model_gateway.providers.base`).
 
@@ -15,7 +15,7 @@ Controls, and why each is there
     Set by :func:`~model_gateway.providers.litellm_translation.to_litellm_params`
     and never overridden here. It is mandatory, not defensive: it suppresses both
     the LiteLLM-level retry loop and the OpenAI-SDK retry loop, which is what
-    leaves the gateway core as the only retry owner (PRD section 11.3). The
+    leaves the gateway core as the only retry owner. The
     injected client is *not* a substitute: passing
     ``client=AsyncOpenAI(max_retries=0)`` without ``num_retries=0`` silently
     resets the SDK's ``max_retries`` to 2, so retries return unless the
@@ -24,7 +24,7 @@ Controls, and why each is there
 The injected client
     A per-call ``client=`` kwarg, built from the transport's own pieces
     (:mod:`model_gateway.security.transport`). The connection is the binding's
-    to make, so it is the binding's to make safe (PRD section 14.1): the client
+    to make, so it is the binding's to make safe: the client
     pins the connection to the address the gateway validated and disables
     automatic redirect following, which LiteLLM otherwise forces on
     (``follow_redirects=True`` is hardcoded in the client it builds for itself).
@@ -38,7 +38,7 @@ The injected client
 
 The attempt timeout
     ``context.timeout`` is passed through as the call's ``timeout`` — the
-    budget the gateway set for this attempt (PRD section 9.6). ``None`` means
+    budget the gateway set for this attempt. ``None`` means
     the gateway set no budget, and the binding passes the absence through
     rather than inventing one of its own.
 
@@ -46,16 +46,16 @@ Error mapping
     Every exception the call raises is mapped by
     :func:`~model_gateway.providers.litellm_translation.map_litellm_error` and
     re-raised, so a caller never sees a provider-shaped error and no upstream
-    message, URL or credential reaches the public payload (PRD sections 5.4
-    and 9). A refusal raised by the transport itself — a host that resolves to
+    message, URL or credential reaches the public payload. A refusal raised by
+    the transport itself — a host that resolves to
     a blocked address at connect time — arrives as a connection failure whose
     cause chain carries the
     :class:`~model_gateway.security.url_policy.UrlPolicyError`, and is mapped as
     the connection failure it was reported as. Cancellation is the deliberate
     boundary of that rule:
     :exc:`asyncio.CancelledError` and the other ``BaseException``s propagate
-    unmapped, because PRD section 15 requires the gateway to propagate
-    cancellation rather than report it as a gateway failure.
+    unmapped, because the gateway propagates cancellation rather than
+    reporting it as a gateway failure.
 
 The HTTP path each dialect takes
 -------------------------------
@@ -102,10 +102,9 @@ The embedding entry point
 ------------------------
 ``litellm.aembedding`` is a different library entry point from
 ``litellm.acompletion``, and the gateway calls it for the embeddings operation
-exactly as PRD section 9.6's table lays the call out: the provider-prefixed
-model string, the route's base URL and credential, the texts to embed, the
-``dimensions`` the caller asked for when the route enables it, and
-``num_retries=0``. The per-dialect client is
+with the provider-prefixed model string, the route's base URL and credential,
+the texts to embed, the ``dimensions`` the caller asked for when the route
+enables it, and ``num_retries=0``. The per-dialect client is
 :meth:`LiteLLMProvider._attempt_client`'s, never a second
 construction: the embedding path reaches the wire through exactly the one
 client the text path reaches it through, and the injected object is the one
@@ -119,7 +118,7 @@ cannot reach the embedding call either.
 is the float form, which is also the upstream's own default, so the parameter
 is honoured by not asking for anything else; the gateway will not answer a
 caller who asked for ``base64`` with floats, and refuses that request with a
-capability error instead (PRD section 9.5).
+capability error instead.
 
 The translation of the upstream answer is this module's, and it reports what
 the upstream said rather than what the caller asked for: each vector carries
@@ -131,8 +130,8 @@ documented in
 :func:`~model_gateway.providers.litellm_translation.from_litellm_embedding_usage`).
 Whether those positions can be matched to the caller's input, and whether the
 vectors match the dimensionality the route declares, is the inference
-service's check (PRD sections 4.7 and 9.6), because that check reads
-deployment configuration a provider does not own.
+service's check, because that check reads deployment configuration a provider
+does not own.
 
 What is still not closed
 ------------------------
@@ -140,12 +139,11 @@ The generic path's connection-error retry is a second upstream request that no
 supported knob suppresses — ``num_retries=0`` does not reach it — so
 ``attempt_count`` may still understate what reached the upstream, and a request
 the binding retried internally may have been partially processed, or billed,
-while the gateway records a single attempt (PRD section 11.3). It is no longer a
+while the gateway records a single attempt. It is no longer a
 transport escape: both attempts go through the pinned, non-redirecting
 transport, and the retry cannot reach an address or an origin the first attempt
 was refused. An independently enforced egress restriction remains the
-compensating control PRD section 14.1 describes for any path outside the table
-above.
+compensating control for any path outside the table above.
 
 The ``.env`` guard
 -----------------
@@ -159,7 +157,7 @@ owned implementation state, not operator configuration, and it is *forced* to
 module imports the library through, and the earliest point any importer of the
 binding can reach — so no ambient value, not even an explicit operator
 ``LITELLM_MODE=DEV``, can re-enable the load and the process environment stays
-the only configuration source (PRD section 6). The mode's only other effect is
+the only configuration source. The mode's only other effect is
 on LiteLLM's proxy CLI, which this gateway never runs. The test session's own
 copy of the guard, needed because the binding tests import ``litellm``
 directly, is :file:`tests/conftest.py`.
@@ -213,7 +211,7 @@ Each member's ``acompletion`` path was determined against the pinned
 ``litellm-core`` and has a test proving that the client the binding injects is
 the client the call uses. Membership is not a claim about what the upstream
 supports: it is a claim about which HTTP path the binding can keep behind the
-transport controls of PRD section 14.1.
+transport controls this binding enforces.
 """
 
 
@@ -223,7 +221,7 @@ def ensure_supported_dialect(dialect: str) -> str:
     A dialect whose path has not been verified may be one whose handler discards
     the injected client and substitutes its own, which re-resolves the hostname
     at connect time and follows redirects with nothing raised to notice. That is
-    a silent loss of the controls PRD section 14.1 requires, so it is refused
+    a silent loss of the controls the binding requires, so it is refused
     rather than attempted: the refusal is the deployment's signal that the route
     is configured with a dialect the binding cannot keep safe, and it names the
     dialects it can. The name is configuration, not a secret, so it is safe in a
@@ -276,7 +274,7 @@ def _openai_sdk_client(
     client it is built around is the one that owns the connection, so the
     transport controls live there. ``max_retries=0`` is set here as well as
     through ``num_retries=0`` because the SDK retries with the same httpx client
-    and the gateway owns the only retry loop (PRD section 11.3).
+    and the gateway owns the only retry loop.
 
     ``resolver``, ``verify`` and ``inner_factory`` are this attempt's transport
     inputs (see :class:`LiteLLMProvider`): they choose which policy-checked
@@ -334,13 +332,13 @@ def _http_handler_client(
 
 
 class LiteLLMProvider:
-    """The production text provider: translation plus one execution (PRD section 9).
+    """The production text provider: translation plus one execution.
 
     One gateway attempt in, one canonical answer out. The provider performs one
     gateway attempt for the route it is handed — a single invocation of the
     pinned binding — and applies the attempt's own budget to it; it does not
     retry, does not choose between routes and knows nothing about fallbacks —
-    those are the gateway core's (PRD sections 9.2 and 11.3). Every control the
+    those are the gateway core's. Every control the
     call carries — ``num_retries=0``, the injected client, the attempt timeout,
     the error mapping — is documented in the module docstring, where the
     reasons for each live.
@@ -350,7 +348,7 @@ class LiteLLMProvider:
     upstream's chunks as canonical stream events. The streaming capability is
     separate from :meth:`complete` — a provider that cannot stream is refused
     by the gateway core rather than asked to fake token-by-token output from a
-    whole answer (PRD sections 5.3, 16 and 9.5).
+    whole answer.
 
     It serves embeddings through :meth:`embed`, which is the embeddings
     operation rather than a mode of the text one: a different library entry
@@ -359,7 +357,7 @@ class LiteLLMProvider:
     it is the same single gateway attempt under the same controls — the
     per-dialect client, ``num_retries=0``, the attempt timeout, the error
     mapping — so the embeddings path is not a second, less careful way to reach
-    an upstream (PRD sections 4.7 and 9.6).
+    an upstream.
 
     What a caller may inject, and what it may not
     --------------------------------------------
@@ -426,8 +424,8 @@ class LiteLLMProvider:
         self._resolver = resolver
         self._verify = verify
         self._inner_factory = inner_factory
-        # The production service holds one provider for every operation it serves
-        # (PRD sections 9 and 23), so the image entry point has to live on this
+        # The production service holds one provider for every operation it
+        # serves, so the image entry point has to live on this
         # object or the image operation has no provider at all and every image
         # request is refused as unsupported. Sharing the transport inputs is what
         # keeps one injection point covering both bindings.
@@ -441,7 +439,7 @@ class LiteLLMProvider:
         request: InvocationRequest,
         context: AttemptContext,
     ) -> InvocationResponse:
-        """Perform the one gateway attempt for this route (PRD section 9.6).
+        """Perform the one gateway attempt for this route.
 
         The call's parameters are the translation of ``route`` and ``request``
         (:func:`~model_gateway.providers.litellm_translation.to_litellm_params`)
@@ -470,7 +468,7 @@ class LiteLLMProvider:
         request: InvocationRequest,
         context: AttemptContext,
     ) -> AsyncIterator[StreamEvent]:
-        """Stream the one gateway attempt for this route (PRD sections 9.6 and 16).
+        """Stream the one gateway attempt for this route.
 
         The streaming counterpart of :meth:`complete`, and the same single
         gateway attempt under the same controls: the parameters are the
@@ -498,7 +496,7 @@ class LiteLLMProvider:
         :func:`~model_gateway.providers.litellm_translation.map_litellm_error` and
         re-raised, so a caller never sees a provider-shaped error. Cancellation
         propagates unmapped, because it is a :exc:`BaseException` the mapping
-        does not catch (PRD section 15).
+        does not catch.
 
         What this stream guarantees about its ending
         --------------------------------------------
@@ -595,7 +593,7 @@ class LiteLLMProvider:
         request: EmbeddingRequest,
         context: AttemptContext,
     ) -> EmbeddingResponse:
-        """Perform the one embeddings attempt for this route (PRD sections 4.7 and 9.6).
+        """Perform the one embeddings attempt for this route.
 
         The embedding counterpart of :meth:`complete`, and the same single
         gateway attempt under the same controls: the parameters are the
@@ -619,7 +617,7 @@ class LiteLLMProvider:
         :func:`~model_gateway.providers.litellm_translation.map_litellm_error` and
         re-raised, so a caller never sees a provider-shaped error. Cancellation
         propagates unmapped, because it is a :exc:`BaseException` the mapping
-        does not catch (PRD section 15).
+        does not catch.
         """
         params = _embedding_params(route, request)
         params["timeout"] = context.timeout
@@ -640,12 +638,12 @@ class LiteLLMProvider:
         request: ImageRequest,
         context: AttemptContext,
     ) -> ImageResponse:
-        """Perform the one image attempt for this route (PRD sections 4.6 and 9.6).
+        """Perform the one image attempt for this route.
 
         Delegated to the image binding, which owns the image dialects' HTTP paths
         and their per-dialect client construction. It is an entry point on *this*
         object because the production service is handed one provider for every
-        operation (PRD section 23): the image operation's dialect refusals, its
+        operation: the image operation's dialect refusals, its
         translation and its client injection are the image binding's, while the
         object the core holds stays the same whichever operation a request names.
         """
@@ -679,30 +677,29 @@ def _embedding_params(route: Route, request: EmbeddingRequest) -> dict[str, obje
 
     The route supplies everything the upstream call needs to be addressed, exactly
     as it does for a completion: the provider-prefixed model string
-    ``<format>/<model_id>`` (PRD section 9.6), the resolved base URL, the route's
+    ``<format>/<model_id>``, the resolved base URL, the route's
     credential and its non-authentication extra headers. Retries are disabled
     with ``num_retries=0`` because the gateway core owns the retry loop and the
-    invocation deadline, so there is exactly one retry layer and one deadline
-    (PRD section 11.3).
+    invocation deadline, so there is exactly one retry layer and one deadline.
 
     The request supplies the texts to embed, in the caller's order, and the
     ``dimensions`` it asks for. ``dimensions`` is sent only when the route
     enables it — ``route.supports_dimensions_param``, the operator's own
     statement that this route accepts a caller-selectable dimensionality — and
     omitted otherwise, so the provider's own default applies; the gateway
-    deliberately substitutes no vendor default (PRD section 5.1), and a route
-    the operator configured as not accepting the parameter is never handed one
-    (PRD section 9.6). The gateway checks the answer's shape against the
-    dimensionality the route declares (PRD sections 6.3 and 9.6).
+    deliberately substitutes no vendor default, and a route
+    the operator configured as not accepting the parameter is never handed one.
+    The gateway checks the answer's shape against the
+    dimensionality the route declares.
 
     ``encoding_format`` is deliberately not sent: the gateway's embeddings answer
     is the float form, which is the upstream's own default, so the parameter is
     honoured by asking for nothing else. A caller who asked for ``base64`` is
     refused by the gateway core with a capability error rather than answered in
-    floats (PRD section 9.5).
+    floats.
 
     ``user`` and ``metadata`` are not forwarded. They are caller bookkeeping the
-    canonical request carries, and PRD section 5.1 forbids forwarding either to
+    canonical request carries, and the gateway forbids forwarding either to
     the model or to the provider.
     """
     params: dict[str, object] = {
@@ -727,19 +724,19 @@ def _from_litellm_embedding(
 ) -> EmbeddingResponse:
     """Normalise a LiteLLM embeddings answer into the canonical response.
 
-    ``response`` is upstream data, never forwarded unchanged (PRD section 9).
+    ``response`` is upstream data, never forwarded unchanged.
     Each vector is read with the position the upstream reported. The usage is
     mapped by :func:`~model_gateway.providers.litellm_translation.from_litellm_embedding_usage`,
     which records a zero count as unknown: the pinned library fabricates an
     all-zero usage when the upstream reported none, and that placeholder is
     indistinguishable from a reported zero in every representation the
     binding can read, so a zero cannot be presented as a provider-reported
-    fact (an irrecoverable binding limitation, PRD section 13). The vectors
+    fact (an irrecoverable binding limitation). The vectors
     are *not* reordered here: the upstream's own order and indices are
     reported verbatim, and matching them to the caller's input is the
     inference service's work, because that check reads the caller's request
     and the deployment's declared dimensions — neither of which a provider
-    owns (PRD sections 4.7 and 9.6).
+    owns.
 
     Raises :class:`~model_gateway.errors.MalformedResponseError` naming the field
     when the upstream answer carries a semantic the canonical representation
@@ -747,10 +744,9 @@ def _from_litellm_embedding(
     string, say — or a position that is not an integer. A refusal that recurs is
     evidence about the canonical model, not a licence to widen the ignored set,
     so the refusal stands rather than the value being coerced into a shape it
-    never had (PRD section 9.1). The refusal is the malformed-response error
+    never had. The refusal is the malformed-response error
     rather than an internal one: the upstream answered, and its answer is what
-    cannot serve the request, so another eligible route may answer correctly
-    (PRD section 11.2).
+    cannot serve the request, so another eligible route may answer correctly.
     """
     if not invocation_id:
         raise FailedPreconditionError(
@@ -775,8 +771,7 @@ def _embedding_records(response: EmbeddingResponse) -> tuple[object, ...]:
     iterable at all — a ``null`` the library passed through, say — becomes an
     empty tuple here rather than a ``TypeError`` escaping the binding: the
     gateway core then refuses the answer for carrying no vector per input, which
-    is a gateway error a caller can act on rather than an unclassified failure
-    (PRD sections 5.4 and 9.1).
+    is a gateway error a caller can act on rather than an unclassified failure.
     """
     records = getattr(response, "data", None)
     if records is None or isinstance(records, str | bytes):
@@ -794,7 +789,7 @@ def _embedding_from(item: object) -> Embedding:
     :class:`~litellm.types.utils.Embedding` objects or as the raw dictionaries
     its own converter produced, so both shapes are read the same way. A record
     whose position or values the canonical type cannot carry is refused rather
-    than coerced (PRD section 9.1).
+    than coerced.
     """
     index = _embedding_field(item, "index")
     values = _embedding_field(item, "embedding")

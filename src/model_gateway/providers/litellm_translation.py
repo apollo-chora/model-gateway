@@ -1,4 +1,4 @@
-"""Transport-agnostic translation between the canonical domain and LiteLLM (PRD section 9).
+"""Transport-agnostic translation between the canonical domain and LiteLLM.
 
 This module is the half of the LiteLLM binding that knows nothing about how a call
 is performed. It translates a canonical :class:`~model_gateway.domain.InvocationRequest`
@@ -9,8 +9,8 @@ hierarchy onto the gateway error taxonomy. The outbound transport — the connec
 the address pinning, the redirect policy — is a later slice's; this module only
 shapes data.
 
-Three rules govern every function here. They are PRD section 9.1 applied to this
-boundary, and each is enforced rather than assumed:
+Three rules govern every function here. They are the classification rules
+applied to this boundary, and each is enforced rather than assumed:
 
 * **Request side.** Every semantically relevant element of the canonical request
   is represented in the upstream call, or the invocation is rejected as
@@ -20,10 +20,9 @@ boundary, and each is enforced rather than assumed:
   identity and idempotency fields stay out of the upstream call: the gateway
   chose the route, owns the retry loop and mints the invocation identity, so
   none of ``model`` (the public ID), ``invocation_id``, ``fallback_models``,
-  ``idempotency_key`` or ``metadata`` is forwarded (PRD sections 5.1, 9.2 and
-  12).
+  ``idempotency_key`` or ``metadata`` is forwarded.
 * **Response side.** Every field of the upstream response is classified
-  before it is acted on, by four rules (PRD section 9.1):
+  before it is acted on, by four rules:
 
   - a canonical semantic is mapped into the canonical model;
   - a known semantic the canonical model cannot represent — log probabilities,
@@ -53,13 +52,13 @@ boundary, and each is enforced rather than assumed:
   The gateway's own identity is stamped on the response — ``model`` is the
   public ID the caller asked for, ``upstream_model`` is the route's model ID
   and ``invocation_id`` is the gateway's own — never a value the upstream
-  supplied (PRD sections 5.2 and 9).
+  supplied.
 * **Errors.** LiteLLM's exception hierarchy is mapped onto the gateway taxonomy
   by class, never by parsing an upstream message. Every message the taxonomy
   publishes is gateway-authored and fixed, so an upstream message, URL or
   credential cannot reach a caller through this module; the original exception
   is attached as ``__cause__`` for the logging layer, which must not format
-  exception chains by default (PRD sections 5.4 and 17).
+  exception chains by default.
 
 The LiteLLM shapes this module reads and writes are the installed library's own:
 ``litellm.types.utils.ModelResponse`` with its ``Choices``, ``Message``,
@@ -157,32 +156,31 @@ def to_litellm_params(route: Route, request: InvocationRequest) -> dict[str, obj
     """Translate a canonical invocation into ``litellm.acompletion`` keyword arguments.
 
     The route supplies everything the upstream call needs to be addressed: the
-    provider-prefixed model string ``<format>/<model_id>`` (PRD section 9.6),
+    provider-prefixed model string ``<format>/<model_id>``,
     the resolved base URL, the route's credential and its non-authentication
     extra headers. Retries are disabled with ``num_retries=0`` because the
     gateway core owns the retry loop and the invocation deadline, so there is
-    exactly one retry layer and one deadline (PRD section 11.3).
+    exactly one retry layer and one deadline.
 
     The request supplies the conversation, the tools and the generation
     parameters. An unset generation parameter is omitted rather than sent as a
     default, so the provider's own default applies; the gateway deliberately
-    substitutes no vendor default (PRD section 5.1). A ``text`` response format
+    substitutes no vendor default. A ``text`` response format
     is likewise omitted, because it is the provider's own default and asks for
-    nothing beyond ``chat`` (PRD section 6.1); a non-text response format is the
-    structured-output requirement of PRD section 9.5 and is sent in full.
+    nothing beyond ``chat``; a non-text response format is the
+    structured-output requirement and is sent in full.
 
     The invocation-level ``system_instruction`` is forwarded as a ``system``
     message of its own, ahead of the conversation, and is never merged into a
     ``system`` message inside ``messages``: the two are separate elements and
-    folding one into the other would change what the provider sees (PRD
-    sections 5.1 and 9.5).
+    folding one into the other would change what the provider sees.
 
     Raises :class:`~model_gateway.errors.CapabilityError` naming the element
     when a semantically relevant part of the request has no LiteLLM upstream
     representation — today that is a refusal part in a caller-authored message,
     which a chat completion request cannot carry. It is never mapped to
     ordinary text, because a refusal and text saying much the same thing are
-    different events (PRD section 5.2).
+    different events.
     """
     params: dict[str, object] = {
         "model": route.litellm_model,
@@ -204,18 +202,18 @@ def to_litellm_stream_params(route: Route, request: InvocationRequest) -> dict[s
     """Translate a canonical invocation into ``litellm.acompletion`` streaming arguments.
 
     The streaming call is the non-streaming call with ``stream=True`` and nothing
-    else added (PRD section 9.6): the same route, the same conversation, the same
+    else added: the same route, the same conversation, the same
     tools and tool choice, the same generation parameters, and the same
     ``num_retries=0``, because the gateway core owns the retry loop and the
-    invocation deadline on this path exactly as it does on the other one (PRD
-    section 11.3). The translation is written as that one addition rather than
+    invocation deadline on this path exactly as it does on the other one. The
+    translation is written as that one addition rather than
     duplicated, so a parameter added to the non-streaming call is carried by the
     streaming call and the two cannot drift apart.
 
     No ``stream_options`` is sent. The gateway asks the upstream for nothing
     beyond streaming itself: usage reporting is taken where the upstream chooses
     to offer it, and a parameter the gateway invented would be a request the
-    caller never made (PRD section 5.1). In particular the gateway does not ask
+    caller never made. In particular the gateway does not ask
     for a trailing usage chunk, so it must accept one arriving after the finish
     reason when the upstream sends one anyway — which the pinned library does for
     the OpenAI dialect, as :mod:`~model_gateway.providers.litellm_provider`
@@ -231,7 +229,7 @@ def from_litellm_response(
 ) -> InvocationResponse:
     """Normalise a LiteLLM completion into the canonical response.
 
-    ``response`` is upstream data, never forwarded unchanged (PRD section 9).
+    ``response`` is upstream data, never forwarded unchanged.
     Exactly one choice is accepted: the canonical response represents a single
     answer, so a response carrying several choices is rejected rather than
     silently reduced to its first. The answer is read in the order the upstream
@@ -247,9 +245,9 @@ def from_litellm_response(
     read from there when it is present and from the mapped reason otherwise. A
     reason the gateway has not been taught becomes ``FinishReason.UNKNOWN``
     with the raw value still recorded, so ``UNKNOWN`` never means the gateway
-    deleted what upstream said (PRD section 5.2).
+    deleted what upstream said.
 
-    Usage is mapped with per-count provenance (PRD section 13): provider-reported
+    Usage is mapped with per-count provenance: provider-reported
     counts are recorded as reported, and a total LiteLLM left at zero beside
     non-zero parts — its placeholder for an unreported total — is derived from
     the parts and named in ``estimated_fields``. Cached tokens come from the
@@ -259,12 +257,12 @@ def from_litellm_response(
     ID the caller asked for, ``upstream_model`` is the route's configured model
     ID (not the provider-prefixed string the binding built) and
     ``invocation_id`` is the gateway's own. No upstream value is trusted for any
-    of them (PRD sections 5.2 and 9.6).
+    of them.
 
     Raises :class:`~model_gateway.errors.InternalError` naming the field when
     the response carries a semantic the canonical model cannot represent — a
     log-probability block, a reasoning trace, a provider-specific annotation,
-    a server-tool-use record or an extra usage-detail count (PRD section 9.1).
+    a server-tool-use record or an extra usage-detail count.
     A backend fingerprint is no longer one of them: it is classified
     non-semantic operational metadata and deliberately ignored.
     """
@@ -292,11 +290,11 @@ def from_litellm_response(
 def from_litellm_chunk(
     chunk: ModelResponseStream, *, invocation_id: str, sequence: int
 ) -> tuple[StreamEvent, ...]:
-    """Translate one upstream streaming chunk into canonical stream events (PRD 5.3, 16).
+    """Translate one upstream streaming chunk into canonical stream events.
 
     ``chunk`` is one ``ModelResponseStream``, the shape the pinned library yields
-    for ``stream=True``. It is upstream data, never forwarded unchanged (PRD
-    section 9), and it is classified by the same four rules the response side
+    for ``stream=True``. It is upstream data, never forwarded unchanged,
+    and it is classified by the same four rules the response side
     applies to a whole answer: a canonical semantic is mapped; a known semantic
     the canonical stream cannot represent — a reasoning trace, an audio block, an
     image part, a legacy function call, a log-probability block, a token count
@@ -311,7 +309,7 @@ def from_litellm_chunk(
     answer reads: the text fragment, then each tool-call fragment, then the usage
     report, then the finish reason. The finish reason is emitted last because it
     is terminal — nothing the upstream says after it belongs to the answer the
-    caller was already told was complete (PRD section 5.3) — so a chunk that
+    caller was already told was complete — so a chunk that
     carries both text and a finish reason produces two ordered events rather than
     one. A chunk carrying nothing reportable produces no event at all: a role
     marker, an empty delta and a keep-alive assert nothing about the answer, and
@@ -321,11 +319,10 @@ def from_litellm_chunk(
     usage reporting is on, so it produces a usage event and nothing else. Its
     usage is mapped by the same :func:`_usage` the response side uses, so a
     provider-reported count is recorded as reported and a total the library left
-    at zero beside non-zero parts is derived and named as the estimate it is (PRD
-    section 13).
+    at zero beside non-zero parts is derived and named as the estimate it is.
 
     ``sequence`` is the gateway's own numbering of the events of this invocation,
-    never a number taken from upstream (PRD section 16): the events this chunk
+    never a number taken from upstream: the events this chunk
     produces are numbered from it in order, and the caller advances it by the
     number of events actually emitted. It must be a non-negative integer, because
     a negative or fractional number would break the strictly-increasing guarantee
@@ -393,13 +390,13 @@ def from_litellm_chunk(
 
 
 def map_litellm_error(exc: BaseException) -> GatewayError:
-    """Map a LiteLLM failure onto the gateway error taxonomy (PRD sections 5.4 and 9).
+    """Map a LiteLLM failure onto the gateway error taxonomy.
 
     The mapping is by exception class, never by parsing an upstream message, and
     every message the returned error carries is gateway-authored and fixed. An
     upstream message, URL or credential therefore cannot reach a caller through
     this function; the original exception is attached as ``__cause__`` so the
-    logging layer can still reach it behind its explicit opt-in (PRD section 17).
+    logging layer can still reach it behind its explicit opt-in.
 
     A :class:`~model_gateway.errors.GatewayError` is returned unchanged: it has
     already been classified and sanitised, and re-classifying it would demote a
@@ -426,7 +423,7 @@ def _messages(request: InvocationRequest) -> list[dict[str, object]]:
     The invocation-level instruction becomes a ``system`` message of its own at
     the head of the conversation. A ``system`` message inside ``messages`` is
     the conversation-level equivalent and is forwarded as the caller supplied it;
-    the two are never folded together (PRD sections 5.1 and 9.5).
+    the two are never folded together.
     """
     messages: list[dict[str, object]] = []
     if request.system_instruction is not None:
@@ -455,7 +452,7 @@ def _content(parts: tuple[ContentPart, ...]) -> str | list[dict[str, object]]:
 
     A single text part is sent as the plain string the OpenAI-shaped API
     expects; anything else becomes an ordered block list that preserves the
-    part sequence — text and images interleaved stay interleaved (PRD 9.4).
+    part sequence — text and images interleaved stay interleaved.
     """
     if not parts:
         return ""
@@ -517,7 +514,7 @@ def _outgoing_tool_call(call: ToolCall) -> dict[str, object]:
 
 
 def _tool(definition: ToolDefinition) -> dict[str, object]:
-    """A tool declaration in LiteLLM's OpenAI-shaped function form (PRD 9.3)."""
+    """A tool declaration in LiteLLM's OpenAI-shaped function form."""
     return {
         "type": "function",
         "function": {
@@ -529,7 +526,7 @@ def _tool(definition: ToolDefinition) -> dict[str, object]:
 
 
 def _tool_choice(choice: ToolChoice) -> str | dict[str, str]:
-    """The tool-choice policy in LiteLLM's OpenAI-shaped vocabulary (PRD 9.3)."""
+    """The tool-choice policy in LiteLLM's OpenAI-shaped vocabulary."""
     if choice.mode is ToolChoiceMode.SPECIFIC:
         name = choice.name
         if name is None:
@@ -546,7 +543,7 @@ def _add_generation_params(
     """Add the generation parameters that were set, leaving the rest to the provider.
 
     "Unset" and "zero" are different requests, so an unset parameter is omitted
-    rather than sent as a default the gateway invented (PRD section 5.1).
+    rather than sent as a default the gateway invented.
     """
     if config.temperature is not None:
         params["temperature"] = config.temperature
@@ -568,7 +565,7 @@ def _add_generation_params(
 
 
 def _response_format(response_format: ResponseFormat) -> dict[str, object]:
-    """A structured-output requirement in LiteLLM's OpenAI-shaped form (PRD 9.5)."""
+    """A structured-output requirement in LiteLLM's OpenAI-shaped form."""
     if response_format.mode is ResponseFormatMode.JSON_OBJECT:
         return {"type": "json_object"}
     schema = response_format.schema
@@ -583,7 +580,7 @@ def _response_format(response_format: ResponseFormat) -> dict[str, object]:
 
 
 def _raw_finish_reason(choice: Choices | StreamingChoices) -> str:
-    """The provider's own finish reason, verbatim (PRD section 5.2).
+    """The provider's own finish reason, verbatim.
 
     LiteLLM maps recognised reasons onto its OpenAI-shaped vocabulary and keeps
     the original in ``provider_specific_fields`` whenever the two differ, so the
@@ -610,7 +607,7 @@ def _output(message: LiteLLMMessage) -> tuple[OutputItem, ...]:
     did.
 
     A refusal is mapped rather than refused, because the canonical model carries
-    one as a part of its own (PRD sections 5.2 and 9.1). The two are mutually
+    one as a part of its own. The two are mutually
     exclusive in practice — a provider that declines sends no content — so the
     position relative to text is a stated convention rather than a reconstruction.
     """
@@ -658,7 +655,7 @@ def _refusal_text(message: LiteLLMMessage) -> str | None:
     return None
 
 def _output_image(entry: Mapping[str, object]) -> ImagePart:
-    """An upstream image entry as a canonical image part (PRD 9.4)."""
+    """An upstream image entry as a canonical image part."""
     image_url = entry.get("image_url") if isinstance(entry, Mapping) else None
     url = image_url.get("url") if isinstance(image_url, Mapping) else None
     if not isinstance(url, str) or not url:
@@ -674,7 +671,7 @@ def _incoming_tool_call(call: Any) -> ToolCall:
 
     The arguments are a parsed JSON object when they parse to one and the raw
     string when they do not — the gateway records what arrived rather than
-    repairing it (PRD section 9.3).
+    repairing it.
     """
     if not isinstance(call, ChatCompletionMessageToolCall):
         raise InternalError(
@@ -704,7 +701,7 @@ def _arguments(raw: str | None) -> Mapping[str, Any] | str | None:
 
 
 def _usage(usage: LiteLLMUsage | None) -> TokenUsage:
-    """The upstream usage as a canonical usage record (PRD section 13).
+    """The upstream usage as a canonical usage record.
 
     A ``None`` usage means the provider reported nothing, which is not the same
     as zero. Counts on a present LiteLLM ``Usage`` are provider-reported,
@@ -733,7 +730,7 @@ def _usage(usage: LiteLLMUsage | None) -> TokenUsage:
 
 
 def from_litellm_embedding_usage(usage: LiteLLMUsage | None) -> TokenUsage:
-    """The upstream embeddings usage as a canonical usage record (PRD section 13).
+    """The upstream embeddings usage as a canonical usage record.
 
     The embeddings path cannot take the library's word for a zero, and the
     reason is a property of the pinned library rather than of this mapping.
@@ -760,8 +757,8 @@ def from_litellm_embedding_usage(usage: LiteLLMUsage | None) -> TokenUsage:
     reported fact it can only be. A zero count — ambiguous between a
     reported zero, a converter default and the placeholder — is recorded as
     unknown, because the canonical usage model's rule is that a count the
-    gateway could not establish is ``None`` rather than ``0`` (PRD section
-    13), and presenting the placeholder as a reported fact is the one error
+    gateway could not establish is ``None`` rather than ``0``, and presenting
+    the placeholder as a reported fact is the one error
     this boundary must not make. A total of zero beside non-zero parts is
     derived from the parts and named in ``estimated_fields``, exactly as the
     completion path's :func:`_usage` does, so the two operations treat an
@@ -810,18 +807,18 @@ def _cached_tokens(usage: LiteLLMUsage) -> int | None:
 
 
 def _reject_unrepresentable_usage(usage: LiteLLMUsage) -> None:
-    """Refuse usage fields the canonical model cannot carry (PRD section 9.1).
+    """Refuse usage fields the canonical model cannot carry.
 
     Only ``cached_tokens`` has a canonical target among the prompt-token
     details, and none among the completion-token details; a server-tool-use
     record has none either. Each is a provider-reported fact, so the response
     is rejected rather than trimmed. LiteLLM's own ``cost`` is deliberately not
-    checked: cost is the gateway's, computed from configured pricing data
-    (PRD section 13), not a provider semantic the binding forwards.
+    checked: cost is the gateway's, computed from configured pricing data,
+    not a provider semantic the binding forwards.
 
     A refusal that recurs — extra token categories in the usage details, such
     as a reasoning-token count — is a signal that the canonical usage model
-    (PRD section 13) may genuinely need extending with a field for that
+    may genuinely need extending with a field for that
     category. Until it does, the refusal stands: the semantic is not
     allowlisted into :data:`_NON_SEMANTIC_RESPONSE_FIELDS`, because a token
     count is a reported fact about the answer, not backend metadata, and
@@ -950,8 +947,8 @@ def _is_library_synthetic_completion_details(
 # beside it; listing a field is a decision that it changes nothing about the
 # answer, never a place to park a semantic the canonical model cannot hold.
 # The upstream's own identity fields — ``id``, ``created``, ``model`` — need no
-# entry: the gateway stamps its own identity on the response (PRD sections 5.2
-# and 9.6), so an upstream identity is deliberately neither mapped nor refused.
+# entry: the gateway stamps its own identity on the response, so an upstream
+# identity is deliberately neither mapped nor refused.
 _NON_SEMANTIC_RESPONSE_FIELDS: frozenset[str] = frozenset(
     {
         # The fingerprint of the upstream backend that produced the answer: it
@@ -969,7 +966,7 @@ def _reject_unmappable(response: ModelResponse, choice: Choices, message: LiteLL
 
     Each check names the field it refuses, so a drop cannot pass undetected:
     a response the canonical model cannot fully represent is rejected as
-    unsupported rather than silently trimmed (PRD section 9.1). Two fields are
+    unsupported rather than silently trimmed. Two fields are
     deliberately not here. The response-level ``system_fingerprint`` is
     classified non-semantic operational metadata and ignored, from
     :data:`_NON_SEMANTIC_RESPONSE_FIELDS`. The message-level ``refusal`` is
@@ -1049,7 +1046,7 @@ def _reject_extra_provider_fields(
 
 
 def _reject_unmappable_chunk(chunk: ModelResponseStream) -> None:
-    """Refuse a chunk-level semantic the canonical stream cannot carry (PRD section 9.1).
+    """Refuse a chunk-level semantic the canonical stream cannot carry.
 
     The backend fingerprint is the one chunk-level field classified non-semantic
     operational metadata and deliberately ignored, from
@@ -1075,7 +1072,7 @@ def _reject_unmappable_chunk(chunk: ModelResponseStream) -> None:
 
 
 def _reject_unmappable_choice(choice: StreamingChoices) -> None:
-    """Refuse a choice-level semantic the canonical stream cannot carry (PRD section 9.1).
+    """Refuse a choice-level semantic the canonical stream cannot carry.
 
     ``native_finish_reason`` is allowed, because it is where the library keeps
     the provider's own reason whenever it differs from the mapped one, and it is
@@ -1095,7 +1092,7 @@ def _reject_unmappable_choice(choice: StreamingChoices) -> None:
 
 
 def _reject_unmappable_delta(delta: Delta) -> None:
-    """Refuse a delta-level semantic the canonical stream cannot carry (PRD section 9.1).
+    """Refuse a delta-level semantic the canonical stream cannot carry.
 
     These are the streaming counterparts of the response-side refusals, and they
     are refusals rather than drops for the same reason: a reasoning trace, a
@@ -1104,7 +1101,7 @@ def _reject_unmappable_delta(delta: Delta) -> None:
     provider said about the answer, and the canonical event vocabulary has no
     event for any of them. A tool call is the one exception, and it is mapped
     rather than refused — but only in its function-call form, which is the form
-    the canonical delta represents (PRD section 9.3).
+    the canonical delta represents.
 
     A **refusal** is refused here even though the response side maps it, and the
     asymmetry is the point: the canonical *model* carries a refusal part, so a
@@ -1167,7 +1164,7 @@ def _delta_text(delta: Delta) -> str | None:
     library admits an ordered block list there for providers that stream content
     parts, and a canonical content event carries text. Mapping blocks onto text
     would change what the provider sent, and dropping them would tell the caller
-    the fragment was delivered (PRD section 9.1). An empty string is an absent
+    the fragment was delivered. An empty string is an absent
     fragment rather than an empty one — there is nothing to append, and a
     canonical content event refuses empty text because it asserts no change while
     claiming to report one.
@@ -1234,15 +1231,14 @@ def _tool_call_events(
 
 
 def _finish_event(choice: StreamingChoices, *, invocation_id: str, sequence: int) -> StreamEvent:
-    """The terminal event for a choice that reported a finish reason (PRD section 5.3).
+    """The terminal event for a choice that reported a finish reason.
 
     The classification and the raw reason are read exactly as the response side
     reads them: :func:`_raw_finish_reason` prefers the provider's own reason from
     ``provider_specific_fields`` and falls back to the mapped one, and the
     gateway's own vocabulary classifies whatever that was. A reason the gateway
     has not been taught becomes ``FinishReason.UNKNOWN`` with the raw value still
-    recorded, so ``UNKNOWN`` never means the gateway deleted what upstream said
-    (PRD sections 5.2 and 9.1).
+    recorded, so ``UNKNOWN`` never means the gateway deleted what upstream said.
     """
     raw_finish_reason = _raw_finish_reason(choice)
     return StreamEvent(

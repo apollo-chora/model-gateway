@@ -1,57 +1,55 @@
-"""The provider protocol: the whole of the gateway's upstream boundary (PRD section 9).
+"""The provider protocol: the whole of the gateway's upstream boundary.
 
 A provider performs upstream protocol translation and execution, and nothing
 else. Given a route and a canonical request, it calls the upstream endpoint the
 route names, translates between the provider's wire format and the canonical
 domain, and returns the canonical response. That is the entire job.
 
-The boundary is deliberate, and it is what makes the gateway vendor-neutral
-(PRD section 9 and principle 1): a provider speaks one vendor's protocol, the
-gateway core speaks the canonical model, and adding a provider means adding a
-translation rather than editing gateway business logic. LiteLLM is the first
-implementation of this protocol; :mod:`model_gateway.providers.mock` is a
-deterministic one for tests and the vertical slice.
+The boundary is deliberate, and it is what makes the gateway vendor-neutral: a
+provider speaks one vendor's protocol, the gateway core speaks the canonical
+model, and adding a provider means adding a translation rather than editing
+gateway business logic. LiteLLM is the first implementation of this protocol;
+:mod:`model_gateway.providers.mock` is a deterministic one for tests and the
+vertical slice.
 
-What a provider must not own (PRD section 9.2):
+What a provider must not own:
 
 * **Routing.** The gateway hands the provider exactly one resolved route. A
   provider never chooses between routes, and never sees the fallback list.
 * **Authentication decisions.** The route carries the credential and
-  authentication type the gateway chose (PRD section 7); a provider constructs
-  the provider's native header from what it is given and decides nothing.
+  authentication type the gateway chose; a provider constructs the provider's
+  native header from what it is given and decides nothing.
 * **Retry and fallback policy.** The gateway core owns the retry loop and the
-  single invocation deadline (PRD sections 11.3 and 15), so a provider performs
-  one gateway attempt and returns one result. One attempt is not one wire
-  request: an implementation may reach a library that retries internally without
-  the gateway's knowledge, so more than one upstream request can happen inside
-  a single attempt and the attempt count never counts wire requests. A
-  provider that retried on its own would be a second retry loop stacked on the
-  gateway's, which PRD section 11.3 prohibits. The deadline reaches the
-  provider as the budget on the attempt it is handed (:class:`AttemptContext`);
-  a provider neither computes a deadline nor reads one out of configuration it
+  single invocation deadline, so a provider performs one gateway attempt and
+  returns one result. One attempt is not one wire request: an implementation
+  may reach a library that retries internally without the gateway's knowledge,
+  so more than one upstream request can happen inside a single attempt and the
+  attempt count never counts wire requests. A provider that retried on its own
+  would be a second retry loop stacked on the gateway's, which the gateway's
+  ownership of the only retry loop forbids. The deadline reaches the provider
+  as the budget on the attempt it is handed (:class:`AttemptContext`); a
+  provider neither computes a deadline nor reads one out of configuration it
   does not own.
 * **Idempotency and accounting.** Deduplication, token counts and cost are
-  gateway records (PRD sections 12 and 13); a provider reports what the upstream
-  said and the gateway decides what that means.
+  gateway records; a provider reports what the upstream said and the gateway
+  decides what that means.
 * **Error normalisation.** A provider may raise provider-shaped exceptions. The
   gateway classifies them into its own taxonomy and sanitises them before a
-  caller sees them (PRD section 5.4), so a provider never writes a message a
-  caller will read.
+  caller sees them, so a provider never writes a message a caller will read.
 * **The public contract.** A provider returns canonical types and knows nothing
   about HTTP status codes, gRPC names or the OpenAI wire shape.
 
 Streaming is a separate capability (:class:`StreamingTextProvider`), not a mode
 of :class:`TextProvider`: a provider that cannot stream is refused rather than
-asked to fake token-by-token output from a whole answer (PRD sections 5.3, 16
-and 9.5). Embeddings are separate in the same way
-(:class:`EmbeddingProvider`): the operation is a different upstream call with a
-different answer, so a provider that cannot embed is refused rather than handed
-an embeddings request it would answer with something else (PRD sections 4.7,
-6.3 and 9.6). Image generation is separate in the same way
+asked to fake token-by-token output from a whole answer. Embeddings are
+separate in the same way (:class:`EmbeddingProvider`): the operation is a
+different upstream call with a different answer, so a provider that cannot
+embed is refused rather than handed an embeddings request it would answer with
+something else. Image generation is separate in the same way
 (:class:`ImageProvider`): it is a different upstream call with a different
 answer — images rather than words or vectors — so a provider that cannot
 generate images is refused rather than handed an image request it would answer
-with something else (PRD sections 4.6, 6.2 and 9.6).
+with something else.
 """
 
 from collections.abc import AsyncIterator
@@ -76,7 +74,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class AttemptContext:
-    """The execution facts of one provider attempt (PRD sections 9.6 and 15).
+    """The execution facts of one provider attempt.
 
     One attempt, not one invocation. This is what the provider needs to perform
     the one gateway attempt it is given, and nothing about how the invocation
@@ -84,20 +82,20 @@ class AttemptContext:
 
     ``invocation_id`` is the gateway's identifier for the invocation the attempt
     belongs to, so a provider can correlate its own upstream call with the
-    gateway's record of it (PRD section 5.2). ``attempt_number`` is 1-based and
-    counts the attempts the gateway has made for that invocation, including
-    retries of the same route. ``timeout`` is the budget in seconds this attempt
-    may use, drawn from the invocation deadline (PRD section 9.6) — the value a
-    binding hands LiteLLM as its ``timeout``. ``None`` means the gateway set no
-    budget for the attempt, which is not a budget of zero.
+    gateway's record of it. ``attempt_number`` is 1-based and counts the
+    attempts the gateway has made for that invocation, including retries of the
+    same route. ``timeout`` is the budget in seconds this attempt may use,
+    drawn from the invocation deadline — the value a binding hands LiteLLM as
+    its ``timeout``. ``None`` means the gateway set no budget for the attempt,
+    which is not a budget of zero.
 
     It carries execution facts only, and never routing policy: which route to
     call, which credential to present, whether to retry and where to fall back
-    are all decided by the gateway core before the attempt is made (PRD sections
-    9.2 and 11.3), and the route arrives beside this object rather than inside
-    it. The object exists so that the facts a later slice needs — a deadline to
-    cancel against, a span to attribute a trace to — travel through one seam
-    instead of one parameter per caller.
+    are all decided by the gateway core before the attempt is made, and the
+    route arrives beside this object rather than inside it. The object exists so
+    that the facts a later slice needs — a deadline to cancel against, a span to
+    attribute a trace to — travel through one seam instead of one parameter per
+    caller.
     """
 
     invocation_id: str | None
@@ -117,7 +115,7 @@ class AttemptContext:
 
 
 class TextProvider(Protocol):
-    """One upstream text provider: translation and execution, nothing more (PRD section 9).
+    """One upstream text provider: translation and execution, nothing more.
 
     Implementations are structural — any object with a ``complete`` method of this
     shape satisfies the protocol, which is what lets a deployment bind LiteLLM,
@@ -134,7 +132,7 @@ class TextProvider(Protocol):
     A provider that cannot honour the request raises; it does not degrade the
     request into something smaller. Dropping a tool, an image or a generation
     parameter because no canonical target exists upstream changes what the caller
-    asked for, and PRD section 9.5 requires a structured capability error instead.
+    asked for, and a structured capability error is the only honest answer.
     """
 
     async def complete(
@@ -147,10 +145,9 @@ class TextProvider(Protocol):
 
         Performs one gateway attempt for exactly one route. It does not
         retry, does not fall back to another route, and does not choose between
-        routes: those are the gateway core's (PRD sections 11.2 and 11.3). It
-        applies the budget on ``context`` to the call it makes, so the upstream
-        client is given the gateway's deadline rather than one of its own
-        choosing (PRD section 9.6).
+        routes: those are the gateway core's. It applies the budget on
+        ``context`` to the call it makes, so the upstream client is given the
+        gateway's deadline rather than one of its own choosing.
 
         One attempt is not the same as one upstream request. An implementation
         may reach a library that retries internally without the gateway's
@@ -162,15 +159,15 @@ class TextProvider(Protocol):
 
 @runtime_checkable
 class StreamingTextProvider(Protocol):
-    """A text provider that can also stream its answer (PRD sections 5.3 and 16).
+    """A text provider that can also stream its answer.
 
     Streaming is a separate capability from :class:`TextProvider`, not a mode of
     it, because a provider that cannot stream must be *refused* rather than
     faked: answering a ``stream: true`` request with a complete, non-streamed
     body would tell the caller it received tokens as they were produced when it
-    did not (PRD sections 16 and 9.5). A provider either produces a real
-    upstream stream or the gateway rejects the request with a capability error
-    naming ``streaming``; there is no third option.
+    did not. A provider either produces a real upstream stream or the gateway
+    rejects the request with a capability error naming ``streaming``; there is
+    no third option.
 
     The protocol is structural and runtime-checkable, so the gateway core can
     ask ``isinstance(provider, StreamingTextProvider)`` before it promises a
@@ -199,10 +196,10 @@ class StreamingTextProvider(Protocol):
 
         Performs one gateway attempt for exactly one route, under the same
         policy as :meth:`TextProvider.complete`: it does not retry, does not
-        fall back to another route, and does not choose between routes (PRD
-        sections 9.2 and 11.3). It applies the budget on ``context`` to the
-        call it makes and translates each chunk the upstream produces into
-        canonical events, numbering them from 0 in the order the answer reads.
+        fall back to another route, and does not choose between routes. It
+        applies the budget on ``context`` to the call it makes and translates
+        each chunk the upstream produces into canonical events, numbering them
+        from 0 in the order the answer reads.
 
         A provider that cannot stream does not implement this method at all;
         the capability refusal is the gateway core's, raised before the first
@@ -213,7 +210,7 @@ class StreamingTextProvider(Protocol):
 
 @runtime_checkable
 class EmbeddingProvider(Protocol):
-    """A provider that can turn text into vectors (PRD sections 4.7, 6.3 and 9.6).
+    """A provider that can turn text into vectors.
 
     Embedding is a capability of its own, not a mode of :class:`TextProvider`: it
     is a different upstream operation with a different answer — vectors instead
@@ -221,7 +218,7 @@ class EmbeddingProvider(Protocol):
     rather than handed the request and left to improvise. There is no honest
     degradation here: a chat provider asked for embeddings could only invent a
     vector or fail, and either would tell the caller its request was served when
-    it was not (PRD section 9.5).
+    it was not.
 
     The protocol is structural and runtime-checkable, so the gateway core can ask
     ``isinstance(provider, EmbeddingProvider)`` before it accepts an embeddings
@@ -256,10 +253,9 @@ class EmbeddingProvider(Protocol):
 
         Performs one gateway attempt for exactly one route, under the same policy
         as :meth:`TextProvider.complete`: it does not retry, does not fall back to
-        another route, and does not choose between routes (PRD sections 9.2 and
-        11.3). It applies the budget on ``context`` to the call it makes, so the
-        upstream client is given the gateway's deadline rather than one of its
-        own choosing (PRD section 9.6).
+        another route, and does not choose between routes. It applies the
+        budget on ``context`` to the call it makes, so the upstream client is
+        given the gateway's deadline rather than one of its own choosing.
 
         The vectors come back in the order the upstream reported them, each
         carrying its own index. Ordering them against the caller's input is the
@@ -277,7 +273,7 @@ class EmbeddingProvider(Protocol):
 
 @runtime_checkable
 class ImageProvider(Protocol):
-    """A provider that can turn a prompt into images (PRD sections 4.6, 6.2 and 9.6).
+    """A provider that can turn a prompt into images.
 
     Image generation is a capability of its own, not a mode of
     :class:`TextProvider`: it is a different upstream operation with a different
@@ -285,7 +281,7 @@ class ImageProvider(Protocol):
     be *refused* rather than handed the request and left to improvise. There is
     no honest degradation here: a text provider asked for an image could only
     invent one or fail, and either would tell the caller its request was served
-    when it was not (PRD section 9.5).
+    when it was not.
 
     The protocol is structural and runtime-checkable, so the gateway core can
     ask ``isinstance(provider, ImageProvider)`` before it accepts an image
@@ -300,8 +296,8 @@ class ImageProvider(Protocol):
     request, whose ``prompt`` is what the image is generated from and whose
     ``size``, ``response_format`` and ``n`` are the caller's parameters. The
     gateway core has already validated the request against the route's
-    advertised capability (PRD section 6.2); what the provider is handed is a
-    request the route promised to serve.
+    advertised capability; what the provider is handed is a request the route
+    promised to serve.
 
     ``context`` is this attempt's own execution facts (:class:`AttemptContext`),
     carrying the budget the attempt may use exactly as it does for
@@ -315,7 +311,7 @@ class ImageProvider(Protocol):
     for: an entry the canonical representation cannot carry — a provider
     annotation with no canonical target, say — is refused with a malformed-
     response error naming it rather than trimmed, so another eligible route may
-    answer correctly (PRD sections 9.1 and 11.2).
+    answer correctly.
     """
 
     async def generate(
@@ -328,16 +324,15 @@ class ImageProvider(Protocol):
 
         Performs one gateway attempt for exactly one route, under the same
         policy as :meth:`TextProvider.complete`: it does not retry, does not
-        fall back to another route, and does not choose between routes (PRD
-        sections 9.2 and 11.3). It applies the budget on ``context`` to the
-        call it makes, so the upstream client is given the gateway's deadline
-        rather than one of its own choosing (PRD section 9.6).
+        fall back to another route, and does not choose between routes. It
+        applies the budget on ``context`` to the call it makes, so the upstream
+        client is given the gateway's deadline rather than one of its own
+        choosing.
 
         The parameters forwarded are the ones the route advertises and the
         upstream can honour: a parameter the caller stated that the dialect's
         provider configuration does not accept is refused with a capability
-        error naming it rather than forwarded to an opaque upstream failure
-        (PRD sections 9.5 and 9.7).
+        error naming it rather than forwarded to an opaque upstream failure.
 
         One attempt is not the same as one upstream request. An implementation
         may reach a library that retries internally without the gateway's

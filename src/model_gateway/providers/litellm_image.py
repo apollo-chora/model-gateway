@@ -1,9 +1,9 @@
-"""The LiteLLM image provider: one gateway attempt through the pinned binding (PRD 4.6, 9.6, 9.7).
+"""The LiteLLM image provider: one gateway attempt through the pinned binding.
 
 This is the production :class:`~model_gateway.providers.base.ImageProvider`. It
 performs one gateway attempt through ``litellm.aimage_generation`` with the
 safe outbound client injected, and normalises the answer into the canonical
-image response. What it owns is PRD section 9's boundary and nothing more —
+image response. What it owns is the provider boundary and nothing more —
 routing, retry policy, accounting, identity and the public contract stay in
 the gateway core (:mod:`model_gateway.providers.base`).
 
@@ -17,8 +17,8 @@ by a test in :mod:`tests.test_litellm_image` rather than asserted here.
 The HTTP path each dialect takes
 -------------------------------
 ``litellm.image_dispatch`` per provider dialect, and the image dispatch is not
-the text one's. Of the candidate dialects named in PRD section 6.2, three are
-runnable here, as PRD section 6.2 records:
+the text one's. Of the candidate dialects the binding considered, three are
+runnable here:
 
 ``openai`` — the OpenAI SDK path
     ``litellm/llms/openai/openai.py``. ``client=`` must be an
@@ -74,7 +74,7 @@ evidence rather than assertion:
 
 The retry count
 ---------------
-``num_retries=0`` travels on every call, as PRD section 11.3 requires — but
+``num_retries=0`` travels on every call — but
 the image entry point does not read it. It pops ``max_retries`` off the
 request data (default 2) and assigns it onto an injected SDK client through
 ``_set_dynamic_params_on_client``, so on the ``openai`` path a plain injected
@@ -90,7 +90,7 @@ attempt on a supported route carries more than one upstream request.
 
 The unsupported-parameter constraint
 -------------------------------------
-PRD section 9.7's constraint is real and was measured: for a model whose
+The constraint is real and was measured: for a model whose
 provider configuration does not list ``response_format`` (or ``size``) among
 its supported parameters, the library raises ``UnsupportedParamsError``
 *before any request is made* — including on the OpenAI GPT configuration,
@@ -102,7 +102,7 @@ that set contains.
 
 A stated parameter the configuration does not accept is refused with a
 :class:`~model_gateway.errors.CapabilityError` naming it, because the route
-promised the parameter and the upstream cannot honour it (PRD section 9.5).
+promised the parameter and the upstream cannot honour it.
 One deliberate exception, measured rather than assumed: three specific
 configurations that do not forward ``response_format`` produce base64 image
 data by construction — the Google and Vertex Imagen transformations emit
@@ -120,7 +120,7 @@ caller asked for.)
 
 The translation of the upstream answer
 --------------------------------------
-PRD section 9.1's four-way classification, applied to every field the binding
+The four-way field classification, applied to every field the binding
 inspects:
 
 * each data entry's ``b64_json``/``url``/``revised_prompt`` are mapped into
@@ -147,8 +147,8 @@ inspects:
   upstream model is reported as ``upstream_model`` beside the public ID;
 * ``hidden_params`` (response headers, cost, call id) is operational metadata
   and is deliberately ignored, as is ``system_fingerprint``, the backend
-  fingerprint PRD section 9.1 names as the field that must not fail an
-  otherwise valid response.
+  fingerprint named as the field that must not fail an otherwise valid
+  response.
 
 One binding limitation, recorded rather than accepted: the pinned library
 drops unknown *top-level* response fields before the binding sees them — a
@@ -163,7 +163,7 @@ The ``.env`` guard
 The module imports the library through :mod:`model_gateway.providers._litellm`,
 the seam that forces ``LITELLM_MODE`` to ``PRODUCTION`` before the first
 ``import litellm``, so no ambient value can re-enable the library's import-
-time ``dotenv.load_dotenv()`` (PRD section 6). The test session's own copy of
+time ``dotenv.load_dotenv()``. The test session's own copy of
 the guard lives in :file:`tests/conftest.py`.
 """
 
@@ -237,9 +237,9 @@ cannot inherit the case without its own measurement.
 IMAGE_DIALECTS: Final[frozenset[str]] = _OPENAI_SDK_DIALECTS | _GENERIC_DIALECTS
 """The provider dialects this binding has verified end to end for the image entry point.
 
-The candidate dialects of PRD section 6.2 were each driven against the pinned
+The candidate dialects were each driven against the pinned
 ``litellm-core``; membership is a claim about which HTTP path the binding can
-keep behind the transport controls of PRD section 14.1, and the verification
+keep behind the transport controls it enforces, and the verification
 that produced it is recorded in the module docstring. The set is
 entry-point-specific: a dialect verified for ``acompletion`` or
 ``aembedding`` is not thereby verified here — the image dispatch differs, and
@@ -295,7 +295,7 @@ class _ZeroRetryAsyncOpenAI(openai.AsyncOpenAI):
     requests inside one gateway attempt. The property pins the count at the
     ``max_retries=0`` the binding built the client with, so the forced
     assignment is a no-op and one gateway attempt carries exactly one wire
-    request (PRD section 11.3).
+    request.
     """
 
     @property
@@ -344,7 +344,7 @@ def _openai_sdk_image_client(
     with the one image-entry-point difference: the SDK client is
     :class:`_ZeroRetryAsyncOpenAI`, because the image entry point restores
     ``max_retries=2`` on whatever client it is handed and the gateway owns the
-    only retry loop (PRD section 11.3).
+    only retry loop.
     """
     client = _ZeroRetryAsyncOpenAI(
         api_key=route.api_key,
@@ -393,13 +393,13 @@ def _generic_image_client(
 
 
 class LiteLLMImageProvider:
-    """The production image provider: translation plus one execution (PRD section 9).
+    """The production image provider: translation plus one execution.
 
     One gateway attempt in, one canonical answer out. The provider performs one
     gateway attempt for the route it is handed — a single invocation of the
     pinned binding — and applies the attempt's own budget to it; it does not
     retry, does not choose between routes and knows nothing about fallbacks —
-    those are the gateway core's (PRD sections 9.2 and 11.3). Every control the
+    those are the gateway core's. Every control the
     call carries — ``num_retries=0``, the injected client, the attempt timeout,
     the error mapping — is documented in the module docstring, where the
     reasons and the measurements behind each live.
@@ -474,7 +474,7 @@ class LiteLLMImageProvider:
         request: ImageRequest,
         context: AttemptContext,
     ) -> ImageResponse:
-        """Perform the one image attempt for this route (PRD sections 4.6 and 9.6).
+        """Perform the one image attempt for this route.
 
         The dialect is checked first, unconditionally: the refusal is about
         the HTTP path ``litellm.aimage_generation`` takes for that dialect,
@@ -495,7 +495,7 @@ class LiteLLMImageProvider:
         :func:`~model_gateway.providers.litellm_translation.map_litellm_error`
         and re-raised, so a caller never sees a provider-shaped error.
         Cancellation propagates unmapped, because it is a :exc:`BaseException`
-        the mapping does not catch (PRD section 15).
+        the mapping does not catch.
         """
         ensure_supported_image_dialect(route.format)
         config = _route_image_config(route)
@@ -598,18 +598,18 @@ def _image_params(
 
     The route supplies everything the upstream call needs to be addressed,
     exactly as it does for a completion: the provider-prefixed model string
-    ``<format>/<model_id>`` (PRD section 9.6), the resolved base URL, the
+    ``<format>/<model_id>``, the resolved base URL, the
     route's credential and its non-authentication extra headers. Retries are
     disabled with ``num_retries=0`` because the gateway core owns the retry
     loop and the invocation deadline, so there is exactly one retry layer and
-    one deadline (PRD section 11.3) — the parameter travels on every call even
+    one deadline — the parameter travels on every call even
     though the image entry point is the one call this binding makes that does
     not read it.
 
     The request supplies the prompt, forwarded verbatim, and the parameters the
     caller stated. A stated parameter the dialect's provider configuration
     does not accept is refused with a capability error naming it rather than
-    forwarded to the library's own opaque refusal (PRD sections 9.5 and 9.7);
+    forwarded to the library's own opaque refusal;
     ``response_format`` is the one parameter with a measured honour-by-default
     case, handled by :func:`_forward_response_format`.
     """
@@ -701,7 +701,7 @@ def _from_litellm_image(
 ) -> ImageResponse:
     """Normalise a LiteLLM image answer into the canonical response.
 
-    ``response`` is upstream data, never forwarded unchanged (PRD section 9).
+    ``response`` is upstream data, never forwarded unchanged.
     The upstream's identity fields are neither mapped nor refused: the gateway
     stamps its own assembly time, and the route's own model ID is reported as
     ``upstream_model`` beside the public one. ``hidden_params`` — response
@@ -714,7 +714,7 @@ def _from_litellm_image(
     no canonical target, or no image at all. The refusal is the malformed-
     response error rather than an internal one: the upstream answered, and its
     answer is what cannot serve the request, so another eligible route may
-    answer correctly (PRD section 11.2).
+    answer correctly.
     """
     if not invocation_id:
         raise FailedPreconditionError(
@@ -748,8 +748,7 @@ def _image_entries(response: object) -> tuple[object, ...]:
     not iterable at all — a ``null`` the library passed through, say — becomes
     an empty tuple here rather than a ``TypeError`` escaping the binding: the
     gateway core then refuses the answer for carrying no image, which is a
-    gateway error a caller can act on rather than an unclassified failure
-    (PRD sections 5.4 and 9.1).
+    gateway error a caller can act on rather than an unclassified failure.
     """
     data = getattr(response, "data", None)
     if data is None or isinstance(data, str | bytes):
@@ -767,7 +766,7 @@ def _generated_image_from(item: object) -> GeneratedImage:
     :class:`~litellm.types.utils.ImageObject` objects or as the raw
     dictionaries its own converter produced, so both shapes are read the same
     way. An entry the canonical representation cannot carry is refused rather
-    than coerced (PRD section 9.1).
+    than coerced.
 
     An entry's ``url`` is copied through verbatim as the untrusted provider
     output it is: it is not resolved, not screened against the URL policy and
@@ -823,7 +822,7 @@ _IMAGE_RESPONSE_FIELDS: Final[frozenset[str]] = frozenset(
 """Fields the binding inspects on the upstream response and classifies."""
 
 _IGNORED_RESPONSE_FIELDS: Final[frozenset[str]] = frozenset({"hidden_params", "system_fingerprint"})
-"""Known non-semantic operational metadata, deliberately ignored (PRD section 9.1).
+"""Known non-semantic operational metadata, deliberately ignored.
 
 ``hidden_params`` carries response headers, cost and the library's own call
 id; ``system_fingerprint`` identifies the upstream infrastructure that
@@ -833,7 +832,7 @@ caller was told, so neither fails an otherwise valid response.
 
 
 def _reject_unrepresentable_image_response(response: object) -> None:
-    """Refuse a response carrying a field the canonical model cannot represent (PRD section 9.1).
+    """Refuse a response carrying a field the canonical model cannot represent.
 
     Every field the binding can observe is classified: the known semantics are
     mapped (:func:`_from_litellm_image`), the operational metadata in
@@ -884,7 +883,7 @@ _IMAGE_USAGE_FIELDS: Final[frozenset[str]] = frozenset(
 
 
 def from_litellm_image_usage(usage: object) -> Usage:
-    """The upstream image usage as a canonical usage record (PRD section 13).
+    """The upstream image usage as a canonical usage record.
 
     The mapping carries the embeddings path's zero discipline, for the same
     measured reason: ``litellm.image_generation`` fabricates an all-zero usage
@@ -898,7 +897,7 @@ def from_litellm_image_usage(usage: object) -> Usage:
     A usage field outside :data:`_IMAGE_USAGE_FIELDS` — a ``web_search_requests``
     annotation, say — is a provider-reported fact the canonical usage model
     cannot carry, so the response is refused with the field named rather than
-    trimmed (PRD section 9.1).
+    trimmed.
     """
     if usage is None:
         return Usage()
@@ -922,7 +921,7 @@ def from_litellm_image_usage(usage: object) -> Usage:
 
 
 def _reject_unrepresentable_image_usage(usage: object) -> None:
-    """Refuse a usage field the canonical model cannot carry, naming it (PRD section 9.1)."""
+    """Refuse a usage field the canonical model cannot carry, naming it."""
     for name in _usage_field_names(usage):
         if name not in _IMAGE_USAGE_FIELDS:
             raise MalformedResponseError(

@@ -1,12 +1,12 @@
-"""A deterministic text provider for tests and the vertical slice (PRD sections 9 and 20).
+"""A deterministic text provider for tests and the vertical slice.
 
 :class:`MockProvider` satisfies :class:`~model_gateway.providers.base.TextProvider`
 without touching a network, a vendor SDK or LiteLLM. It exists for two reasons.
 
-For tests, it is the stand-in PRD section 20 asks for: a provider whose behaviour
-is a pure function of its inputs, so a test can assert exactly what a route
-received and exactly what it returned, and so failure paths (a provider that
-raises) are testable without a failing server somewhere.
+For tests, it is the deterministic stand-in the test suite needs: a provider
+whose behaviour is a pure function of its inputs, so a test can assert exactly
+what a route received and exactly what it returned, and so failure paths (a
+provider that raises) are testable without a failing server somewhere.
 
 For the vertical slice it is the provider an application factory can wire before
 a real binding exists: the gateway's own routing, policy, capability enforcement
@@ -53,13 +53,13 @@ class MockSpec:
     last user message's text, which needs no fixture to prove the round trip.
 
     ``tool_calls`` are returned after the text, in order, so a test can prove a
-    tool call survives with its identifier and arguments (PRD section 9.3).
+    tool call survives with its identifier and arguments.
 
     ``finish_reason`` classifies why generation stopped and ``raw_finish_reason``
     records the provider's own reason verbatim beside it. When ``raw_finish_reason``
     is ``None`` the classification's own value is recorded, which is always a
     consistent pair; pass a raw reason to model a provider whose vocabulary the
-    gateway has not been taught (PRD section 5.2).
+    gateway has not been taught.
 
     ``usage`` is the token record reported for the call, all counts unknown by
     default so an unreported count is never presented as zero.
