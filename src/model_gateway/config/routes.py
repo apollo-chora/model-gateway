@@ -41,9 +41,11 @@ from model_gateway.config.settings import (
     _parse_text,
 )
 from model_gateway.security.url_policy import (
+    ALLOWED_HOSTS_VARIABLE,
     Resolver,
     UrlPolicyError,
     is_reserved_auth_header,
+    parse_allowed_hosts,
     resolve_endpoint,
     system_resolver,
 )
@@ -212,17 +214,29 @@ def parse_routes(
 
     ``resolver`` resolves hostnames for the URL policy and exists so that tests
     can validate routes without DNS; deployments use the system resolver.
+
+    ``GATEWAY_ALLOWED_UPSTREAM_HOSTS`` is read from the same environment, because the
+    allowlist restricts which endpoints may be *configured* and this is where routes
+    are configured: a route outside it fails the start, naming the variable that
+    produced it, rather than being discovered in a bill (PRD section 14).
     """
     source = os.environ if env is None else env
     _reject_indexed_form(source)
+    allowed_hosts = parse_allowed_hosts(source.get(ALLOWED_HOSTS_VARIABLE))
 
     routes: list[Route] = []
     for block in _BLOCKS:
-        routes.extend(_parse_block(block, source, resolver=resolver))
+        routes.extend(_parse_block(block, source, resolver=resolver, allowed_hosts=allowed_hosts))
     return tuple(routes)
 
 
-def _parse_block(block: _Block, env: Mapping[str, str], *, resolver: Resolver) -> list[Route]:
+def _parse_block(
+    block: _Block,
+    env: Mapping[str, str],
+    *,
+    resolver: Resolver,
+    allowed_hosts: frozenset[str],
+) -> list[Route]:
     routes_variable = _variable(block, _ROUTES_JSON)
     routes_json = _read(env, routes_variable)
 
@@ -284,6 +298,7 @@ def _parse_block(block: _Block, env: Mapping[str, str], *, resolver: Resolver) -
             endpoint_variable=_variable(block, _ENDPOINT),
             path_variable=_variable(block, _PATH),
             resolver=resolver,
+            allowed_hosts=allowed_hosts,
         ),
         model_id=model_id,
         format=format,
@@ -297,7 +312,9 @@ def _parse_block(block: _Block, env: Mapping[str, str], *, resolver: Resolver) -
     )
 
     sources: list[tuple[str, Route]] = [(f"the {block.prefix}_* block", primary)]
-    for route in _parse_entries(block, routes_variable, routes_json, resolver=resolver):
+    for route in _parse_entries(
+        block, routes_variable, routes_json, resolver=resolver, allowed_hosts=allowed_hosts
+    ):
         sources.append((f"{routes_variable} entry {route.index}", route))
     _reject_duplicate_routes(block, sources)
     return [route for _, route in sources]
@@ -358,6 +375,7 @@ def _parse_entries(
     raw: str,
     *,
     resolver: Resolver,
+    allowed_hosts: frozenset[str],
 ) -> list[Route]:
     if not raw:
         return []
@@ -368,7 +386,9 @@ def _parse_entries(
             f"{variable} must be a JSON array of route objects, got {_json_type(parsed)}"
         )
     return [
-        _parse_entry(block, variable, index, entry, resolver=resolver)
+        _parse_entry(
+            block, variable, index, entry, resolver=resolver, allowed_hosts=allowed_hosts
+        )
         for index, entry in enumerate(parsed, start=1)
     ]
 
@@ -380,6 +400,7 @@ def _parse_entry(
     entry: object,
     *,
     resolver: Resolver,
+    allowed_hosts: frozenset[str],
 ) -> Route:
     where = f"{variable} entry {index}"
     if not isinstance(entry, dict):
@@ -413,6 +434,7 @@ def _parse_entry(
             endpoint_variable=f"{where} {_ENTRY_ENDPOINT!r}",
             path_variable=f"{where} {_ENTRY_PATH!r}",
             resolver=resolver,
+            allowed_hosts=allowed_hosts,
         ),
         model_id=model_id,
         format=format,
@@ -459,9 +481,10 @@ def _resolve_base_url(
     endpoint_variable: str,
     path_variable: str,
     resolver: Resolver,
+    allowed_hosts: frozenset[str],
 ) -> str:
     try:
-        base_url = resolve_endpoint(endpoint, resolver=resolver)
+        base_url = resolve_endpoint(endpoint, resolver=resolver, allowed_hosts=allowed_hosts)
     except UrlPolicyError as error:
         raise ConfigurationError(f"{endpoint_variable}: {error}") from error
 
@@ -474,6 +497,7 @@ def _resolve_base_url(
             path,
             allow_absolute_path_url=allow_absolute_path_url,
             resolver=resolver,
+            allowed_hosts=allowed_hosts,
         )
     except UrlPolicyError as error:
         raise ConfigurationError(f"{path_variable}: {error}") from error
