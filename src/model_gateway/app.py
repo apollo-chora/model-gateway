@@ -266,13 +266,13 @@ def create_app(
     6.2 and 9.5). An injected service is not validated, because it brings its
     own provider and this factory cannot know what that provider can run.
 
-    ``router`` is the application's own router, or ``None`` for the framework's
-    default one. It exists for a caller that builds more than one application in
-    one process: the framework keys applications by their router's identity, so
-    two built on the default router are taken for one application being reloaded
-    and the second resets the first's routes. A deployment builds one
-    application, so it leaves this alone; a conformance suite that drives
-    several builds each its own.
+    ``router`` is the application's own router, or ``None`` for one built here. It
+    exists for a caller that wants to supply a router of its own; the default is a
+    fresh one rather than the framework's shared one, because the framework keys
+    applications by their router's identity: two built on its default router are
+    taken for one application being reloaded, and the second resets the first's
+    routes. A deployment builds one application and is unaffected either way, so
+    the default is the safe one.
     """
     settings = settings or Settings.from_env()
     configure_logging(settings.log_level)
@@ -321,7 +321,14 @@ def create_app(
         else None
     )
 
-    app = Application(router=router)
+    # Every application gets its own router unless a caller supplies one. The
+    # framework's default router is a module-level singleton and the framework keys
+    # applications by their router's identity, so two built on it are taken for one
+    # application being reloaded and the second resets the first's routes — a later
+    # request is then served by an earlier application's handlers, silently. A
+    # deployment builds one application and is unaffected either way, so the
+    # default is the safe one rather than the shared one (PRD section 19).
+    app = Application(router=router if router is not None else Router())
     # Appended before the auth middleware so it is the outer one: a refusal raised
     # by authentication is then still inside the caller's trace, which is what an
     # operator wants to see when the refusals are the thing under investigation.
