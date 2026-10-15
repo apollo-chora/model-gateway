@@ -351,6 +351,13 @@ def invocation_request_from_proto(request: pb.InvokeRequest, *, identity) -> Inv
     credential's, and a claimed ``tenant_id`` has already been reconciled against
     it by the caller (PRD section 5.1).
 
+    ``idempotency_key`` is read through ``HasField`` rather than defaulted, for
+    the same reason the generation config's optional fields are: the field is
+    ``optional``, so a request that states no key and one that states an empty
+    key are different statements, and the canonical record draws the same line —
+    an absent key is ``None``, and an empty one is refused rather than read as
+    no key at all (PRD sections 5.1 and 12).
+
     Every canonical constructor this mapping reaches — each message, the tool
     declarations, the generation config and its response format, the tool choice
     and the invocation itself — validates what it is given, and a failure there
@@ -391,7 +398,9 @@ def invocation_request_from_proto(request: pb.InvokeRequest, *, identity) -> Inv
                 _RESPONSE_MODALITIES, "response_modality", request.response_modality
             ),
             fallback_models=tuple(request.fallback_models),
-            idempotency_key=request.idempotency_key or None,
+            idempotency_key=(
+                request.idempotency_key if request.HasField("idempotency_key") else None
+            ),
             metadata=(
                 _mapped("metadata", lambda: orjson.loads(request.metadata_json))
                 if request.metadata_json
@@ -532,6 +541,11 @@ def invoke_response_to_proto(response) -> pb.InvokeResponse:
     the field is optional, and the canonical record distinguishes "the provider
     reported no reason" (``None``) from "the provider supplied an empty one"
     (``""``), so writing ``""`` unconditionally would collapse the two.
+
+    ``idempotency_status`` is written on every answer, optional or not: the
+    canonical record always carries one, and the protobuf enum's zero value is
+    the ``*_UNSPECIFIED`` member rather than a status, so there is no answer
+    that leaves it unset.
     """
     result = pb.InvokeResponse(
         invocation_id=response.invocation_id or "",

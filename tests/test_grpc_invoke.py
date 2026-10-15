@@ -42,6 +42,7 @@ from model_gateway.config import Settings
 from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import (
     FinishReason,
+    IdempotencyStatus,
     ImagePart,
     InvocationRequest,
     InvocationResponse,
@@ -767,3 +768,122 @@ async def test_an_anonymous_call_can_claim_no_tenant():
     _, invocation, _ = provider.calls[0]
     assert invocation.tenant_id is None
     assert response.model == PUBLIC_MODEL
+
+
+# --------------------------------------------------------------------------- #
+# Idempotency: one key, one answer, no duplicate accounting
+# --------------------------------------------------------------------------- #
+
+# A key the provider's answer is recorded under. The inference service keeps the
+# record, so a repeat is answered from it and the provider is called once.
+IDEMPOTENCY_KEY = "trace-7"
+
+
+async def test_an_idempotency_key_reaches_the_invocation(stub, provider):
+    response = await stub.Invoke(request(idempotency_key=IDEMPOTENCY_KEY), metadata=bearer())
+
+    _, invocation, _ = provider.calls[0]
+    assert invocation.idempotency_key == IDEMPOTENCY_KEY
+    assert response.idempotency_status == pb.IDEMPOTENCY_STATUS_NEW
+    assert len(provider.calls) == 1
+
+
+async def test_a_repeat_under_the_same_key_is_answered_from_the_record(stub, provider):
+    # The retry carries a freshly minted invocation id, which the gateway mints
+    # and which is no part of the request's fingerprint, so it is the same
+    # request: the answer comes from the record, identifier included.
+    first = await stub.Invoke(
+        request(invocation_id="inv-9", idempotency_key=IDEMPOTENCY_KEY), metadata=bearer()
+    )
+    second = await stub.Invoke(
+        request(invocation_id="inv-10", idempotency_key=IDEMPOTENCY_KEY), metadata=bearer()
+    )
+
+    assert first.idempotency_status == pb.IDEMPOTENCY_STATUS_NEW
+    assert second.idempotency_status == pb.IDEMPOTENCY_STATUS_REPLAYED
+    assert second.invocation_id == first.invocation_id
+    assert [item.content.text.text for item in second.output] == [
+        item.content.text.text for item in first.output
+    ]
+    assert len(provider.calls) == 1
+
+
+async def test_a_call_with_no_key_is_answered_not_applicable(stub, provider):
+    response = await stub.Invoke(request(), metadata=bearer())
+
+    _, invocation, _ = provider.calls[0]
+    assert invocation.idempotency_key is None
+    assert response.idempotency_status == pb.IDEMPOTENCY_STATUS_NOT_APPLICABLE
+
+
+async def test_a_key_reused_for_another_payload_is_served_as_a_new_request(stub, provider):
+    # The fingerprint covers the payload, not the key: the same key sent with a
+    # different body is a second request, so it is answered rather than given
+    # the first request's answer.
+    await stub.Invoke(request(idempotency_key=IDEMPOTENCY_KEY), metadata=bearer())
+    other = await stub.Invoke(
+        request(
+            idempotency_key=IDEMPOTENCY_KEY,
+            messages=(user_message("A different question entirely."),),
+        ),
+        metadata=bearer(),
+    )
+
+    assert other.idempotency_status == pb.IDEMPOTENCY_STATUS_NEW
+    assert len(provider.calls) == 2
+
+
+async def test_an_empty_key_is_refused_rather_than_read_as_no_key():
+    # The field is optional, so a stated empty key is a present field carrying
+    # nothing — a different statement from an absent one — and the canonical
+    # record refuses it rather than collapsing it into no key at all.
+    provider = MockProvider()
+
+    async with serve(provider) as stub:
+        with pytest.raises(grpc.aio.AioRpcError) as raised:
+            await stub.Invoke(request(idempotency_key=""), metadata=bearer())
+
+    assert raised.value.code() is grpc.StatusCode.INVALID_ARGUMENT
+    assert provider.calls == []
+
+
+@pytest.mark.parametrize("status", list(IdempotencyStatus))
+async def test_every_idempotency_status_is_rendered_on_the_wire(status):
+    # The response side of the boundary: each canonical status is written as the
+    # protobuf member naming it, on every answer — the enum's zero value is the
+    # unspecified member rather than a status, so none is ever left unset.
+    provider = ScriptedProvider(
+        InvocationResponse(
+            model=PUBLIC_MODEL,
+            upstream_model=PRIMARY_MODEL,
+            content=(TextPart(text="Explain recursion."),),
+            finish_reason=FinishReason.STOP,
+            idempotency_status=status,
+        )
+    )
+
+    async with serve(provider) as stub:
+        response = await stub.Invoke(request(), metadata=bearer())
+
+    assert response.idempotency_status == getattr(pb, f"IDEMPOTENCY_STATUS_{status.name}")
+
+
+async def test_a_failure_is_not_recorded_so_a_repeat_is_allowed_to_retry():
+    # Only a completed answer is recorded: the first attempt fails, so there is
+    # no record for the repeat to be answered from, and the retry reaches the
+    # provider — the gateway claims no exactly-once execution.
+    provider = MockProvider(
+        [
+            MockSpec(error=UnavailableError("the upstream is unreachable")),
+            MockSpec(text="Answered on the retry."),
+        ]
+    )
+
+    async with serve(provider) as stub:
+        with pytest.raises(grpc.aio.AioRpcError) as raised:
+            await stub.Invoke(request(idempotency_key=IDEMPOTENCY_KEY), metadata=bearer())
+        retried = await stub.Invoke(request(idempotency_key=IDEMPOTENCY_KEY), metadata=bearer())
+
+    assert raised.value.code() is grpc.StatusCode.UNAVAILABLE
+    assert retried.idempotency_status == pb.IDEMPOTENCY_STATUS_NEW
+    assert len(provider.calls) == 2
