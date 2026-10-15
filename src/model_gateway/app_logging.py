@@ -6,6 +6,8 @@ import sys
 import orjson
 import structlog
 
+from model_gateway.redaction import redact_event
+
 
 def configure_logging(level: int | str = logging.INFO) -> None:
     if isinstance(level, str):
@@ -28,6 +30,10 @@ def configure_logging(level: int | str = logging.INFO) -> None:
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             structlog.processors.UnicodeDecoder(),
+            # Last before rendering, so it sees the event as it will be written —
+            # after the processors that add fields of their own — and nothing can
+            # put a value back after it has been redacted (PRD section 17).
+            redact_event,
             structlog.processors.JSONRenderer(serializer=_orjson_dumps),
         ],
         context_class=dict,
