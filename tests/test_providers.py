@@ -1,4 +1,4 @@
-"""The deterministic provider: translation and execution without a network (PRD 9, 20).
+"""The deterministic provider: translation and execution without a network.
 
 The mock's contract is that its answer is a pure function of its scripted spec,
 the route it is handed, the request it is given and the attempt context beside
@@ -8,7 +8,7 @@ come back as scripted, a configured failure raises, and nothing about the
 environment or the clock can change the answer.
 
 The attempt context is pinned here too, because it is the seam the gateway's
-deadline travels through (PRD section 9.6): it carries the facts of one attempt
+deadline travels through: it carries the facts of one attempt
 and refuses a shape no attempt could have.
 
 No resolver, endpoint or credential here is contacted: every route is a

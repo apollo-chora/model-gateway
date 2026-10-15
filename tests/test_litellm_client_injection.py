@@ -1,4 +1,4 @@
-"""The client the binding injects, per provider dialect (PRD sections 9 and 14.1).
+"""The client the binding injects, per provider dialect.
 
 The security boundary here is *which object* ``litellm.acompletion`` is handed,
 because the pinned library honours a different one on each of its HTTP paths and
@@ -252,7 +252,7 @@ class TestTheGenericHttpxPath:
     async def test_the_httpx_client_of_the_generic_path_never_reaches_the_environment(
         self, wire, dialect
     ) -> None:
-        """No proxy is installed between the gateway and the upstream (PRD section 14.1)."""
+        """No proxy is installed between the gateway and the upstream."""
         provider, completion = wire()
 
         await provider.complete(make_route(format=dialect), make_request(), make_context())
@@ -340,7 +340,7 @@ class TestTheInjectedInputs:
 
 
 class TestTheRefusal:
-    """A dialect whose HTTP path is unverified is refused, not run (PRD section 14.1)."""
+    """A dialect whose HTTP path is unverified is refused, not run."""
 
     def test_the_verified_dialects_are_the_three_the_binding_proves(self) -> None:
         assert frozenset(
@@ -407,7 +407,7 @@ class _StubProvider:
 
 
 class TestTheStartupRefusal:
-    """A deployment that cannot run its routes does not start (PRD sections 6 and 21)."""
+    """A deployment that cannot run its routes does not start."""
 
     def test_a_text_route_with_an_unverified_dialect_fails_the_start(self) -> None:
         registry = ModelRegistry((make_route(format=UNVERIFIED_DIALECT),))
@@ -450,9 +450,8 @@ class TestTheStartupRefusal:
         :data:`SUPPORTED_DIALECTS` — so the refusal can only come from the
         image binding's own check: the image entry point's verified set is
         entry-point-specific, and a dialect outside it is refused at startup
-        rather than on the first caller (PRD sections 6.2 and 14.1). The
-        refusal names the verified image set, read off the provider's own
-        export so the two cannot drift apart.
+        rather than on the first caller. The refusal names the verified image
+        set, read off the provider's own export so the two cannot drift apart.
         """
         route = make_route(
             operation=Operation.IMAGE,

@@ -1,5 +1,4 @@
-"""Tests for the LiteLLM image provider: one gateway attempt through the pinned binding
-(PRD 4.6, 9.1, 9.5, 9.6, 9.7, 11.3, 14.1).
+"""Tests for the LiteLLM image provider: one gateway attempt through the pinned binding.
 
 Two kinds of test run here, and neither reaches the network:
 
@@ -20,7 +19,7 @@ The translation fixtures are the real LiteLLM types, built through the
 library's own converter or constructed directly, carrying the additional
 semantic fields a happy-path answer would not need — a provider-specific
 field on an image entry, a usage annotation — so a translator that drops them
-fails the test (PRD section 9.1).
+fails the test.
 """
 
 import asyncio
@@ -191,7 +190,7 @@ def injected_client(entry: RecordingImageGeneration, index: int = 0) -> object:
 
 
 class TestTheRefusal:
-    """A dialect whose image HTTP path is unverified is refused, not run (PRD section 14.1)."""
+    """A dialect whose image HTTP path is unverified is refused, not run."""
 
     def test_the_verified_dialects_are_the_three_the_binding_proves(self) -> None:
         assert frozenset({OPENAI_DIALECT, *GENERIC_DIALECTS}) == IMAGE_DIALECTS
@@ -506,7 +505,7 @@ class TestTheRealOpenAISdkCall:
     """The real ``litellm.aimage_generation`` on the SDK path, network-free."""
 
     async def test_the_request_the_sdk_path_sends(self) -> None:
-        """The recorded wire request is the operation the route performs (PRD section 9.7)."""
+        """The recorded wire request is the operation the route performs."""
         inner = RecordingAsyncTransport()
         provider = LiteLLMImageProvider(resolver=recording_resolver, inner_factory=lambda: inner)
 
@@ -519,7 +518,7 @@ class TestTheRealOpenAISdkCall:
         assert len(inner.requests) == 1
         request = inner.requests[0]
         # The connection is pinned to the validated address; the hostname is
-        # preserved for the Host header and TLS (PRD section 14.1).
+        # preserved for the Host header and TLS.
         assert request.url.host == PUBLIC_ADDRESS
         assert request.url.path == "/v1/images/generations"
         assert request.headers["host"] == "upstream.internal.example"
@@ -543,7 +542,7 @@ class TestTheRealOpenAISdkCall:
         assert response.invocation_id == "inv-7f3c1a90"
 
     async def test_a_500_upstream_is_answered_by_exactly_one_wire_request(self) -> None:
-        """The pinned SDK client makes one wire request per gateway attempt (PRD section 11.3).
+        """The pinned SDK client makes one wire request per gateway attempt.
 
         The assertion is the wire count through the real entry point, not the
         client's ``max_retries`` attribute: the attribute is only how the pin is
@@ -569,7 +568,7 @@ class TestTheRealOpenAISdkCall:
         assert len(inner.requests) == 1
 
     async def test_a_redirect_is_not_followed(self) -> None:
-        """A 302 surfaces to the caller rather than being followed (PRD section 14.1)."""
+        """A 302 surfaces to the caller rather than being followed."""
         inner = RecordingAsyncTransport(
             httpx.Response(302, headers={"Location": "/elsewhere"}, json={"error": "moved"})
         )
@@ -600,7 +599,7 @@ class TestTheRealGenericCall:
         assert len(inner.requests) == 1
         request = inner.requests[0]
         # The connection is pinned to the validated address; the hostname is
-        # preserved for the Host header and TLS (PRD section 14.1).
+        # preserved for the Host header and TLS.
         assert request.url.host == PUBLIC_ADDRESS
         assert request.url.path == "/v1/models/gemini-2.5-flash-image-preview:generateContent"
         assert request.headers["host"] == "upstream.internal.example"
@@ -660,7 +659,7 @@ class TestTheRealGenericCall:
 
 
 # ---------------------------------------------------------------------------
-# The unsupported-parameter constraint (PRD section 9.7)
+# The unsupported-parameter constraint
 # ---------------------------------------------------------------------------
 
 
@@ -839,7 +838,7 @@ class TestTheBase64OnlyConfigurations:
 
 
 # ---------------------------------------------------------------------------
-# The translation of the upstream answer (PRD section 9.1)
+# The translation of the upstream answer
 # ---------------------------------------------------------------------------
 
 
@@ -870,7 +869,7 @@ class TestTheResponseTranslation:
         assert response.upstream_model == UPSTREAM_MODEL
         assert response.invocation_id == "inv-7f3c1a90"
         # The upstream's own identity is neither mapped nor refused: the
-        # gateway stamps its own assembly time (PRD section 9.1).
+        # gateway stamps its own assembly time.
         assert response.created != 1730000000
         (image,) = response.data
         assert image.b64_json == "aGVsbG8="
@@ -1105,7 +1104,7 @@ class TestTheRequestTranslation:
         assert "response_format" not in params
 
     async def test_caller_bookkeeping_is_never_forwarded(self, wire) -> None:
-        """``metadata`` is the caller's, not the upstream's (PRD section 5.1)."""
+        """``metadata`` is the caller's, not the upstream's."""
         provider, entry = wire()
 
         await provider.generate(

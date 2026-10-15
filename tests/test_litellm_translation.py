@@ -1,4 +1,4 @@
-"""Tests for the transport-agnostic LiteLLM translation (PRD sections 9.1, 9.3, 9.5, 9.6, 13).
+"""Tests for the transport-agnostic LiteLLM translation.
 
 Every fixture here is built from the real LiteLLM types the installed library
 defines — by constructing :class:`litellm.types.utils.ModelResponse` and its
@@ -10,7 +10,7 @@ dictionary that merely resembles one.
 No test performs network I/O: the fixtures are local objects, and the error
 mapping is exercised by constructing LiteLLM's exception classes in memory.
 
-The preservation rule of PRD section 9.1 is tested on both sides. On the
+The preservation rule is tested on both sides. On the
 request side, a canonical element with no upstream equivalent (a refusal part)
 is rejected rather than dropped. On the response side, the four-way
 classification is pinned: a semantic field the canonical model cannot represent
@@ -173,7 +173,7 @@ def user_message(text: str = "Hello") -> Message:
 
 
 class TestToLitellmParams:
-    """The canonical request reaches the upstream call in full (PRD sections 9.1 and 9.6)."""
+    """The canonical request reaches the upstream call in full."""
 
     def test_model_string_is_provider_prefixed(self) -> None:
         params = to_litellm_params(make_route(), make_request())
@@ -187,12 +187,12 @@ class TestToLitellmParams:
         assert params["extra_headers"] == {"X-Org": "acme", "X-Project": "42"}
 
     def test_retries_are_disabled(self) -> None:
-        """The gateway core owns the retry loop, so LiteLLM must not retry (PRD 11.3)."""
+        """The gateway core owns the retry loop, so LiteLLM must not retry."""
         params = to_litellm_params(make_route(), make_request())
         assert params["num_retries"] == 0
 
     def test_system_instruction_forwarded_as_separate_system_message(self) -> None:
-        """The instruction is forwarded unmerged, ahead of the conversation (PRD 9.5)."""
+        """The instruction is forwarded unmerged, ahead of the conversation."""
         request = make_request(
             system_instruction="Answer concisely.",
             messages=(
@@ -221,7 +221,7 @@ class TestToLitellmParams:
         assert roles == ["system", "developer", "user", "assistant", "tool"]
 
     def test_tool_message_carries_its_tool_call_id(self) -> None:
-        """A result that cannot be matched to its call is not a result (PRD 9.3)."""
+        """A result that cannot be matched to its call is not a result."""
         request = make_request(
             messages=(
                 Message(
@@ -264,7 +264,7 @@ class TestToLitellmParams:
         ]
 
     def test_image_parts_become_ordered_content_blocks(self) -> None:
-        """Text and images interleaved stay interleaved (PRD 9.4)."""
+        """Text and images interleaved stay interleaved."""
         request = make_request(
             messages=(
                 Message(
@@ -357,7 +357,7 @@ class TestToLitellmParams:
         }
 
     def test_text_response_format_is_omitted(self) -> None:
-        """A text format asks for nothing beyond chat; it is the provider's default (PRD 6.1)."""
+        """A text format asks for nothing beyond chat; it is the provider's default."""
         request = make_request(
             generation_config=GenerationConfig(
                 response_format=ResponseFormat(mode=ResponseFormatMode.TEXT)
@@ -366,7 +366,7 @@ class TestToLitellmParams:
         assert "response_format" not in to_litellm_params(make_route(), request)
 
     def test_unset_generation_parameters_are_omitted(self) -> None:
-        """Unset and zero are different requests; no vendor default is invented (PRD 5.1)."""
+        """Unset and zero are different requests; no vendor default is invented."""
         params = to_litellm_params(make_route(), make_request())
         for name in (
             "temperature",
@@ -432,7 +432,7 @@ class TestToLitellmParams:
         assert to_litellm_params(make_route(), request)["tool_choice"] == expected
 
     def test_refusal_part_in_request_is_rejected(self) -> None:
-        """A refusal the caller authored has no upstream representation (PRD 9.1, 5.2)."""
+        """A refusal the caller authored has no upstream representation."""
         request = make_request(
             messages=(
                 Message(role=Role.ASSISTANT, content=(RefusalPart(text="I can't answer that."),)),
@@ -444,7 +444,7 @@ class TestToLitellmParams:
         assert error.value.details["capability"] == "refusal"
 
     def test_metadata_is_never_forwarded(self) -> None:
-        """Metadata is bookkeeping, not a provider parameter bag (PRD 5.1)."""
+        """Metadata is bookkeeping, not a provider parameter bag."""
         request = make_request(metadata={"request_source": "console", "trace": {"sampled": True}})
         params = to_litellm_params(make_route(), request)
         assert "metadata" not in params
@@ -469,10 +469,10 @@ class TestToLitellmParams:
 
 
 class TestFromLitellmResponse:
-    """The upstream response is normalised into the canonical model (PRD 9.1, 5.2, 13)."""
+    """The upstream response is normalised into the canonical model."""
 
     def test_gateway_identity_is_always_stamped(self) -> None:
-        """The gateway's own identity, never an upstream value (PRD 5.2, 9)."""
+        """The gateway's own identity, never an upstream value."""
         response = response_from(
             completion_payload(id="chatcmpl-upstream", model="gpt-4o-2024-08-06")
         )
@@ -532,7 +532,7 @@ class TestFromLitellmResponse:
         assert result.raw_finish_reason == "tool_calls"
 
     def test_malformed_arguments_are_kept_raw(self) -> None:
-        """The gateway records what arrived rather than repairing it (PRD 9.3)."""
+        """The gateway records what arrived rather than repairing it."""
         response = response_from(
             completion_payload(
                 choices=[
@@ -561,7 +561,7 @@ class TestFromLitellmResponse:
         assert result.tool_calls[0].arguments == "not json{"
 
     def test_ordered_output_preserves_text_then_tool_calls(self) -> None:
-        """The order the upstream shape preserves (PRD 9.1)."""
+        """The order the upstream shape preserves."""
         response = response_from(
             completion_payload(
                 choices=[
@@ -622,7 +622,7 @@ class TestFromLitellmResponse:
         assert result.raw_finish_reason == "stop"
 
     def test_unrecognised_finish_reason_is_unknown_with_raw_preserved(self) -> None:
-        """UNKNOWN never means the gateway deleted what upstream said (PRD 5.2).
+        """UNKNOWN never means the gateway deleted what upstream said.
 
         LiteLLM normalises both of these onto its OpenAI-shaped vocabulary, but
         the gateway's vocabulary is its own and matches exactly: a reason the
@@ -663,7 +663,7 @@ class TestFromLitellmResponse:
         assert result.usage.source_of("total_tokens").value == "provider"
 
     def test_usage_total_is_estimated_when_the_provider_reported_no_total(self) -> None:
-        """A zero total beside non-zero parts is LiteLLM's placeholder, not a fact (PRD 13)."""
+        """A zero total beside non-zero parts is LiteLLM's placeholder, not a fact."""
         response = response_from(
             completion_payload(
                 usage={
@@ -695,7 +695,7 @@ class TestFromLitellmResponse:
         assert result.usage.source_of("cached_tokens").value == "provider"
 
     def test_absent_usage_is_unknown_not_zero(self) -> None:
-        """None means not known, which is not the same as zero (PRD 13)."""
+        """None means not known, which is not the same as zero."""
         response = ModelResponse(
             choices=[
                 Choices(
@@ -729,7 +729,7 @@ class TestFromLitellmResponse:
         assert "choices" in error.value.message
 
     def test_logprobability_block_is_rejected(self) -> None:
-        """A log-probability block has no canonical target; the response is refused (PRD 9.1)."""
+        """A log-probability block has no canonical target; the response is refused."""
         response = ModelResponse(
             choices=[
                 Choices(
@@ -798,7 +798,7 @@ class TestFromLitellmResponse:
         assert "reasoning content" in error.value.message
 
     def test_system_fingerprint_is_ignored(self) -> None:
-        """Backend metadata, not answer semantics: the response is not failed (PRD 9.1).
+        """Backend metadata, not answer semantics: the response is not failed.
 
         ``system_fingerprint`` identifies the upstream's infrastructure, not
         anything about the answer — two backends serving the same model return
@@ -817,7 +817,7 @@ class TestFromLitellmResponse:
         assert result.text == "Recursion is a technique..."
 
     def test_reasoning_token_detail_is_rejected(self) -> None:
-        """A completion-token breakdown count has no canonical target (PRD 9.1)."""
+        """A completion-token breakdown count has no canonical target."""
         response = response_from(
             completion_payload(
                 usage={
@@ -833,7 +833,7 @@ class TestFromLitellmResponse:
         assert "reasoning_tokens" in error.value.message
 
     def test_usage_library_placeholder_detail_values_are_accepted(self) -> None:
-        """The library's placeholder detail values are not provider facts (PRD 9.1).
+        """The library's placeholder detail values are not provider facts.
 
         LiteLLM's streaming chunk builder assembles the trailing usage report
         with ``completion_tokens_details`` carrying ``reasoning_tokens=0`` and
@@ -920,8 +920,7 @@ class TestFromLitellmResponse:
         the library's derived ``text_tokens`` has stated a fact about the
         answer — a reasoning category exists and is zero — and the canonical
         usage model cannot carry it. Silently dropping it would lose
-        information in exactly the way the refusal exists to prevent (PRD
-        9.1).
+        information in exactly the way the refusal exists to prevent.
         """
         response = response_from(
             completion_payload(
@@ -943,7 +942,7 @@ class TestFromLitellmResponse:
         The placeholder exception is the library's exact synthetic shape, not
         a general licence for zero-valued categories: an audio-token count
         reported at zero is a provider fact with no canonical target, so the
-        response is rejected rather than trimmed (PRD 9.1).
+        response is rejected rather than trimmed.
         """
         response = response_from(
             completion_payload(
@@ -966,7 +965,7 @@ class TestFromLitellmResponse:
         so a prompt-detail value the canonical model cannot carry is refused
         at zero as at any other value — the distinction between ``None`` (not
         reported) and ``0`` (reported as zero) is the canonical usage model's
-        own and is not weakened globally (PRD 9.1 and 13).
+        own and is not weakened globally.
         """
         response = response_from(
             completion_payload(
@@ -989,8 +988,7 @@ class TestFromLitellmResponse:
         what the library derives, but a provider reporting that value on its
         own — without the placeholder ``reasoning_tokens=0`` beside it — is
         not the library's synthetic shape. The whole shape is recognised at
-        once, so the coincidence alone does not make the field the library's
-        (PRD 9.1).
+        once, so the coincidence alone does not make the field the library's.
         """
         response = response_from(
             completion_payload(
@@ -1013,7 +1011,7 @@ class TestFromLitellmResponse:
         non-zero count the canonical usage model cannot carry — here an
         audio-token count — is still refused, because silently dropping it
         would tell the caller the usage was honoured when part of the report
-        was dropped (PRD 9.1).
+        was dropped.
         """
         response = response_from(
             completion_payload(
@@ -1079,7 +1077,7 @@ class TestFromLitellmResponse:
 
 
 class TestMapLitellmError:
-    """The LiteLLM exception hierarchy maps onto the gateway taxonomy (PRD 5.4, 9)."""
+    """The LiteLLM exception hierarchy maps onto the gateway taxonomy."""
 
     def test_authentication_error_is_unauthenticated(self) -> None:
         error = litellm.AuthenticationError(
@@ -1233,7 +1231,7 @@ class TestMapLitellmError:
         assert isinstance(mapped, InternalError)
 
     def test_gateway_error_passes_through_unchanged(self) -> None:
-        """An already-classified error is not re-classified (PRD 5.4)."""
+        """An already-classified error is not re-classified."""
         error = CapabilityError("already classified", details={"capability": "chat"})
         assert map_litellm_error(error) is error
 
@@ -1242,7 +1240,7 @@ class TestMapLitellmError:
         assert isinstance(mapped, InternalError)
 
     def test_upstream_message_never_reaches_the_public_payload(self) -> None:
-        """The taxonomy sanitises its own payloads; no upstream text is forwarded (PRD 5.4)."""
+        """The taxonomy sanitises its own payloads; no upstream text is forwarded."""
         secret = "sk-upstream-secret-key"
         url = "https://api.openai.com/v1/chat/completions"
         error = litellm.AuthenticationError(

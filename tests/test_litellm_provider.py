@@ -1,5 +1,4 @@
-"""Tests for the LiteLLM provider: one gateway attempt through the pinned binding
-(PRD 9, 11.3, 14.1).
+"""Tests for the LiteLLM provider: one gateway attempt through the pinned binding.
 
 No test reaches the network: ``litellm.acompletion`` is monkeypatched with a
 recording stand-in, so the real per-dialect client is built and closed around a
@@ -9,7 +8,7 @@ upstream payload — so what runs is exactly what the installed binding does wit
 a real provider's answer.
 
 The failure paths construct LiteLLM's and the OpenAI SDK's exception classes
-in memory, which is where the mapping of PRD section 5.4 lives. The tests that
+in memory, which is where the failure mapping lives. The tests that
 pin the ``.env`` guard run a binding module's import in a subprocess with a
 ``.env`` in its working directory: that side effect only exists at import time,
 and only a fresh process can show whether the seam suppressed it.
@@ -516,7 +515,7 @@ class TestTheCall:
 
 
 class TestTheStream:
-    """The streaming path: one gateway attempt with ``stream=True`` (PRD 9.6, 16).
+    """The streaming path: one gateway attempt with ``stream=True``.
 
     The stream is the same single attempt under the same controls as
     :meth:`LiteLLMProvider.complete` — the per-dialect client, ``num_retries=0``,
@@ -1018,7 +1017,7 @@ class TestTheLibrariesOwnChunkOrdering:
 
 
 class TestFailures:
-    """Every failure the call raises is mapped onto the gateway taxonomy (PRD 5.4, 9)."""
+    """Every failure the call raises is mapped onto the gateway taxonomy."""
 
     @pytest.mark.parametrize(
         ("error", "category", "reason"),
@@ -1188,7 +1187,7 @@ class TestFailures:
         assert excinfo.value.__cause__ is error
 
     async def test_the_upstream_message_never_reaches_the_raised_error(self, wire) -> None:
-        """The taxonomy sanitises its own payloads; no upstream text is forwarded (PRD 5.4)."""
+        """The taxonomy sanitises its own payloads; no upstream text is forwarded."""
         secret = SECRET_KEY
         url = "https://api.openai.com/v1/chat/completions"
         error = litellm.AuthenticationError(
@@ -1226,7 +1225,7 @@ class TestFailures:
         assert excinfo.value.details["capability"] == "refusal"
 
     async def test_cancellation_propagates_unmapped(self, wire) -> None:
-        """PRD section 15: cancellation is propagated, not reported as a gateway failure."""
+        """Cancellation is propagated, not reported as a gateway failure."""
         provider, _ = wire(asyncio.CancelledError())
 
         with pytest.raises(asyncio.CancelledError):
@@ -1290,7 +1289,7 @@ class TestTheProtocol:
 
 
 class TestTheSeamIsBeneathTheBoundary:
-    """What a caller may inject is the transport's inputs, never the client (PRD 14.1).
+    """What a caller may inject is the transport's inputs, never the client.
 
     The constructor accepts the pinned builder's inputs and nothing else, so no
     public input can replace the per-dialect client construction: it is
@@ -1362,7 +1361,7 @@ class TestTheSeamIsBeneathTheBoundary:
 
 
 class TestTheEnvGuard:
-    """Importing the binding must not load a working-directory ``.env`` (PRD section 6).
+    """Importing the binding must not load a working-directory ``.env``.
 
     The guard lives in :mod:`model_gateway.providers._litellm`, the seam every
     binding module imports the library through, and it *forces* the mode. These
