@@ -487,7 +487,10 @@ def create_completions(service: InferenceService) -> CompletionsHandler:
             return json(completion.to_dict())
 
         return await _stream_completion(
-            service, invocation, completion_id=f"{_COMPLETION_ID_PREFIX}{invocation_id}"
+            service,
+            invocation,
+            completion_id=f"{_COMPLETION_ID_PREFIX}{invocation_id}",
+            namespace=caller_namespace(identity),
         )
 
     return completions
@@ -503,6 +506,7 @@ async def _stream_completion(
     invocation: InvocationRequest,
     *,
     completion_id: str,
+    namespace: str,
 ) -> Response:
     """Serve one streaming invocation as Server-Sent Events (PRD section 16).
 
@@ -531,7 +535,7 @@ async def _stream_completion(
     chunk shape cannot carry: it is refused as an ordinary capability error rather
     than streamed.
     """
-    event_iter = service.invoke_stream(invocation)
+    event_iter = service.invoke_stream(invocation, namespace=namespace)
 
     # Pull the first event to surface a pre-stream refusal — a GatewayError or a
     # tool call the shape cannot carry — before the SSE response commits to a 200

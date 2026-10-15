@@ -54,16 +54,20 @@ import structlog
 
 from model_gateway.config.routes import Operation, Route
 from model_gateway.config.settings import ConfigurationError
-from model_gateway.domain import InvocationRequest, InvocationResponse, Usage
-from model_gateway.domain.embeddings import EmbeddingRequest, EmbeddingResponse
-from model_gateway.domain.images import ImageRequest, ImageResponse
+from model_gateway.domain import InvocationRequest, Usage
+from model_gateway.domain.embeddings import EmbeddingRequest
+from model_gateway.domain.images import ImageRequest
 from model_gateway.domain.serialization import as_int
 
 logger = structlog.get_logger(__name__)
 
 __all__ = [
+    "STATUS_COMPLETED",
+    "STATUS_FAILED",
+    "STATUS_INCOMPLETE",
     "AccountingRecorder",
     "AccountingSink",
+    "InvocationOutcome",
     "MemoryAccountingSink",
     "NullAccountingSink",
     "PricingTable",
@@ -77,8 +81,20 @@ _PRICE_SCALE = 1_000_000
 _PRICING_VARIABLE = "COST_PRICING_JSON"
 _DEFAULT_CAPACITY = 100_000
 
-_STATUS_COMPLETED = "completed"
-_STATUS_FAILED = "failed"
+STATUS_COMPLETED = "completed"
+"""The invocation reached its answer's finish."""
+
+STATUS_FAILED = "failed"
+"""The invocation produced output and then failed."""
+
+STATUS_INCOMPLETE = "incomplete"
+"""The invocation produced output and then stopped without reaching a terminal event.
+
+A caller that went away, a transport that was lost, or an upstream that ended
+without reporting a finish reason. It is deliberately not ``failed``: §16 draws
+that distinction for the caller, and a record that collapsed the two would report
+a failure the stream never declared.
+"""
 
 _PRICED_CATEGORIES = frozenset({"input", "output", "cached"})
 """The token categories a price entry may quote.
@@ -333,12 +349,14 @@ class UsageRecord:
     sum the gateway could compute, and a record that dropped the count could not
     preserve that distinction.
 
-    ``status`` is ``completed`` today on every record the gateway writes, because
-    it records invocations that produced an answer and a failure produces none;
-    ``error_reason`` is therefore always ``None``. The vocabulary exists because
-    §13 asks for a request status and a streamed answer that fails after it has
-    begun is the shape that would use it, not because a failure record is written
-    now.
+    ``status`` names how the invocation ended, and the three values are the ones
+    :class:`InvocationOutcome` defines: ``completed`` for an answer that reached
+    its finish, ``failed`` for one that produced output and then failed, and
+    ``incomplete`` for one that produced output and then stopped without a
+    terminal event. ``error_reason`` carries the gateway reason for a ``failed``
+    outcome and is ``None`` for the other two. A non-streaming invocation that
+    produced an answer is always ``completed``: a failure there produces no answer
+    to record, so the other two values are the streaming walk's (§16).
     """
 
     invocation_id: str
@@ -499,14 +517,43 @@ def _require_matching_operation(
             return
 
 
+@dataclass(frozen=True)
+class InvocationOutcome:
+    """What one invocation's answer is, whichever operation produced it.
+
+    The three canonical answers have different shapes, and a streamed completion
+    has no single object at all: its usage arrives on events of its own and its
+    terminal event is what says it ended. The facts a record needs are the
+    intersection of those shapes, so they are stated once here rather than
+    re-derived per operation, and the recorder no longer depends on the concrete
+    answer type. A streamed answer therefore reaches the sink through the same
+    path as a completed one instead of through a second, parallel one.
+
+    ``status`` names exactly what happened rather than collapsing two cases into
+    one (PRD sections 13 and 16): ``completed`` for an answer that reached its
+    finish, ``failed`` for one that produced output and then failed, and
+    ``incomplete`` for one that produced output and then stopped without ever
+    reaching a terminal event — a caller that went away, a transport that was
+    lost, or an upstream that ended without reporting a finish reason.
+    ``error_reason`` is the gateway reason for a ``failed`` outcome and ``None``
+    for the other two.
+    """
+
+    invocation_id: str
+    upstream_model: str
+    usage: Usage
+    status: str = STATUS_COMPLETED
+    error_reason: str | None = None
+
+
 class AccountingRecorder:
     """Build one record from an invocation and hand it to the sink.
 
     The recorder holds the sink and the pricing table, so a caller supplies the
-    facts it alone has — the request, the response, the route and how long the
-    invocation took — and the recorder derives the rest. Deriving them here rather
-    than at the call site keeps the cost of an invocation's record identical
-    whatever route served it.
+    facts it alone has — the request, the answer, the route that served it, the
+    walk's execution facts and how long the invocation took — and the recorder
+    derives the rest. Deriving them here rather than at the call site keeps the
+    cost of an invocation's record identical whatever route served it.
     """
 
     def __init__(
@@ -520,7 +567,7 @@ class AccountingRecorder:
     def record(
         self,
         request: InvocationRequest | EmbeddingRequest | ImageRequest,
-        response: InvocationResponse | EmbeddingResponse | ImageResponse,
+        outcome: InvocationOutcome,
         route: Route,
         *,
         namespace: str,
@@ -528,7 +575,7 @@ class AccountingRecorder:
         attempts: int,
         fallback_used: bool,
     ) -> UsageRecord:
-        """Record one completed invocation, whatever operation produced it.
+        """Record one invocation's answer, whatever operation produced it.
 
         ``route`` is the route that *served* the invocation, which is where the
         operation and the advertised capabilities come from — the request carries
@@ -537,8 +584,13 @@ class AccountingRecorder:
         operation as the request, which :func:`_require_matching_operation`
         enforces rather than assumes.
 
+        ``outcome`` is the answer's own facts, stated by whichever operation
+        produced it. It is what lets a streamed answer be recorded here rather
+        than by a second entry point: a stream has no response object to read, so
+        the facts the record needs are passed in instead of derived from a type.
+
         ``attempts`` and ``fallback_used`` are supplied by the caller rather than
-        read off ``response``, because only the text answer carries them: the
+        read off the answer, because only the text answer carries them: the
         canonical embeddings and image answers have no field for either (PRD
         section 5.2), while the record §13 asks for does. They come from the same
         walk state the text response is stamped from, so the two agree wherever
@@ -558,14 +610,14 @@ class AccountingRecorder:
         narrower quantity §13's list calls provider latency.
         """
         _require_matching_operation(request, route)
-        usage = response.usage
+        usage = outcome.usage
         cost, currency = (
             self._pricing.estimate(usage, request.model)
             if self._pricing is not None
             else (None, None)
         )
         record = UsageRecord(
-            invocation_id=response.invocation_id or "",
+            invocation_id=outcome.invocation_id,
             timestamp=datetime.now(UTC),
             namespace=namespace,
             tenant=request.tenant_id if isinstance(request, InvocationRequest) else None,
@@ -573,8 +625,8 @@ class AccountingRecorder:
             route_model_id=route.model_id,
             operation=route.operation,
             capabilities=frozenset(capability.value for capability in route.capabilities),
-            upstream_model=response.upstream_model,
-            status=_STATUS_COMPLETED,
+            upstream_model=outcome.upstream_model,
+            status=outcome.status,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             cached_tokens=usage.cached_tokens,
@@ -583,7 +635,7 @@ class AccountingRecorder:
             latency_ms=latency_ms,
             attempts=attempts,
             fallback_used=fallback_used,
-            error_reason=None,
+            error_reason=outcome.error_reason,
             estimated_cost=cost,
             cost_currency=currency,
         )

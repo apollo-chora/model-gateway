@@ -15,10 +15,17 @@ from datetime import UTC
 
 import orjson
 import pytest
+from blacksheep import Application, JSONContent
+from blacksheep.server.routing import Router
+from blacksheep.testing import TestClient
 from structlog.testing import capture_logs
 
 from model_gateway.accounting import (
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_INCOMPLETE,
     AccountingRecorder,
+    InvocationOutcome,
     MemoryAccountingSink,
     NullAccountingSink,
     PricingTable,
@@ -26,11 +33,17 @@ from model_gateway.accounting import (
     pricing_from_env,
 )
 from model_gateway.capabilities import Capability
+from model_gateway.config import Settings
 from model_gateway.config.routes import Operation, Route
 from model_gateway.config.settings import ConfigurationError
 from model_gateway.domain import FinishReason, InvocationResponse, TextPart, Usage
+from model_gateway.domain.streaming import StreamEvent, StreamEventKind
+from model_gateway.http.auth import create_auth_middleware
+from model_gateway.http.embeddings import register_embeddings_routes
+from model_gateway.http.errors import register_error_handlers
 from model_gateway.inference import InferenceService
 from model_gateway.registry import ModelRegistry
+from model_gateway.security.api_keys import ApiKeySet
 
 
 def route(model_id: str = "upstream-text", **overrides) -> Route:
@@ -75,6 +88,27 @@ def response(**overrides) -> InvocationResponse:
     }
     values.update(overrides)
     return InvocationResponse(**values)  # type: ignore[arg-type]
+
+
+def outcome(**overrides) -> InvocationOutcome:
+    """The answer facts a record takes, as a completed answer states them.
+
+    ``response()`` is what a provider returns; this is what the recorder is
+    handed, and the two are separate because a streamed answer has no response
+    object to read those facts from.
+    """
+    values: dict[str, object] = {
+        "invocation_id": "inv-accounting-1",
+        "upstream_model": "upstream-text",
+        "usage": Usage(
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+            cached_tokens=2,
+        ),
+    }
+    values.update(overrides)
+    return InvocationOutcome(**values)  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #
@@ -316,7 +350,7 @@ def test_a_record_separates_reported_counts_from_derived_ones():
     usage = Usage(input_tokens=10, output_tokens=None, cached_tokens=2)
     record = recorder.record(
         _request(),
-        response(usage=usage),
+        outcome(usage=usage),
         route(),
         namespace="cred-digest",
         latency_ms=1.0,
@@ -344,7 +378,7 @@ def test_a_derived_count_is_marked_estimated_in_the_record():
     )
     record = recorder.record(
         _request(),
-        response(usage=usage),
+        outcome(usage=usage),
         route(),
         namespace="cred-digest",
         latency_ms=1.0,
@@ -370,7 +404,7 @@ def test_a_record_refuses_a_route_of_another_operation():
     with pytest.raises(ValueError, match="embeddings"):
         recorder.record(
             _request(),
-            response(),
+            outcome(),
             route(operation=Operation.EMBEDDINGS, capabilities=frozenset({Capability.EMBEDDINGS})),
             namespace="cred-digest",
             latency_ms=1.0,
@@ -553,7 +587,7 @@ class _ExplodingSink:
 def _record():
     return AccountingRecorder(MemoryAccountingSink(), PricingTable()).record(
         _request(),
-        response(),
+        outcome(),
         route(),
         namespace="cred-digest",
         latency_ms=1.0,
@@ -562,15 +596,17 @@ def _record():
     )
 
 
-def _request():
+def _request(**overrides):
     from model_gateway.domain import InvocationRequest, Message, Role, TextPart
 
-    return InvocationRequest(
-        model="text-default",
-        messages=(Message(role=Role.USER, content=(TextPart("hello"),)),),
-        tenant_id="tenant-a",
-        idempotency_key=None,
-    )
+    values: dict[str, object] = {
+        "model": "text-default",
+        "messages": (Message(role=Role.USER, content=(TextPart("hello"),)),),
+        "tenant_id": "tenant-a",
+        "idempotency_key": None,
+    }
+    values.update(overrides)
+    return InvocationRequest(**values)  # type: ignore[arg-type]
 
 
 def _one_route_registry():
@@ -591,22 +627,37 @@ class _EchoProvider:
 
 
 class _FlakyProvider:
-    """Fails the first call with a given gateway error, then answers like the echo.
+    """Fails the first call with a given gateway error, then answers.
 
     A fallback is only walkable for a failure another route may recover from, so
     a provider that cannot fail at all cannot produce one; and the walk decides
-    from the gateway's own taxonomy, not from an exception type.
+    from the gateway's own taxonomy, not from an exception type. It answers all
+    three operations, so one scripted failure drives a text, an embeddings or an
+    image fallback through the same helper.
     """
 
     def __init__(self, error):
         self._error = error
         self.calls = []
+        self._embedding = _EmbeddingProvider()
+        self._image = _ImageProvider()
 
-    async def complete(self, route, request, context):
+    def _maybe_fail(self, route, request, context):
         self.calls.append((route, request, context))
         if len(self.calls) == 1:
             raise self._error
+
+    async def complete(self, route, request, context):
+        self._maybe_fail(route, request, context)
         return response()
+
+    async def embed(self, route, request, context):
+        self._maybe_fail(route, request, context)
+        return await self._embedding.embed(route, request, context)
+
+    async def generate(self, route, request, context):
+        self._maybe_fail(route, request, context)
+        return await self._image.generate(route, request, context)
 
 
 # --------------------------------------------------------------------------- #
@@ -797,28 +848,99 @@ async def test_one_invocation_produces_exactly_one_record():
 # --------------------------------------------------------------------------- #
 
 
-def test_the_attempt_facts_come_from_the_caller_not_from_the_answer():
-    """The record's attempt count and fallback flag are the walk's, not the answer's.
+async def test_an_embeddings_fallback_is_recorded_against_the_route_that_served_it():
+    """The walk's own facts reach an embeddings record, not only a text one.
 
-    Only the text answer carries those two facts, so the recorder is handed them
-    rather than reading them off the response: an embeddings or image answer has
-    no field for either (PRD section 5.2), and a recorder that read the response
-    would have to invent a value for those operations.
+    A failed primary followed by a serving fallback is the case that exercises
+    both facts at once: the attempt count is two, the fallback flag is set, and
+    the route named is the one that answered. An embeddings answer carries neither
+    fact (PRD section 5.2), so this is the walk's report and not the answer's.
     """
-    recorder = AccountingRecorder(MemoryAccountingSink(), PricingTable())
+    from model_gateway.errors import UnavailableError
 
-    record = recorder.record(
+    sink = MemoryAccountingSink()
+    provider = _FlakyProvider(UnavailableError("the primary is down"))
+    service = InferenceService(
+        ModelRegistry((_embedding_route("embed-primary"), _embedding_route("embed-fallback"))),
+        provider,
+        accounting=AccountingRecorder(sink, PricingTable()),
+    )
+
+    await service.embed(_embedding_request(), namespace="cred-digest")
+
+    record = sink.records[0]
+    assert record.attempts == 2
+    assert record.fallback_used is True
+    assert record.route_model_id == "embed-fallback"
+    assert record.upstream_model == "embed-fallback"
+    assert record.operation is Operation.EMBEDDINGS
+
+
+async def test_an_image_fallback_is_recorded_against_the_route_that_served_it():
+    from model_gateway.errors import UnavailableError
+
+    sink = MemoryAccountingSink()
+    provider = _FlakyProvider(UnavailableError("the primary is down"))
+    service = InferenceService(
+        ModelRegistry((_image_route("image-primary"), _image_route("image-fallback"))),
+        provider,
+        accounting=AccountingRecorder(sink, PricingTable()),
+    )
+
+    await service.generate(_image_request(), namespace="cred-digest")
+
+    record = sink.records[0]
+    assert record.attempts == 2
+    assert record.fallback_used is True
+    assert record.route_model_id == "image-fallback"
+    assert record.operation is Operation.IMAGE
+
+
+def test_a_record_carries_the_status_and_reason_a_failed_answer_states():
+    """A streamed answer that failed after output is recorded as failed, with its reason.
+
+    The three statuses are the streaming walk's: a non-streaming invocation that
+    produced an answer always completed, because a failure there produces no
+    answer to record.
+    """
+    recorder = AccountingRecorder(MemoryAccountingSink(), None)
+
+    failed = recorder.record(
         _request(),
-        response(attempt_count=7, fallback_used=True),
+        outcome(status=STATUS_FAILED, error_reason="upstream_error"),
         route(),
         namespace="cred-digest",
         latency_ms=1.0,
-        attempts=3,
+        attempts=1,
+        fallback_used=False,
+    )
+    stopped = recorder.record(
+        _request(),
+        outcome(status=STATUS_INCOMPLETE),
+        route(),
+        namespace="cred-digest",
+        latency_ms=1.0,
+        attempts=1,
+        fallback_used=False,
+    )
+    completed = recorder.record(
+        _request(),
+        outcome(),
+        route(),
+        namespace="cred-digest",
+        latency_ms=1.0,
+        attempts=1,
         fallback_used=False,
     )
 
-    assert record.attempts == 3
-    assert record.fallback_used is False
+    assert failed.status == STATUS_FAILED
+    assert failed.error_reason == "upstream_error"
+    assert stopped.status == STATUS_INCOMPLETE
+    # A stream that stopped without a terminal event declared no failure, so it
+    # carries no reason for one.
+    assert stopped.error_reason is None
+    assert completed.status == STATUS_COMPLETED
+    assert completed.error_reason is None
 
 
 def _embedding_route(model_id: str = "upstream-embed") -> Route:
@@ -974,3 +1096,265 @@ async def test_an_embeddings_refusal_leaves_no_record():
         await service.embed(_embedding_request(), namespace="cred-digest")
 
     assert len(sink) == 0
+
+
+# --------------------------------------------------------------------------- #
+# A streamed answer records too
+# --------------------------------------------------------------------------- #
+
+
+def _event(kind, sequence, **overrides) -> StreamEvent:
+    values: dict[str, object] = {
+        "kind": kind,
+        "sequence": sequence,
+        "invocation_id": "inv-stream-1",
+    }
+    values.update(overrides)
+    return StreamEvent(**values)  # type: ignore[arg-type]
+
+
+class _ScriptedStreamProvider:
+    """A streaming provider that serves one scripted event stream per call.
+
+    An item is a :class:`StreamEvent`, which is yielded, or an exception, which is
+    raised at that point — so a script can yield some events and then fail
+    mid-stream, or produce nothing at all.
+    """
+
+    def __init__(self, *scripts):
+        self._scripts = list(scripts)
+        self.calls = []
+
+    async def stream(self, route, request, context):
+        self.calls.append((route, request, context))
+        script = self._scripts[min(len(self.calls), len(self._scripts)) - 1]
+        for item in script:
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
+
+def _streaming_service(provider, sink, **overrides) -> InferenceService:
+    return InferenceService(
+        _one_route_registry(),
+        provider,
+        accounting=AccountingRecorder(sink, PricingTable()),
+        **overrides,
+    )
+
+
+async def _drain(stream) -> list[StreamEvent]:
+    return [event async for event in stream]
+
+
+async def test_a_completed_stream_is_recorded():
+    """§13 asks for a record of every invocation that produced an answer, streams included."""
+    sink = MemoryAccountingSink()
+    service = _streaming_service(
+        _ScriptedStreamProvider(
+            [
+                _event(StreamEventKind.CONTENT, 0, text="hello"),
+                _event(
+                    StreamEventKind.USAGE,
+                    1,
+                    usage=Usage(input_tokens=7, output_tokens=3, total_tokens=10),
+                ),
+                _event(StreamEventKind.FINISH, 2, finish_reason=FinishReason.STOP),
+            ]
+        ),
+        sink,
+    )
+
+    await _drain(
+        service.invoke_stream(_request(invocation_id="inv-stream-1"), namespace="cred-digest")
+    )
+
+    assert len(sink.records) == 1
+    record = sink.records[0]
+    assert record.status == STATUS_COMPLETED
+    assert record.invocation_id == "inv-stream-1"
+    assert record.namespace == "cred-digest"
+    assert record.public_model == "text-default"
+    assert record.route_model_id == "upstream-text"
+    assert record.upstream_model == "upstream-text"
+    assert record.operation is Operation.TEXT
+    assert (record.input_tokens, record.output_tokens, record.total_tokens) == (7, 3, 10)
+    assert record.attempts == 1
+    assert record.fallback_used is False
+    assert record.error_reason is None
+
+
+async def test_a_stream_that_produced_nothing_leaves_no_record():
+    """A refusal before the first event is not an answer, so nothing is accounted for."""
+    sink = MemoryAccountingSink()
+    service = _streaming_service(_ScriptedStreamProvider([]), sink)
+
+    await _drain(
+        service.invoke_stream(_request(invocation_id="inv-stream-1"), namespace="cred-digest")
+    )
+
+    assert len(sink) == 0
+
+
+async def test_a_stream_that_failed_after_output_is_recorded_as_failed():
+    """The failure's own gateway reason travels with the record."""
+    from model_gateway.errors import UnavailableError
+
+    sink = MemoryAccountingSink()
+    service = _streaming_service(
+        _ScriptedStreamProvider(
+            [
+                _event(StreamEventKind.CONTENT, 0, text="hel"),
+                UnavailableError("the upstream went away"),
+            ]
+        ),
+        sink,
+    )
+
+    with pytest.raises(UnavailableError):
+        await _drain(
+            service.invoke_stream(
+                _request(invocation_id="inv-stream-1"), namespace="cred-digest"
+            )
+        )
+
+    record = sink.records[0]
+    assert record.status == STATUS_FAILED
+    assert record.error_reason == "provider_unavailable"
+    assert record.route_model_id == "upstream-text"
+
+
+async def test_a_stream_that_stopped_without_a_terminal_event_is_incomplete():
+    """A truncated stream is not a failed one, and the record does not report it as one."""
+    sink = MemoryAccountingSink()
+    service = _streaming_service(
+        _ScriptedStreamProvider(
+            [
+                _event(StreamEventKind.CONTENT, 0, text="hel"),
+                _event(StreamEventKind.CONTENT, 1, text="lo"),
+            ]
+        ),
+        sink,
+    )
+
+    await _drain(
+        service.invoke_stream(_request(invocation_id="inv-stream-1"), namespace="cred-digest")
+    )
+
+    record = sink.records[0]
+    assert record.status == STATUS_INCOMPLETE
+    assert record.error_reason is None
+    assert record.route_model_id == "upstream-text"
+
+
+async def test_a_stream_the_caller_abandons_is_still_recorded():
+    """The provider was called, so the gateway owes for the output it produced."""
+    sink = MemoryAccountingSink()
+    service = _streaming_service(
+        _ScriptedStreamProvider(
+            [
+                _event(StreamEventKind.CONTENT, 0, text="hel"),
+                _event(StreamEventKind.FINISH, 1, finish_reason=FinishReason.STOP),
+            ]
+        ),
+        sink,
+    )
+
+    stream = service.invoke_stream(_request(invocation_id="inv-stream-1"), namespace="cred-digest")
+    first = await stream.__anext__()
+    assert first.text == "hel"
+    await stream.aclose()
+
+    assert len(sink.records) == 1
+    assert sink.records[0].status == STATUS_INCOMPLETE
+
+
+async def test_a_streamed_answer_is_not_recorded_when_accounting_is_disabled():
+    sink = MemoryAccountingSink()
+    service = _streaming_service(
+        _ScriptedStreamProvider(
+            [_event(StreamEventKind.FINISH, 0, finish_reason=FinishReason.STOP)]
+        ),
+        sink,
+        accounting_enabled=False,
+    )
+
+    await _drain(
+        service.invoke_stream(_request(invocation_id="inv-stream-1"), namespace="cred-digest")
+    )
+
+    assert len(sink) == 0
+
+
+# --------------------------------------------------------------------------- #
+# The authenticated principal reaches a record through the HTTP surface
+# --------------------------------------------------------------------------- #
+
+_KEY_A = "sk-gateway-key-a"
+_KEY_B = "sk-gateway-key-b"
+
+
+def _embeddings_app(sink) -> Application:
+    """An application serving only the embeddings endpoint, with authentication on.
+
+    Built by hand rather than through the factory so the test can hand the service
+    the sink it will read. The point is the transport's own contribution — which
+    principal a request is recorded under — and the factory builds its sink where
+    a test cannot reach it.
+    """
+    settings = Settings.from_env(
+        {
+            "GATEWAY_AUTH_ENABLED": "true",
+            "GATEWAY_API_KEYS": f"{_KEY_A}:tenant-a,{_KEY_B}:tenant-b",
+        }
+    )
+    service = InferenceService(
+        ModelRegistry((_embedding_route(),)),
+        _EmbeddingProvider(),
+        accounting=AccountingRecorder(sink, PricingTable()),
+    )
+    app = Application(router=Router())
+    register_error_handlers(app)
+    register_embeddings_routes(app.router, service)
+    app.middlewares.append(
+        create_auth_middleware(
+            ApiKeySet.from_settings(settings),
+            auth_enabled=True,
+            allow_anonymous_health=True,
+        )
+    )
+    return app
+
+
+async def test_two_credentials_record_under_two_namespaces_through_the_http_surface():
+    """The handler's contribution: which principal an authenticated request records under.
+
+    Two callers presenting two different keys are two principals, and the record
+    each invocation leaves must name its own. A direct service test cannot show
+    this, because it supplies the namespace itself; the check is therefore made
+    through the real middleware and the real handler, which is the wiring that
+    previously dropped the identity entirely.
+    """
+    sink = MemoryAccountingSink()
+    app = _embeddings_app(sink)
+
+    await app.start()
+    try:
+        client = TestClient(app)
+        for key in (_KEY_A, _KEY_B):
+            response = await client.post(
+                "/v1/embeddings",
+                content=JSONContent({"model": "embedding-default", "input": "hello"}),
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            assert response.status == 200
+    finally:
+        await app.stop()
+
+    assert len(sink.records) == 2
+    namespaces = [record.namespace for record in sink.records]
+    assert all(namespaces)
+    assert namespaces[0] != namespaces[1]
+    # The canonical embeddings request states no tenant, so neither record does —
+    # the principal is carried by the namespace and not invented as a tenant.
+    assert [record.tenant for record in sink.records] == [None, None]
