@@ -36,6 +36,7 @@ Without both obligations met, this module is advisory only.
 """
 
 import ipaddress
+import re
 import socket
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -53,6 +54,25 @@ RESERVED_AUTH_HEADERS: frozenset[str] = frozenset({"authorization", "x-api-key",
 ALLOWED_HOSTS_VARIABLE = "GATEWAY_ALLOWED_UPSTREAM_HOSTS"
 """The variable naming the upstream hosts a deployment permits (PRD section 14)."""
 
+_HOSTNAME_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\Z")
+
+_HOSTNAME_MAXIMUM = 253
+
+
+def _is_hostname(host: str) -> bool:
+    """Whether ``host`` is a DNS hostname or an IPv4 literal.
+
+    Dot-separated labels of letters, digits and hyphens, each not beginning or ending
+    with a hyphen, the whole thing at most 253 characters. That is the grammar the
+    allowlist states, and an entry outside it is refused rather than kept as text
+    that can never match a host the gateway would resolve — which is the failure an
+    operator would never see, because a list that quietly kept a typo looks like a
+    list that works.
+    """
+    if not host or len(host) > _HOSTNAME_MAXIMUM:
+        return False
+    return all(_HOSTNAME_LABEL.match(label) for label in host.split("."))
+
 
 def parse_allowed_hosts(raw: str | None) -> frozenset[str]:
     """The hostnames an allowlist setting names, or an empty set for none.
@@ -64,7 +84,8 @@ def parse_allowed_hosts(raw: str | None) -> frozenset[str]:
 
     An entry is a **hostname** and not an authority, so a scheme, a port, a path,
     userinfo, an IPv6 literal and whitespace are each **refused** rather than
-    ignored: an entry the gateway silently ignored would be an operator believing a
+    ignored, and so is anything outside the hostname grammar :func:`_is_hostname`
+    states. An entry the gateway silently ignored would be an operator believing a
     host was permitted or refused when it was not. Matching is case-insensitive,
     because hostnames are.
     """
@@ -77,6 +98,12 @@ def parse_allowed_hosts(raw: str | None) -> frozenset[str]:
             raise UrlPolicyError(
                 f"an entry in {ALLOWED_HOSTS_VARIABLE} is not a hostname; a scheme, a port, a "
                 f"path, userinfo and an IPv6 literal are not accepted here"
+            )
+        if not _is_hostname(host):
+            raise UrlPolicyError(
+                f"an entry in {ALLOWED_HOSTS_VARIABLE} is not a hostname; labels are letters, "
+                f"digits and hyphens, a label does not begin or end with a hyphen, and the whole "
+                f"name is at most {_HOSTNAME_MAXIMUM} characters"
             )
     return frozenset(hosts)
 
@@ -253,10 +280,12 @@ def resolve_endpoint(
 ) -> str:
     """Join a route's endpoint and validate it before it is handed to LiteLLM.
 
-    This is the entry point configuration validation and the LiteLLM binding
-    use: the result is the ``api_base`` value of PRD section 9.6. ``allowed_hosts``
-    is the deployment's optional allowlist, applied to the joined endpoint so an
-    absolute-path override is checked against it too (PRD section 14).
+    The result is the ``api_base`` value of PRD section 9.6. Its one caller is the
+    route parser, which is where configuration is validated: the binding receives a
+    resolved ``Route`` rather than resolving one, so this is configuration-time
+    screening and not a per-request step. ``allowed_hosts`` is the deployment's
+    optional allowlist, applied to the joined endpoint so an absolute-path override
+    is checked against it too (PRD section 14).
     """
     endpoint = join_endpoint(base_url, path, allow_absolute_path_url=allow_absolute_path_url)
     validate_upstream_url(

@@ -95,6 +95,34 @@ def test_no_allowlist_permits_every_host_the_rest_of_the_policy_permits():
     check_allowed_host("anything.example", frozenset())
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "-leading.example",
+        "trailing-.example",
+        "under_score.example",
+        "two..dots",
+        "a" * 64 + ".example",
+        "x" * 254,
+    ],
+)
+def test_an_entry_outside_the_hostname_grammar_is_refused(entry):
+    """A typo kept in the list looks like a list that works, so it is refused.
+
+    The check above catches an authority written where a hostname belongs; this
+    catches a value that is authority-shaped but not a hostname at all. Either way
+    the operator is told at startup rather than discovering it when a route they
+    believed was permitted is refused.
+    """
+    with pytest.raises(UrlPolicyError, match=ALLOWED_HOSTS_VARIABLE):
+        parse_allowed_hosts(entry)
+
+
+@pytest.mark.parametrize("entry", ["one.example", "localhost", "93.184.216.34", "a-b.c-d.example"])
+def test_an_entry_inside_the_hostname_grammar_is_accepted(entry):
+    assert parse_allowed_hosts(entry) == frozenset({entry})
+
+
 def test_a_named_host_is_permitted_and_matching_ignores_case():
     check_allowed_host("One.Example", frozenset({"one.example"}))
 
