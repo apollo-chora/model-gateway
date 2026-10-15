@@ -3,11 +3,11 @@
 The gateway is one process with two listeners: HTTP on `8080` and gRPC on `9090`,
 both started and stopped together, configured entirely by environment variables. It
 requires no Kubernetes, no service mesh and no cloud-managed runtime — a container
-runtime and a set of environment variables are enough (PRD sections 18 and 19).
+runtime and a set of environment variables are enough.
 
 Nothing about a provider is baked into the image. Which upstreams it calls, over
 which protocols, with which credentials, is configuration; changing a provider is
-an environment change rather than a build (PRD section 23).
+an environment change rather than a build.
 
 ## Running the container
 
@@ -26,8 +26,9 @@ unprivileged user: the process writes nothing to its own filesystem.
 
 `--env-file` takes the `KEY=VALUE` form the example files use, comments included.
 Copy `.env.example` for development or `.env.production.example` for a real
-deployment and fill in the credentials; PRD section 18 is the complete list of
-settings with the defaults they take.
+deployment and fill in the credentials;
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md) is the complete list of settings
+with the defaults they take.
 
 **A container started with no configuration at all runs, and cannot serve
 inference.** It starts, answers `/healthz` and `/readyz`, serves `/v1/models` with an
@@ -40,8 +41,8 @@ crash, and it does not look like a working deployment either.
 deployment that has forgotten its environment file reports healthy while refusing
 every request. Check `/v1/models` before treating a deployment as ready for
 inference traffic. Whether readiness *should* distinguish a deliberately empty
-gateway from one that was expected to serve inference is a contract this PRD does
-not settle, and it is recorded as an open question rather than assumed either way.
+gateway from one that was expected to serve inference is a contract the gateway
+does not settle; it is recorded as an open question rather than assumed either way.
 
 ## What happens at startup
 
@@ -51,8 +52,7 @@ to an address the URL policy forbids, a dialect the binding has not verified, an
 image route advertising an editing capability that is not implemented, a malformed
 price, a request-body bound that is not a positive whole number, tracing enabled
 with nowhere to send spans. Each of those is a deployment that would otherwise fail
-on a caller's request instead, so none of them is deferred to the first request
-(PRD sections 6 and 21).
+on a caller's request instead, so none of them is deferred to the first request.
 
 It then builds the model registry and the inference binding, wires the
 authentication, the limiters, the accounting and the tracing the environment asked
@@ -66,7 +66,7 @@ producing a process that answers a probe on a port it is not serving.
 | --- | --- | --- |
 | `GET /healthz` | the process is the process | none when `GATEWAY_ALLOW_ANONYMOUS_HEALTH=true` |
 | `GET /readyz` | the process is ready to serve | same exemption |
-| `GET /metrics` | the eleven counters and histograms of PRD section 17 | **required** |
+| `GET /metrics` | the eleven Prometheus counters and histograms the gateway maintains, listed in docs/ARCHITECTURE.md | **required** |
 
 Probe liveness on `/healthz` and route on `/readyz`; they are different questions.
 `/metrics` is authenticated like every other path, because the only two exemptions
@@ -99,7 +99,7 @@ Both transports are versioned and both are stable.
   a field is never reused or renumbered.
 
 Both reach identical policy: one inference service decides what may happen, and each
-transport only translates (PRD section 5.2).
+transport only translates.
 
 ## What a deployment must provide
 
@@ -111,8 +111,7 @@ refuses redirects, so the gateway cannot be pointed at loopback, private,
 link-local, metadata or unique-local addresses by configuration. A deployment that
 wants a second layer — or that enables a path the binding has not verified, which
 the binding refuses rather than runs — should enforce it at the network egress.
-The gateway's own controls are not a substitute for a deployment's (PRD section
-14.1).
+The gateway's own controls are not a substitute for a deployment's.
 
 Provider credentials arrive as environment variables and are never accepted from an
 inference request body. They do not appear in a public response, in a log line, or
