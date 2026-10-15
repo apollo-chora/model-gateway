@@ -15,8 +15,22 @@ import asyncio
 
 import pytest
 
+from model_gateway.capabilities import Capability
+from model_gateway.config.routes import Operation, Route
+from model_gateway.domain import (
+    FinishReason,
+    InvocationRequest,
+    InvocationResponse,
+    Message,
+    Role,
+    TextPart,
+    Usage,
+)
+from model_gateway.domain.streaming import StreamEvent, StreamEventKind
 from model_gateway.errors import DeadlineExceededError, ErrorReason, ResourceExhaustedError
+from model_gateway.inference import InferenceService
 from model_gateway.limits import RateLimiter, TenantConcurrencyLimiter
+from model_gateway.registry import ModelRegistry
 
 
 class _Clock:
@@ -39,6 +53,12 @@ async def _settle(predicate, *, turns: int = 500) -> None:
             return
         await asyncio.sleep(0)
     raise AssertionError("the condition never held")
+
+
+async def _yield_times(turns: int = 50) -> None:
+    """Let the event loop run ``turns`` times, so a queued task gets every chance to run."""
+    for _ in range(turns):
+        await asyncio.sleep(0)
 
 
 # --------------------------------------------------------------------------- #
@@ -273,3 +293,227 @@ def test_a_concurrency_bound_that_is_not_a_bound_is_refused():
     for bad in (0, -1, True, 1.5, "2"):
         with pytest.raises(ValueError):
             TenantConcurrencyLimiter(maximum=bad)
+
+
+# --------------------------------------------------------------------------- #
+# The admission decisions, as the service takes them
+# --------------------------------------------------------------------------- #
+
+
+def _route(model_id: str = "upstream-text", **overrides) -> Route:
+    values: dict[str, object] = {
+        "operation": Operation.TEXT,
+        "index": 0,
+        "endpoint": "https://upstream.internal.example/v1",
+        "base_url": "https://upstream.internal.example/v1",
+        "model_id": model_id,
+        "format": "openai",
+        "api_key": "sk-upstream-secret",
+        "capabilities": frozenset({Capability.CHAT}),
+        "extra_headers": {},
+        "allow_absolute_path_url": False,
+    }
+    values.update(overrides)
+    return Route(**values)  # type: ignore[arg-type]
+
+
+def _request(**overrides) -> InvocationRequest:
+    values: dict[str, object] = {
+        "model": "text-default",
+        "messages": (Message(role=Role.USER, content=(TextPart("hello"),)),),
+        "tenant_id": "tenant-a",
+        "idempotency_key": None,
+    }
+    values.update(overrides)
+    return InvocationRequest(**values)  # type: ignore[arg-type]
+
+
+def _response() -> InvocationResponse:
+    return InvocationResponse(
+        model="text-default",
+        upstream_model="upstream-text",
+        invocation_id="inv-limits-1",
+        content=(TextPart("hello"),),
+        finish_reason=FinishReason.STOP,
+        usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
+    )
+
+
+class _EchoProvider:
+    """The deterministic provider the other suites use: one scripted answer."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Route, object, object]] = []
+
+    async def complete(self, route, request, context):
+        self.calls.append((route, request, context))
+        return _response()
+
+
+class _BlockingProvider:
+    """A provider that holds the first attempt open, so a bound has something to bound."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls: list[tuple[Route, object, object]] = []
+
+    async def complete(self, route, request, context):
+        self.calls.append((route, request, context))
+        self.entered.set()
+        await self.release.wait()
+        return _response()
+
+
+class _StreamingProvider:
+    """A provider whose only answer is a stream that finishes at once."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Route, object, object]] = []
+
+    async def stream(self, route, request, context):
+        self.calls.append((route, request, context))
+        yield StreamEvent(
+            kind=StreamEventKind.FINISH,
+            sequence=0,
+            invocation_id=context.invocation_id or "",
+            finish_reason=FinishReason.STOP,
+        )
+
+
+def _service(provider, *, routes=None, **overrides) -> InferenceService:
+    return InferenceService(ModelRegistry(routes or (_route(),)), provider, **overrides)
+
+
+def _fresh_limiter(requests: int = 1) -> RateLimiter:
+    """A limiter whose clock a test can advance, shared by the service-level tests."""
+    return RateLimiter(requests=requests, window_seconds=60, clock=_Clock())
+
+
+async def test_a_rate_limited_caller_is_refused_before_any_provider_is_called():
+    """The decision is taken at the entry, so a refused request costs nothing upstream."""
+    provider = _EchoProvider()
+    service = _service(provider, rate_limiter=_fresh_limiter())
+
+    await service.invoke(_request(), namespace="cred-a")
+
+    with pytest.raises(ResourceExhaustedError) as refused:
+        await service.invoke(_request(), namespace="cred-a")
+
+    assert refused.value.reason is ErrorReason.RATE_LIMITED
+    assert refused.value.http_status == 429
+    assert len(provider.calls) == 1
+
+
+async def test_a_rate_limit_is_never_walked_to_another_route():
+    """The gateway's own limit belongs to the caller, and the walk must not see it.
+
+    ``is_fallback_eligible`` treats ``RATE_LIMITED`` as route-local on purpose: an
+    *upstream's* rate limit belongs to the route that answered it, and another route
+    is not necessarily limited. The gateway's own limit follows the caller, so
+    raising it inside the walk would make the gateway try every configured provider
+    to escape a limit that would refuse it at each of them.
+    """
+    provider = _EchoProvider()
+    service = _service(
+        provider,
+        routes=(_route("primary"), _route("fallback")),
+        rate_limiter=_fresh_limiter(),
+    )
+
+    await service.invoke(_request(), namespace="cred-a")
+    with pytest.raises(ResourceExhaustedError):
+        await service.invoke(_request(), namespace="cred-a")
+
+    assert [call[0].model_id for call in provider.calls] == ["primary"]
+
+
+async def test_one_callers_rate_limit_does_not_refuse_another():
+    provider = _EchoProvider()
+    service = _service(provider, rate_limiter=_fresh_limiter())
+
+    await service.invoke(_request(), namespace="cred-a")
+    with pytest.raises(ResourceExhaustedError):
+        await service.invoke(_request(), namespace="cred-a")
+
+    await service.invoke(_request(), namespace="cred-b")
+
+    assert len(provider.calls) == 2
+
+
+async def test_a_tenants_simultaneous_invocations_are_bounded():
+    """The second invocation of a one-slot tenant waits rather than reaching upstream."""
+    provider = _BlockingProvider()
+    service = _service(
+        provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4)
+    )
+
+    first = asyncio.create_task(
+        service.invoke(_request(), namespace="cred-a", tenant="tenant-a")
+    )
+    await asyncio.wait_for(provider.entered.wait(), timeout=5.0)
+    second = asyncio.create_task(
+        service.invoke(_request(), namespace="cred-b", tenant="tenant-a")
+    )
+    await _yield_times()
+
+    assert not second.done()
+    assert len(provider.calls) == 1
+
+    provider.release.set()
+    await asyncio.gather(first, second)
+
+
+async def test_one_tenants_bound_does_not_hold_another_back():
+    """Two credentials of two tenants are two principals for this bound."""
+    provider = _BlockingProvider()
+    service = _service(
+        provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4)
+    )
+
+    first = asyncio.create_task(
+        service.invoke(_request(), namespace="cred-a", tenant="tenant-a")
+    )
+    await asyncio.wait_for(provider.entered.wait(), timeout=5.0)
+    second = asyncio.create_task(
+        service.invoke(_request(), namespace="cred-b", tenant="tenant-b")
+    )
+    await _settle(lambda: len(provider.calls) == 2)
+
+    provider.release.set()
+    await asyncio.gather(first, second)
+
+
+async def test_a_tenant_slot_is_released_when_the_invocation_ends():
+    """A leaked slot would refuse the tenant's next invocation, which this would catch."""
+    provider = _EchoProvider()
+    service = _service(
+        provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=0)
+    )
+
+    for _ in range(3):
+        await service.invoke(_request(), namespace="cred-a", tenant="tenant-a")
+
+    assert len(provider.calls) == 3
+
+
+async def test_a_streamed_invocation_is_admitted_too():
+    """The streaming entry point takes the same decisions as the non-streaming ones."""
+    provider = _StreamingProvider()
+    service = _service(
+        provider,
+        rate_limiter=_fresh_limiter(),
+        tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=0),
+    )
+
+    stream = service.invoke_stream(_request(), namespace="cred-a", tenant="tenant-a")
+    assert [event async for event in stream]
+
+    with pytest.raises(ResourceExhaustedError) as refused:
+        async for _ in service.invoke_stream(
+            _request(), namespace="cred-a", tenant="tenant-a"
+        ):
+            pass
+
+    assert refused.value.reason is ErrorReason.RATE_LIMITED
+    assert len(provider.calls) == 1
