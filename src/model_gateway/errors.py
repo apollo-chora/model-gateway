@@ -1,4 +1,4 @@
-"""Gateway error taxonomy shared by the HTTP and gRPC layers (PRD 5.4, 9.5, 14, 15).
+"""Gateway error taxonomy shared by the HTTP and gRPC layers.
 
 Every failure the gateway reports to a caller is a :class:`GatewayError`. One
 carries three things and nothing else:
@@ -13,7 +13,7 @@ carries three things and nothing else:
     Optional structured extras, each value sanitised when the error is
     constructed. The mapping is read-only.
 
-Each category of failure in PRD section 5.4 is a class with a fixed
+Each category of failure is a class with a fixed
 ``http_status`` and ``grpc_code``, so the two northbound transports translate a
 failure by reading those properties rather than by matching exception types::
 
@@ -32,8 +32,8 @@ its own status type, for example ``getattr(grpc.StatusCode, error.grpc_code)``.
 
 Sanitisation
 ------------
-Error messages are sanitised and carry stable machine-readable reasons (PRD
-5.4). :func:`sanitise_text` removes the upstream-identifying shapes it knows —
+Error messages are sanitised and carry stable machine-readable reasons.
+:func:`sanitise_text` removes the upstream-identifying shapes it knows —
 provider stack markers, credentials in an assigned or bearer form, and URLs —
 and it runs on every string this module publishes. :func:`normalise_exception`
 converts an arbitrary exception into an internal or unavailable gateway error
@@ -49,10 +49,10 @@ upstream text to a caller. Build messages from gateway vocabulary, and pass
 upstream text only through :func:`normalise_exception`, which does not echo it
 at all.
 
-That places a requirement on the observability work of PRD section 17.
+That places a requirement on the observability work.
 :func:`normalise_exception` retains the original exception as ``__cause__``, so
 the provider's own message — and any prompt, response or credential embedded in
-it — stays reachable through the exception chain. PRD section 17 forbids
+it — stays reachable through the exception chain. The logging policy forbids
 logging prompts, responses and credentials by default, so the logging layer must
 not format exception chains by default: it logs the gateway error's own
 ``reason`` and sanitised ``message``, and the chain only behind an explicit
@@ -108,7 +108,7 @@ _URL = re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s'\"<>()]+", re.IGNORECASE)
 
 @unique
 class ErrorReason(StrEnum):
-    """Stable machine-readable reasons a caller can switch on (PRD 5.4).
+    """Stable machine-readable reasons a caller can switch on.
 
     These values are part of the public contract: a value is never renamed and
     never reused for a different meaning. Reasons are finer grained than
@@ -138,7 +138,7 @@ class ErrorReason(StrEnum):
 
 @unique
 class GrpcStatus(StrEnum):
-    """The standard gRPC status names this gateway uses (PRD 5.4).
+    """The standard gRPC status names this gateway uses.
 
     Values are the status names exactly as gRPC defines them, so the gRPC
     servicer can map a name onto its own status type without a lookup table.
@@ -198,7 +198,7 @@ def sanitise_text(text: str) -> str:
 
 
 class GatewayError(Exception):
-    """Base class for every error the gateway reports to a caller (PRD 5.4).
+    """Base class for every error the gateway reports to a caller.
 
     The default category is internal, so a subclass that forgets to declare a
     transport mapping fails closed onto 500/``INTERNAL`` rather than onto
@@ -368,7 +368,7 @@ class NotFoundError(GatewayError):
 
 
 class ModelNotFoundError(NotFoundError):
-    """The requested public model ID is not one the gateway exposes (PRD 10).
+    """The requested public model ID is not one the gateway exposes.
 
     The reason set is declared fresh as ``MODEL_NOT_FOUND`` rather than
     inherited: a caller can tell a missing public model ID from a missing
@@ -387,7 +387,7 @@ class ResourceExhaustedError(GatewayError):
     rejection, and ``CONCURRENCY_LIMIT_EXCEEDED`` for a rejection caused by the
     in-flight request count. They share a transport status because the caller's
     remedy is the same shape in both cases — wait and retry — while the reason
-    keeps the two measurable separately (PRD 17).
+    keeps the two measurable separately.
     """
 
     default_reason: ClassVar[ErrorReason] = ErrorReason.RATE_LIMITED
@@ -406,7 +406,7 @@ class PayloadTooLargeError(GatewayError):
     concurrency refusals — that is the status gRPC itself reports for a message over
     its receive bound, so the two transports agree on what happened. The HTTP status
     is its own: 413 is the standard code for the condition, and a caller's retry
-    logic keys on the status rather than on the reason (PRD sections 5.4 and 14).
+    logic keys on the status rather than on the reason.
     """
 
     default_reason: ClassVar[ErrorReason] = ErrorReason.PAYLOAD_TOO_LARGE
@@ -425,7 +425,7 @@ class FailedPreconditionError(GatewayError):
 
 
 class DeadlineExceededError(GatewayError):
-    """The invocation deadline expired before completion: 504 / DEADLINE_EXCEEDED (PRD 15)."""
+    """The invocation deadline expired before completion: 504 / DEADLINE_EXCEEDED."""
 
     default_reason: ClassVar[ErrorReason] = ErrorReason.DEADLINE_EXCEEDED
     allowed_reasons: ClassVar[frozenset[ErrorReason]] = frozenset({ErrorReason.DEADLINE_EXCEEDED})
@@ -466,7 +466,7 @@ class MalformedResponseError(GatewayError):
     invocation; a malformed answer is a property of one provider's response, so
     another eligible route may well answer correctly. The reliability layer
     classifies this accordingly: not retried on the route that just answered
-    wrongly, but eligible for a fallback (PRD section 11.2).
+    wrongly, but eligible for a fallback.
 
     It is its own category rather than a reason on :class:`InternalError`,
     because widening that category would make every gateway defect
@@ -490,7 +490,7 @@ class MalformedResponseError(GatewayError):
 
 
 class CapabilityError(GatewayError):
-    """A provider cannot serve a requested capability: 422 / FAILED_PRECONDITION (PRD 9.5).
+    """A provider cannot serve a requested capability: 422 / FAILED_PRECONDITION.
 
     Raised when the selected route cannot honour tools, images, system
     instructions, structured-output requirements or streaming. Silently dropping
@@ -536,8 +536,8 @@ def normalise_exception(
     the returned error carries a fixed, gateway-authored message, so the
     provider's message, type name and traceback cannot leak. The original
     exception is attached as ``__cause__``, so a log record that formats the
-    exception chain still sees everything — which is exactly why PRD section 17
-    forbids logging prompts, responses and credentials by default, and why the
+    exception chain still sees everything — which is exactly why the logging
+    policy forbids logging prompts, responses and credentials by default, and why the
     logging layer must not format exception chains by default either. Log the
     gateway error's own ``reason`` and sanitised ``message``; reach the chain
     only behind an explicit opt-in that accepts the risk.

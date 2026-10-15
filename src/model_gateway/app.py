@@ -8,21 +8,21 @@ sanitised body.
 
 The registry is built here, before the application is handed to the server, so
 that configuration the gateway cannot run with fails at startup rather than on
-the first request (PRD sections 6 and 21). Nothing is resolved lazily: a
+the first request. Nothing is resolved lazily: a
 deployment whose routes are malformed does not start.
 
 When no service is injected, the factory builds the production one — the
-LiteLLM binding of PRD section 9 over the registry's routes, with the attempt
+LiteLLM binding over the registry's routes, with the attempt
 budget from ``Settings`` — so a process started with configuration alone
 actually calls upstream. An injected service is still used verbatim: tests and
 callers bind the provider they want, naming the deterministic
-:class:`~model_gateway.providers.MockProvider` when they need the stand-in
-(PRD section 20). There is no configuration flag that enables the mock: an
+:class:`~model_gateway.providers.MockProvider` when they need the stand-in.
+There is no configuration flag that enables the mock: an
 operator cannot turn fake inference on by accident, and cannot turn it on on
 purpose either.
 
 The gateway core never names a provider, so the binding is swappable here without
-touching routing, policy or the public contract (PRD sections 9 and 23).
+touching routing, policy or the public contract.
 """
 
 import orjson
@@ -86,7 +86,7 @@ controls is not a reason to refuse to start — that route is inert here. The
 image operation was absent from this set only because it had no binding, and a
 binding for it now exists, so its routes are checked like the others: an image
 dialect whose HTTP path has not been verified is refused at startup rather
-than on the first caller (PRD sections 6.2 and 14.1).
+than on the first caller.
 """
 
 
@@ -96,7 +96,7 @@ def _ensure_binding_can_run(registry: ModelRegistry) -> None:
     The binding refuses such a route at the attempt too, and this is not a
     duplicate of that check: a deployment whose configuration the transport
     controls cannot survive should not reach the point of serving requests at
-    all (PRD sections 6, 14.1 and 21). Every operation the binding runs is
+    all. Every operation the binding runs is
     checked — the text, embeddings and image operations today — so no route
     this process would actually serve is unusable at startup and discoverable
     only when a caller arrives. An operation with no binding is not checked,
@@ -131,7 +131,7 @@ def _ensure_editing_is_not_advertised(registry: ModelRegistry) -> None:
     and a route declaring the ``editing`` capability advertises an operation
     this process will never serve. The refusal says editing is not
     implemented, rather than that this route cannot serve it, because no
-    route can (PRD sections 4.6, 6.2 and 9.5).
+    route can.
     """
     for model in registry.list_models():
         if model.operation is not Operation.IMAGE:
@@ -158,7 +158,7 @@ def sink_for(storage: UsageStorage) -> AccountingSink:
     the default standalone deployment and is sufficient for one instance.
 
     The durable modes are named by the settings vocabulary but not
-    implemented here: they need configured persistence (§13), which this slice
+    implemented here: they need configured persistence, which this slice
     does not presume. An unrecognised mode is a configuration error, not a
     silent fall-back to memory, because a deployment that asks for durable
     records and loses them on restart is worse than one that refuses to start.
@@ -252,19 +252,18 @@ def create_app(
     are logically distinct bounds and separating them is a future refinement),
     ``PROVIDER_RETRY_COUNT`` and ``PROVIDER_RETRY_BACKOFF_MS`` as the retry
     schedule, and a limiter built from ``PROVIDER_MAX_CONCURRENT_REQUESTS``
-    (PRD section 9.6). The service anchors one deadline per invocation and
+    . The service anchors one deadline per invocation and
     hands each attempt the smaller of the configured timeout and what is left
-    of that deadline, so a retry can never outlive the caller's budget (PRD
-    section 15).
+    of that deadline, so a retry can never outlive the caller's budget.
 
     Building that binding also validates the routes it would run: a route of any
     operation the binding serves — text or embeddings — whose dialect it cannot
-    keep behind the transport controls fails the start (PRD section 14.1), and
+    keep behind the transport controls fails the start, and
     an image route that declares the ``editing`` capability fails it too,
     because the gateway's canonical image request carries no field for an image
-    input and editing is therefore not implemented at all (PRD sections 4.6,
-    6.2 and 9.5). An injected service is not validated, because it brings its
-    own provider and this factory cannot know what that provider can run.
+    input and editing is therefore not implemented at all. An injected service is
+    not validated, because it brings its own provider and this factory cannot know
+    what that provider can run.
 
     ``router`` is the application's own router, or ``None`` for one built here. It
     exists for a caller that wants to supply a router of its own; the default is a
@@ -310,7 +309,7 @@ def create_app(
 
     api_keys = ApiKeySet.from_settings(settings)
 
-    # The gRPC listener (PRD section 5) is built only when asked for, so a test
+    # The gRPC listener is built only when asked for, so a test
     # that builds an application never binds a port it does not intend to serve.
     # The production entrypoint asks for it; the factory's own default is the
     # HTTP-only application the tests drive. It starts and stops with the
@@ -327,7 +326,7 @@ def create_app(
     # application being reloaded and the second resets the first's routes — a later
     # request is then served by an earlier application's handlers, silently. A
     # deployment builds one application and is unaffected either way, so the
-    # default is the safe one rather than the shared one (PRD section 19).
+    # default is the safe one rather than the shared one.
     app = Application(router=router if router is not None else Router())
     # Appended before the auth middleware so it is the outer one: a refusal raised
     # by authentication is then still inside the caller's trace, which is what an
@@ -342,7 +341,7 @@ def create_app(
     )
     # Appended after authentication so an unidentified caller is told that it is
     # unidentified rather than something about this deployment's configuration.
-    # Neither check reads the body, so the order costs nothing (PRD section 14).
+    # Neither check reads the body, so the order costs nothing.
     app.middlewares.append(create_body_limit_middleware(settings.max_request_body_bytes))
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/readyz", readyz)
