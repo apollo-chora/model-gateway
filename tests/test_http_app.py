@@ -30,7 +30,7 @@ from model_gateway.domain import (
 )
 from model_gateway.inference import InferenceService
 from model_gateway.limits import RateLimiter, TenantConcurrencyLimiter
-from model_gateway.registry import ModelRegistry
+from model_gateway.registry import PUBLIC_MODEL_IDS, ModelRegistry
 from model_gateway.reliability import ConcurrencyLimiter
 
 SECRET_KEY = "sk-upstream-secret-key"
@@ -102,7 +102,7 @@ class FakeDualProvider(FakeTextProvider):
     async def embed(self, route: Route, request, context) -> EmbeddingResponse:
         self.embedding_calls += 1
         return EmbeddingResponse(
-            model=request.model,
+            model=PUBLIC_MODEL_IDS[route.operation],
             upstream_model=route.model_id,
             data=tuple(
                 Embedding(index=index, values=EMBEDDING_VECTOR)

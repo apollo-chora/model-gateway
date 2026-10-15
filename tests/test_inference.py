@@ -53,7 +53,6 @@ from model_gateway.errors import (
     FailedPreconditionError,
     InternalError,
     InvalidArgumentError,
-    ModelNotFoundError,
     PermissionDeniedError,
     ResourceExhaustedError,
     UnauthenticatedError,
@@ -191,45 +190,52 @@ async def test_invoke_reports_one_attempt_and_no_fallback():
 
 
 # ---------------------------------------------------------------------------
-# Resolving the public model ID
+# Resolving the operation from the transport
 # ---------------------------------------------------------------------------
 
 
-async def test_invoke_resolves_an_unknown_model_id_to_model_not_found():
+async def test_invoke_ignores_an_unknown_model_id():
     inference = service((route(),))
 
-    with pytest.raises(ModelNotFoundError) as error:
-        await inference.invoke(request(model="gpt-sunburst"))
+    result = await inference.invoke(request(model="gpt-sunburst"))
 
-    assert error.value.reason is ErrorReason.MODEL_NOT_FOUND
-    assert error.value.http_status == 404
+    assert result.model == "text-default"
 
 
-async def test_invoke_reaches_no_provider_for_an_unknown_model_id():
+async def test_invoke_reaches_the_provider_with_the_text_route_for_an_unknown_model_id():
     provider = MockProvider()
     inference = InferenceService(ModelRegistry((route(),)), provider)
 
-    with pytest.raises(ModelNotFoundError):
-        await inference.invoke(request(model="gpt-sunburst"))
+    result = await inference.invoke(request(model="gpt-sunburst"))
 
-    assert provider.calls == []
+    assert len(provider.calls) == 1
+    route_, request_, _ = provider.calls[0]
+    assert route_.operation is Operation.TEXT
+    assert request_.model == "gpt-sunburst"
+    assert result.model == "text-default"
 
 
-async def test_invoke_refuses_a_public_id_whose_operation_is_unconfigured():
+async def test_invoke_ignores_a_public_id_of_an_unconfigured_operation():
     inference = service((route(),))
 
-    with pytest.raises(ModelNotFoundError):
-        await inference.invoke(request(model="image-default"))
+    result = await inference.invoke(request(model="image-default"))
+
+    assert result.model == "text-default"
 
 
-async def test_invoke_never_passes_a_callers_model_name_to_the_provider():
+async def test_invoke_never_lets_a_callers_model_name_choose_the_route():
     provider = MockProvider()
     inference = InferenceService(ModelRegistry((route(),)), provider)
 
-    with pytest.raises(ModelNotFoundError):
-        await inference.invoke(request(model="https://unconfigured.example/v1/internal-model"))
+    result = await inference.invoke(
+        request(model="https://unconfigured.example/v1/internal-model")
+    )
 
-    assert provider.calls == []
+    assert len(provider.calls) == 1
+    route_, request_, _ = provider.calls[0]
+    assert route_.operation is Operation.TEXT
+    assert request_.model == "https://unconfigured.example/v1/internal-model"
+    assert result.model == "text-default"
 
 
 # ---------------------------------------------------------------------------

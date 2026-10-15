@@ -110,9 +110,13 @@ class Embedding:
 class EmbeddingRequest:
     """One canonical embeddings invocation.
 
-    ``model`` is the public model ID, never an upstream model name, for the same
-    reason as an invocation request: the route resolver decides which upstream
-    serves it and a caller-supplied name must not reach an unconfigured endpoint.
+    ``model`` is the public model ID the caller named, or ``None`` when it named
+    none. It is never an upstream model name, and it is not what selects the
+    routes: the operation is resolved from the transport the call arrived on,
+    and the routes configured for the embeddings operation serve it. A stated
+    model is carried for the caller's own correlation and is ignored for
+    routing, so a caller-supplied model name cannot reach an unconfigured
+    endpoint.
 
     ``input`` is the texts to embed, in order, and must carry at least one of
     them: an embedding request with nothing to embed has no canonical
@@ -132,15 +136,15 @@ class EmbeddingRequest:
     immutable JSON object, never forwarded to the model or the provider.
     """
 
-    model: str
     input: tuple[str, ...]
     dimensions: int | None = None
     encoding_format: str | None = None
     user: str | None = None
     metadata: Mapping[str, object] | None = None
+    model: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "model", as_required_text("model", self.model))
+        object.__setattr__(self, "model", as_optional_text("model", self.model))
         object.__setattr__(self, "input", _as_input("input", self.input))
         object.__setattr__(
             self,
@@ -172,7 +176,7 @@ class EmbeddingRequest:
         reject_unknown_keys(where, payload, _REQUEST_KEYS)
 
         return cls(
-            model=as_required_text(f"{where} 'model'", payload.get("model")),
+            model=as_optional_text(f"{where} 'model'", payload.get("model")),
             input=_as_input(f"{where} 'input'", payload.get("input")),
             dimensions=as_optional_int(
                 f"{where} 'dimensions'", payload.get("dimensions"), minimum=1
@@ -189,10 +193,11 @@ class EmbeddingRequest:
 class EmbeddingResponse:
     """The canonical result of one embeddings invocation.
 
-    ``model`` is the public model ID the caller asked for and ``upstream_model``
-    the route's own model ID, reported separately because a fallback may have
-    served it. ``data`` holds one vector per input text, in
-    input order, and ``Embedding.index`` states that position explicitly.
+    ``model`` is the public model ID of the embeddings operation, stated by the
+    gateway rather than by the caller, and ``upstream_model`` the route's own
+    model ID, reported separately because a fallback may have served it. ``data``
+    holds one vector per input text, in input order, and ``Embedding.index``
+    states that position explicitly.
 
     ``usage`` is the token accounting of the call, and ``invocation_id`` the
     identifier of the invocation this response belongs to, so a caller can

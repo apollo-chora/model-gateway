@@ -198,6 +198,7 @@ from model_gateway.errors import (
 from model_gateway.providers._litellm import litellm, openai
 from model_gateway.providers.base import AttemptContext
 from model_gateway.providers.litellm_translation import map_litellm_error
+from model_gateway.registry import PUBLIC_MODEL_IDS
 from model_gateway.security.transport import (
     attempt_timeout,
     build_async_client,
@@ -727,7 +728,7 @@ def _from_litellm_image(
     _reject_unrepresentable_image_response(response)
     try:
         return ImageResponse(
-            model=request.model,
+            model=PUBLIC_MODEL_IDS[route.operation],
             upstream_model=route.model_id,
             created=int(time.time()),
             data=tuple(_generated_image_from(item) for item in _image_entries(response)),

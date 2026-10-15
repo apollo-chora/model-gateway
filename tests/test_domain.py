@@ -1308,6 +1308,26 @@ def test_request_requires_a_model() -> None:
         request(model="")
 
 
+def test_request_defaults_to_no_model() -> None:
+    invocation = request(model=None)
+
+    assert invocation.model is None
+
+
+def test_request_parses_a_document_with_no_model() -> None:
+    parsed = InvocationRequest.from_dict(
+        {"messages": [{"role": "user", "content": []}]}
+    )
+
+    assert parsed.model is None
+    assert parsed == InvocationRequest(messages=(Message(role=Role.USER),))
+
+
+def test_request_refuses_an_empty_model_in_a_document() -> None:
+    with pytest.raises(ValueError, match="'model' must not be empty"):
+        InvocationRequest.from_dict({"model": "", "messages": []})
+
+
 def test_request_requires_at_least_one_message() -> None:
     with pytest.raises(ValueError, match="at least one message"):
         request(messages=())

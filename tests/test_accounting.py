@@ -44,7 +44,7 @@ from model_gateway.http.chat import register_chat_routes
 from model_gateway.http.embeddings import register_embeddings_routes
 from model_gateway.http.errors import register_error_handlers
 from model_gateway.inference import InferenceService
-from model_gateway.registry import ModelRegistry
+from model_gateway.registry import PUBLIC_MODEL_IDS, ModelRegistry
 from model_gateway.security.api_keys import ApiKeySet
 
 
@@ -984,7 +984,7 @@ class _EmbeddingProvider:
 
         self.calls.append((route, request, context))
         return EmbeddingResponse(
-            model=request.model,
+            model=PUBLIC_MODEL_IDS[route.operation],
             upstream_model=route.model_id,
             data=tuple(
                 Embedding(index=index, values=(0.1, 0.2)) for index, _ in enumerate(request.input)
@@ -1005,7 +1005,7 @@ class _ImageProvider:
 
         self.calls.append((route, request, context))
         return ImageResponse(
-            model=request.model,
+            model=PUBLIC_MODEL_IDS[route.operation],
             upstream_model=route.model_id,
             created=0,
             data=(GeneratedImage(b64_json="Zm9v"),),

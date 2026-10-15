@@ -34,7 +34,7 @@ from model_gateway.errors import (
 )
 from model_gateway.inference import InferenceService
 from model_gateway.providers.base import AttemptContext, ImageProvider
-from model_gateway.registry import ModelRegistry
+from model_gateway.registry import PUBLIC_MODEL_IDS, ModelRegistry
 from model_gateway.reliability import ConcurrencyLimiter
 
 PAYLOAD = "aW1hZ2UtYnl0ZXM="
@@ -88,7 +88,7 @@ def response_for(
 ) -> ImageResponse:
     """The canonical answer a provider would build for this attempt."""
     return ImageResponse(
-        model=request_.model,
+        model=PUBLIC_MODEL_IDS[route_.operation],
         upstream_model=route_.model_id,
         created=1700000000,
         data=data if data is not None else images(request_.n or 1),
@@ -160,23 +160,25 @@ def build(
 class TestTheModelAndTheCapability:
     """What is refused before a provider is called, and in which order."""
 
-    async def test_an_unknown_model_is_a_model_not_found_error(self) -> None:
+    async def test_an_unknown_model_is_ignored_and_the_operation_serves_it(self) -> None:
+        provider = FakeImageProvider(response_for)
+
+        result = await build((route(),), provider).generate(request(model="no-such-model"))
+
+        assert result.model == PUBLIC_MODEL
+        assert len(provider.calls) == 1
+        assert provider.calls[0][1].model == "no-such-model"
+
+    async def test_the_operations_routes_are_resolved_before_the_providers_capability_is_asked(
+        self,
+    ) -> None:
+        """An unconfigured operation is refused as that, whatever the provider can do."""
         provider = FakeImageProvider(response_for)
 
         with pytest.raises(ModelNotFoundError):
-            await build((route(),), provider).generate(request(model="no-such-model"))
+            await build((), provider).generate(request(model="no-such-model"))
 
         assert provider.calls == []
-
-    async def test_the_model_is_resolved_before_the_providers_capability_is_asked(
-        self,
-    ) -> None:
-        provider = FakeTextProvider()
-
-        with pytest.raises(ModelNotFoundError):
-            await build((route(),), provider).generate(request(model="no-such-model"))
-
-        assert provider.calls == 0
 
     async def test_a_provider_that_cannot_generate_is_refused(self) -> None:
         with pytest.raises(CapabilityError) as error:
@@ -258,7 +260,7 @@ class TestTheHappyPath:
             route_: Route, request_: ImageRequest, context: AttemptContext
         ) -> ImageResponse:
             return ImageResponse(
-                model=request_.model,
+                model=PUBLIC_MODEL_IDS[route_.operation],
                 upstream_model=route_.model_id,
                 created=1700000000,
                 data=images(1),

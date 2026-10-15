@@ -278,11 +278,12 @@ class TestTheRequestBoundary:
 
         assert "truncate" in (await response.json())["message"]
 
-    async def test_a_missing_model_is_refused(self, client) -> None:
+    async def test_a_missing_model_is_served(self, client, provider) -> None:
         response = await post_generations(client, {"prompt": "A futuristic city"})
 
-        assert response.status == 400
-        assert (await response.json())["reason"] == "invalid_request"
+        assert response.status == 200
+        (_, request) = provider.calls[0]
+        assert request.model is None
 
     async def test_a_missing_prompt_is_refused(self, client) -> None:
         response = await post_generations(client, {"model": PUBLIC_MODEL})
@@ -354,12 +355,14 @@ class TestTheRequestBoundary:
 class TestCapabilityRefusals:
     """A capability the route does not have is refused with the taxonomy's reason."""
 
-    async def test_an_unknown_model_is_a_model_not_found_error(self, client, provider) -> None:
+    async def test_an_unknown_model_is_ignored_and_the_request_is_served(
+        self, client, provider
+    ) -> None:
         response = await post_generations(client, payload(model="no-such-model"))
 
-        assert response.status == 404
-        assert (await response.json())["reason"] == "model_not_found"
-        assert provider.calls == []
+        assert response.status == 200
+        (_, request) = provider.calls[0]
+        assert request.model == "no-such-model"
 
     async def test_a_provider_that_cannot_generate_is_refused(self) -> None:
         app = build_app(FakeTextProvider())

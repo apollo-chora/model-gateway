@@ -241,6 +241,16 @@ async def test_each_model_carries_the_operation_its_public_id_names():
     }
 
 
+def test_the_operation_enum_carries_the_grounded_search_member():
+    """The enum reserves a member for the grounded search operation, for future use.
+
+    The member is part of the published contract's vocabulary: a caller written
+    against gateway.v1 reads it, and its number is stable because field numbers
+    and enum values are never reused or renumbered once served.
+    """
+    assert pb.OPERATION_GROUNDED_SEARCH == 4
+
+
 async def test_a_route_declaring_no_capabilities_advertises_an_empty_set():
     registry = ModelRegistry(
         (make_route(Operation.TEXT, "upstream-text", capabilities=frozenset()),)

@@ -11,6 +11,7 @@ from dataclasses import replace
 
 import pytest
 
+from model_gateway.config.routes import Operation
 from model_gateway.domain import IdempotencyStatus, InvocationRequest
 from model_gateway.errors import IdempotencyConflictError
 from model_gateway.idempotency import (
@@ -19,6 +20,7 @@ from model_gateway.idempotency import (
     request_fingerprint,
     settle,
 )
+from model_gateway.registry import PUBLIC_MODEL_IDS
 
 
 def request(**overrides) -> InvocationRequest:
@@ -53,7 +55,7 @@ def answered(request: InvocationRequest):
 
     return replace(
         InvocationResponse(
-            model=request.model,
+            model=PUBLIC_MODEL_IDS[Operation.TEXT],
             upstream_model="upstream-text",
             content=(TextPart("hello"),),
             finish_reason=FinishReason.STOP,
@@ -134,10 +136,9 @@ def test_the_payload_states_exactly_which_fields_participate():
         "tools",
         "tool_choice",
         "response_modality",
-        "fallback_models",
         "tenant",
     }
-    for excluded in ("invocation_id", "idempotency_key", "metadata"):
+    for excluded in ("invocation_id", "idempotency_key", "metadata", "fallback_models"):
         assert excluded not in payload
 
 

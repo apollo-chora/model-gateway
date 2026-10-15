@@ -103,7 +103,6 @@ def fingerprint_payload(request: InvocationRequest) -> dict[str, Any]:
         "tools": [tool.to_dict() for tool in request.tools],
         "tool_choice": request.tool_choice.to_dict() if request.tool_choice is not None else None,
         "response_modality": request.response_modality.value,
-        "fallback_models": list(request.fallback_models),
         "tenant": request.tenant_id,
     }
 
@@ -113,12 +112,12 @@ def request_fingerprint(request: InvocationRequest) -> RequestFingerprint:
 
     Every field the answer depends on is fingerprinted: the model, the
     conversation, the instruction, the generation config, the tools and the tool
-    choice, the modality, the permitted fallbacks and the tenant the request acts
+    choice, the modality and the tenant the request acts
     under. The tenant is included because the same key under two tenants is two
     requests, and answering one from the other would leak an answer across a
     boundary the gateway is required to hold.
 
-    Three fields are deliberately excluded, each for a stated reason:
+    Four fields are deliberately excluded, each for a stated reason:
 
     * ``invocation_id`` — the gateway mints its own identifier and discards a
       provider's, so it is not a property of what the caller asked. Fingerprinting
@@ -129,6 +128,10 @@ def request_fingerprint(request: InvocationRequest) -> RequestFingerprint:
       cannot change the answer. This holds while ``FORWARDABLE_METADATA_KEYS``
       stays empty; a metadata key that becomes semantically consumed changes this
       fingerprint with that contract, not before it.
+    * ``fallback_models`` — the caller's permitted fallbacks no longer choose
+      anything: the operation is resolved from the transport and the configured
+      route order applies, so the field cannot change the answer and two requests
+      differing only in it are the same request.
     """
     digest = sha256(
         orjson.dumps(fingerprint_payload(request), option=orjson.OPT_SORT_KEYS)

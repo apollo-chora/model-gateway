@@ -7,8 +7,8 @@ with ``REPLAYED`` and the provider is called once across both, a retry carrying 
 freshly minted invocation identifier is still the same request, a key reused for
 a different payload reaches the provider again and is answered with the second
 answer, a request without a key never reaches the store, a failure is never
-recorded so a retry is allowed to retry, and an unknown model is still a
-model-not-found error even when the key has a cached record.
+recorded so a retry is allowed to retry, and an unknown model is ignored —
+served as a new request — even when the key has a cached record.
 """
 
 import asyncio
@@ -26,7 +26,6 @@ from model_gateway.domain import (
 )
 from model_gateway.errors import (
     IdempotencyConflictError,
-    ModelNotFoundError,
     UnavailableError,
 )
 from model_gateway.idempotency import (
@@ -222,8 +221,8 @@ async def test_a_failed_invocation_is_not_recorded() -> None:
     assert len(store) == 1
 
 
-async def test_an_unknown_model_is_still_model_not_found_with_a_cached_record() -> None:
-    """The model is resolved before the record is consulted, so the ordering holds."""
+async def test_an_unknown_model_is_ignored_even_when_the_key_has_a_cached_record() -> None:
+    """The operation comes from the transport, so an unknown model is served as a new request."""
     store = MemoryIdempotencyStore()
     provider = MockProvider(MockSpec(text="sunny in Paris"))
     gateway = service(store, provider)
@@ -231,10 +230,10 @@ async def test_an_unknown_model_is_still_model_not_found_with_a_cached_record() 
     await gateway.invoke(request())
     assert len(store) == 1
 
-    with pytest.raises(ModelNotFoundError):
-        await gateway.invoke(request(model="not-a-public-model"))
+    second = await gateway.invoke(request(idempotency_key="key-2", model="not-a-public-model"))
 
-    assert len(provider.calls) == 1
+    assert second.idempotency_status is IdempotencyStatus.NEW
+    assert len(provider.calls) == 2
 
 
 async def test_a_service_without_an_injected_store_deduplicates_from_its_own() -> None:

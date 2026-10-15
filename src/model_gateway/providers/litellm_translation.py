@@ -141,6 +141,7 @@ from model_gateway.providers._litellm import (
     litellm,
     openai,
 )
+from model_gateway.registry import PUBLIC_MODEL_IDS
 
 __all__ = [
     "from_litellm_chunk",
@@ -277,7 +278,7 @@ def from_litellm_response(
     _reject_unmappable(response, choice, message)
     raw_finish_reason = _raw_finish_reason(choice)
     return InvocationResponse(
-        model=request.model,
+        model=PUBLIC_MODEL_IDS[route.operation],
         upstream_model=route.model_id,
         invocation_id=request.invocation_id,
         content=_output(message),

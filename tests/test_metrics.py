@@ -279,7 +279,7 @@ async def test_an_invocation_the_gateway_refuses_is_counted_as_an_error():
     from model_gateway.errors import ModelNotFoundError
 
     metrics = Metrics()
-    service = _service(_EchoProvider(), metrics=metrics)
+    service = InferenceService(ModelRegistry(()), _EchoProvider(), metrics=metrics)
 
     with pytest.raises(ModelNotFoundError):
         await service.invoke(_request(model="not-a-model"))

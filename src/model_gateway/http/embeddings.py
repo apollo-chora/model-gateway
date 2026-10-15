@@ -20,7 +20,7 @@ order. An array is what the canonical request always carries, because ordering i
 part of the contract and a bare string would be an ambiguous one-element array.
 
 **The response is the documented shape.** ``object`` is ``list``, ``model`` is the
-public model ID the caller asked for, each entry of ``data`` carries
+public model ID of the embeddings operation, each entry of ``data`` carries
 ``object: "embedding"``, its ``index`` and its ``embedding``, and ``usage``
 carries ``prompt_tokens`` and ``total_tokens``. The gateway's own accounting —
 the invocation identifier, the upstream model, the attempt count — is
@@ -58,7 +58,6 @@ from model_gateway.domain.serialization import (
     as_object,
     as_optional_int,
     as_optional_text,
-    as_required_text,
     as_text,
     describe,
     reject_unknown_keys,
@@ -144,7 +143,7 @@ def embedding_request_from_payload(payload: object) -> EmbeddingRequest:
         body = as_object(where, payload)
         reject_unknown_keys(where, body, _REQUEST_KEYS)
         return EmbeddingRequest(
-            model=as_required_text(f"{where} 'model'", body.get("model")),
+            model=as_optional_text(f"{where} 'model'", body.get("model")),
             input=_as_input(f"{where} 'input'", body.get("input")),
             dimensions=as_optional_int(
                 f"{where} 'dimensions'", body.get("dimensions"), minimum=1

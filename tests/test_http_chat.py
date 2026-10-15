@@ -324,12 +324,13 @@ async def test_a_tool_call_answer_is_returned_with_null_content(client):
     assert choice["finish_reason"] == "tool_calls"
 
 
-async def test_an_unknown_model_is_a_model_not_found_error(client, provider):
+async def test_an_unknown_model_is_ignored_and_the_request_is_served(client, provider):
     response = await post(client, payload(model="no-such-model"))
 
-    assert response.status == 404
-    assert (await response.json())["reason"] == "model_not_found"
-    assert provider.calls == []
+    assert response.status == 200
+    assert (await response.json())["model"] == "text-default"
+    assert len(provider.calls) == 1
+    assert provider.calls[0][1].model == "no-such-model"
 
 
 async def test_a_streaming_request_is_served_as_server_sent_events():
@@ -408,8 +409,8 @@ async def test_a_streaming_request_with_a_provider_that_cannot_stream_is_refused
     assert provider.calls == []
 
 
-async def test_a_streaming_request_with_an_unknown_model_is_refused_before_the_stream_starts():
-    """A pre-stream refusal is an ordinary error response, not an SSE stream."""
+async def test_a_streaming_request_with_an_unknown_model_still_starts_the_stream():
+    """An unknown model is ignored, so the stream is served like any other."""
     provider = FakeStreamingProvider()
     app = build_app(provider)
     await app.start()
@@ -418,17 +419,16 @@ async def test_a_streaming_request_with_an_unknown_model_is_refused_before_the_s
     finally:
         await app.stop()
 
-    assert response.status == 404
-    assert (await response.json())["reason"] == "model_not_found"
-    assert provider.calls == []
+    assert response.status == 200
+    assert len(provider.calls) == 1
 
 
-async def test_an_unknown_model_is_a_model_not_found_error_even_without_a_streaming_provider():
-    """The model is resolved before streaming eligibility, so the refusal is about the model.
+async def test_a_streaming_request_is_refused_for_the_streaming_capability_not_the_model():
+    """The streaming refusal is about the provider's capability, whatever the model states.
 
-    A provider that cannot stream is refused only for a model that exists; a
-    request naming a model the gateway does not expose is a model-not-found
-    error, because that is the more accurate answer to the request.
+    The model is carried for the caller's own correlation and ignored for
+    routing, so the refusal a non-streaming provider produces names streaming
+    and is the same answer for a model the gateway does not expose.
     """
     provider = FakeTextProvider()  # not a streaming provider
     app = build_app(provider)
@@ -438,8 +438,8 @@ async def test_an_unknown_model_is_a_model_not_found_error_even_without_a_stream
     finally:
         await app.stop()
 
-    assert response.status == 404
-    assert (await response.json())["reason"] == "model_not_found"
+    assert response.status == 422
+    assert (await response.json())["reason"] == "unsupported_capability"
     assert provider.calls == []
 
 

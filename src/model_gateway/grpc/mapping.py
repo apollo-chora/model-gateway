@@ -367,7 +367,7 @@ def invocation_request_from_proto(request: pb.InvokeRequest, *, identity) -> Inv
     """
     try:
         return InvocationRequest(
-            model=request.model,
+            model=request.model or None,
             messages=tuple(
                 message_from_proto(f"messages[{index}]", message)
                 for index, message in enumerate(request.messages)
@@ -422,7 +422,7 @@ def embed_request_from_proto(request: pb.EmbedRequest) -> EmbeddingRequest:
     """
     try:
         return EmbeddingRequest(
-            model=request.model,
+            model=request.model or None,
             input=tuple(request.input),
             dimensions=request.dimensions if request.HasField("dimensions") else None,
             encoding_format=request.encoding_format or None,

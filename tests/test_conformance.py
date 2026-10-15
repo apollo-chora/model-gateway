@@ -553,8 +553,14 @@ async def test_an_upstream_failure_becomes_the_gateways_own_error_contract(
     assert "invalid_api_key" not in text
 
 
-async def test_an_unknown_model_reaches_no_upstream():
-    """An unknown model reaches no upstream, on the public path."""
+async def test_an_unknown_model_is_ignored_and_the_operation_serves_the_request():
+    """An unknown model is ignored: the transport's operation serves the request.
+
+    The stated model never selects the routes — the text operation's configured
+    routes serve the chat completions endpoint whatever the caller names — so the
+    upstream is reached and the answer reports the public model, not the name the
+    caller supplied.
+    """
     wire = UpstreamWire()
 
     async with _running(wire) as client:
@@ -566,8 +572,11 @@ async def test_an_unknown_model_reaches_no_upstream():
             headers=AUTHORIZATION,
         )
 
-    assert response.status == 404
-    assert wire.paths() == []
+    assert response.status == 200
+    body = await _json(response)
+    assert body["model"] == "text-default"
+    assert wire.paths() == ["/v1/chat/completions"]
+    assert wire.last_body()["model"] == "upstream-text"
 
 
 # --------------------------------------------------------------------------- #

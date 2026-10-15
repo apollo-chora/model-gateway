@@ -37,7 +37,7 @@ from model_gateway.inference import InferenceService
 from model_gateway.providers import MockProvider
 from model_gateway.providers.base import AttemptContext
 from model_gateway.providers.mock import MockEmbedSpec
-from model_gateway.registry import ModelRegistry
+from model_gateway.registry import PUBLIC_MODEL_IDS, ModelRegistry
 from model_gateway.security.api_keys import ApiKeySet
 
 KEY = "sk-gateway-test-key"
@@ -121,7 +121,7 @@ class FakeEmbeddingProvider:
     ) -> EmbeddingResponse:
         self.calls.append((route_, request, context))
         return EmbeddingResponse(
-            model=request.model,
+            model=PUBLIC_MODEL_IDS[route_.operation],
             upstream_model=route_.model_id,
             data=self._data if self._data is not None else _vectors(request),
             usage=Usage() if self._usage is None else self._usage,
@@ -324,16 +324,14 @@ async def test_embed_refuses_a_credential_that_matches_nothing():
     assert provider.calls == []
 
 
-async def test_embed_refuses_an_unknown_model_without_calling_the_provider():
+async def test_embed_ignores_an_unknown_model_and_calls_the_provider():
     provider = FakeEmbeddingProvider()
     async with served(service(provider), authenticator()) as stub:
-        with pytest.raises(grpc.aio.AioRpcError) as raised:
-            await call(stub, pb.EmbedRequest(model="no-such-model", input=["a"]))
+        response = await call(stub, pb.EmbedRequest(model="no-such-model", input=["a"]))
 
-    error = raised.value
-    assert error.code() is grpc.StatusCode.NOT_FOUND
-    assert payload(error)["reason"] == "model_not_found"
-    assert provider.calls == []
+    assert response.model == PUBLIC_MODEL
+    assert len(provider.calls) == 1
+    assert provider.calls[0][1].model == "no-such-model"
 
 
 async def test_embed_surfaces_a_provider_failure_as_its_own_status():

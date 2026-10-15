@@ -79,10 +79,14 @@ transport it arrives on. In order:
 2. **Body bound.** A request stating an oversized `Content-Length` is refused
    without reading a byte of it; a chunked body that states none is measured;
    the same configured value bounds the gRPC received message.
-3. **Model resolution.** The public model ID resolves onto its operation and
-   configured routes. An unknown ID is a model-not-found error — even when an
-   idempotency record exists for the key, and even when the caller is also over
-   its rate.
+3. **Operation resolution.** The operation is resolved from the transport the
+   call arrived on — the HTTP endpoint or the gRPC method — and the registry
+   resolves it onto that operation's configured routes. An operation with no
+   configured route is a model-not-found error — even when an idempotency
+   record exists for the key, and even when the caller is also over its rate.
+   A model ID the caller may state is carried for the caller's own correlation
+   and ignored for routing, so an unknown ID is refused nothing: it is simply
+   not what selects the routes.
 4. **Admission.** The per-client request-rate bucket and the per-tenant
    concurrency bound are checked. A refusal is raised here, before anything else
    the operation checks, and never from inside the retry loop.
@@ -91,8 +95,8 @@ transport it arrives on. In order:
    never expand them.
 6. **Streaming eligibility.** For a streaming request, the bound provider's
    streaming support is confirmed before any provider is called.
-7. **Idempotency.** The record is consulted after the model is resolved and
-   before any provider is called.
+7. **Idempotency.** The record is consulted after the operation's routes are
+   resolved and before any provider is called.
 8. **The walk.** The primary route is attempted; retryable failures retry the
    same route within its budget; fallback-eligible failures move to the next
    capability-eligible route.
@@ -278,8 +282,10 @@ a session cookie passes through.
 **Production must not serve unauthenticated inference.**
 `CHORA_ENVIRONMENT=production` refuses to start with authentication disabled.
 
-**An unknown public model ID cannot reach an unconfigured upstream endpoint.**
-The registry maps only the three fixed public model IDs onto configured routes.
+**A caller-supplied model ID cannot reach an unconfigured upstream endpoint.**
+The registry maps only the three fixed public model IDs onto configured routes,
+and the operation is resolved from the transport, so a stated model — known or
+not — is never what selects the routes.
 
 **The gateway terminates no TLS.** A deployment that needs it terminates it in
 front of both ports, which is also where an operator's own access control

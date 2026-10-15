@@ -202,6 +202,18 @@ class ModelRegistry:
         operation = self._operation_for(model_id)
         return self._routes_of(operation)
 
+    def routes_for_operation(self, operation: Operation) -> tuple[Route, ...]:
+        """The routes configured for one operation, primary first, without a model ID.
+
+        The inference layer resolves the operation from the transport — the HTTP
+        endpoint or the gRPC method that received the call — rather than from a
+        caller-supplied model, so this is the lookup it uses. Raises
+        :class:`~model_gateway.errors.ModelNotFoundError` when the operation has
+        no configured routes, so an absent optional capability stays disabled
+        rather than fatal to the others.
+        """
+        return self._routes_of(operation)
+
     def _operation_for(self, model_id: str) -> Operation:
         operation = _MODEL_BY_ID.get(model_id)
         if operation is None:

@@ -149,6 +149,14 @@ def test_absent_embed_metadata_stays_absent():
     assert embedding_request.metadata is None
 
 
+def test_an_empty_embed_model_is_mapped_to_none():
+    request = pb.EmbedRequest(model="", input=("first",))
+
+    embedding_request = mapping.embed_request_from_proto(request)
+
+    assert embedding_request.model is None
+
+
 def test_present_embed_metadata_reaches_the_canonical_request():
     request = pb.EmbedRequest(model=PUBLIC_MODEL, input=("first",))
     request.metadata_json = b'{"trace": "abc"}'
@@ -478,9 +486,23 @@ def test_absent_system_instruction_stays_absent():
 # --------------------------------------------------------------------------- #
 
 
-def test_an_empty_model_is_an_invalid_argument():
-    with pytest.raises(InvalidArgumentError, match="model"):
-        mapping.invocation_request_from_proto(invoke_request(model=""), identity=identity())
+def test_an_empty_model_is_mapped_to_none():
+    invocation = mapping.invocation_request_from_proto(
+        invoke_request(model=""), identity=identity()
+    )
+
+    assert invocation.model is None
+
+
+def test_an_unset_model_is_mapped_to_none():
+    invocation = mapping.invocation_request_from_proto(
+        pb.InvokeRequest(
+            messages=(user_message(),), response_modality=pb.RESPONSE_MODALITY_TEXT
+        ),
+        identity=identity(),
+    )
+
+    assert invocation.model is None
 
 
 def test_an_invocation_with_no_messages_is_an_invalid_argument():
