@@ -32,6 +32,7 @@ from model_gateway.grpc.identity import Authenticator
 from model_gateway.grpc.invoke import Invoke
 from model_gateway.grpc.list_models import ListModels
 from model_gateway.grpc.streaming import InvokeStream
+from model_gateway.grpc.tracing import continue_trace
 from model_gateway.registry import ModelRegistry
 from model_gateway.security.api_keys import ApiKeySet
 
@@ -136,7 +137,8 @@ class ModelGatewayServiceServicer(gateway_pb2_grpc.ModelGatewayServiceServicer):
         self._list_models = list_models
 
     async def Invoke(self, request, context):
-        return await self._invoke.invoke(request, context)
+        async with continue_trace(context):
+            return await self._invoke.invoke(request, context)
 
     async def InvokeStream(self, request, context):
         """Stream the chunks of one invocation.
@@ -147,11 +149,14 @@ class ModelGatewayServiceServicer(gateway_pb2_grpc.ModelGatewayServiceServicer):
         def`` that returns one is answered with an empty stream rather than an
         error — the caller is told nothing at all.
         """
-        async for chunk in self._invoke_stream.invoke_stream(request, context):
-            yield chunk
+        async with continue_trace(context):
+            async for chunk in self._invoke_stream.invoke_stream(request, context):
+                yield chunk
 
     async def Embed(self, request, context):
-        return await self._embed.embed(request, context)
+        async with continue_trace(context):
+            return await self._embed.embed(request, context)
 
     async def ListModels(self, request, context):
-        return await self._list_models.list_models(request, context)
+        async with continue_trace(context):
+            return await self._list_models.list_models(request, context)
