@@ -234,6 +234,7 @@ def create_app(
     registry: ModelRegistry | None = None,
     service: InferenceService | None = None,
     serve_grpc: bool = False,
+    router=None,
 ) -> Application:
     """Build the application, ready to be started by the server.
 
@@ -241,7 +242,8 @@ def create_app(
     used verbatim — tests and callers pass
     ``InferenceService(registry, provider)`` naming the provider this process
     should call upstream with. When no service is injected the factory builds
-    the production one: :class:`~model_gateway.providers.litellm_provider.LiteLLMProvider`
+    the production one:
+    :class:`~model_gateway.providers.litellm_provider.LiteLLMProvider`
     over the registry's routes, with the deployment's configured reliability
     policy — ``PROVIDER_TIMEOUT_SECONDS`` as both the invocation deadline and
     the per-attempt ceiling (one configured value plays both roles today; they
@@ -261,6 +263,14 @@ def create_app(
     input and editing is therefore not implemented at all (PRD sections 4.6,
     6.2 and 9.5). An injected service is not validated, because it brings its
     own provider and this factory cannot know what that provider can run.
+
+    ``router`` is the application's own router, or ``None`` for the framework's
+    default one. It exists for a caller that builds more than one application in
+    one process: the framework keys applications by their router's identity, so
+    two built on the default router are taken for one application being reloaded
+    and the second resets the first's routes. A deployment builds one
+    application, so it leaves this alone; a conformance suite that drives
+    several builds each its own.
     """
     settings = settings or Settings.from_env()
     configure_logging(settings.log_level)
@@ -309,7 +319,7 @@ def create_app(
         else None
     )
 
-    app = Application()
+    app = Application(router=router)
     # Appended before the auth middleware so it is the outer one: a refusal raised
     # by authentication is then still inside the caller's trace, which is what an
     # operator wants to see when the refusals are the thing under investigation.
