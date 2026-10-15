@@ -35,9 +35,10 @@ docker build -t model-gateway:local .
 docker run --rm -p 8080:8080 -p 9090:9090 --env-file .env model-gateway:local
 ```
 
-A container with no configuration starts and serves an empty model list — it is a
-working gateway with no providers, which is the honest state of a deployment that
-has not said what it can reach.
+A container with no configuration runs and serves an empty model list, and cannot
+serve inference — a missing environment file does not look like a crash, and it does
+not look like a working deployment either. A green `/healthz` says the process is the
+process and nothing about whether providers are configured; check `/v1/models`.
 
 Configuration is entirely environment variables: `TEXT_LLM_*` for the chat
 operation, `IMAGE_GEN_*` for images, `EMBEDDINGS_*` for embeddings, `GATEWAY_*` for
