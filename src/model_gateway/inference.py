@@ -545,7 +545,7 @@ class InferenceService:
         if self._rate_limiter is not None:
             self._rate_limiter.check(namespace)
 
-    def _tenant_slot(self, namespace: str, tenant: str | None):
+    def _tenant_slot(self, namespace: str, tenant: str | None, deadline: Deadline):
         """The per-tenant concurrency slot an invocation holds for its whole duration.
 
         Keyed on the tenant the credential is bound to, or on the credential
@@ -554,17 +554,20 @@ class InferenceService:
         of them from consuming the bound the others are entitled to — which a
         shared empty key would do.
 
-        The wait for a slot is bounded by the invocation's own budget, the same
-        number that becomes its deadline inside the walk: an invocation that cannot
-        be admitted within the time it has fails promptly rather than staying
-        resident holding its payload.
+        The wait for a slot is bounded by what is left of the invocation's
+        deadline, and that deadline is anchored before admission rather than after
+        it. One budget therefore covers the whole invocation — the queue wait and
+        everything the walk then does with it — instead of the wait being bounded
+        by one full timeout and the walk then starting a fresh budget of the same
+        length, which would let an invocation take twice the configured time from
+        the caller's point of view.
 
         A deployment that configured no bound gets a slot that holds nothing,
         rather than a ``None`` each call site has to remember to test.
         """
         if self._tenant_limiter is None:
             return _unbounded_slot()
-        return self._tenant_limiter.slot(tenant or namespace, self._attempt_timeout)
+        return self._tenant_limiter.slot(tenant or namespace, deadline.remaining())
 
     async def invoke(
         self,
@@ -624,10 +627,16 @@ class InferenceService:
         it is never recorded and reports ``NOT_APPLICABLE``.
         """
         routes = self._registry.routes_for(request.model)
+        # One deadline is anchored here, before admission, so the wait for a tenant
+        # slot draws from the same budget the walk then spends rather than from a
+        # full timeout of its own followed by a fresh one.
+        deadline = Deadline.after(self._attempt_timeout)
         started = time.monotonic()
         self._admit(namespace or "", tenant)
-        async with self._tenant_slot(namespace or "", tenant):
-            return await self._invoke_admitted(request, routes, namespace or "", started)
+        async with self._tenant_slot(namespace or "", tenant, deadline):
+            return await self._invoke_admitted(
+                request, routes, namespace or "", started, deadline
+            )
 
     async def _invoke_admitted(
         self,
@@ -635,6 +644,7 @@ class InferenceService:
         routes: tuple[Route, ...],
         namespace: str,
         started: float,
+        deadline: Deadline,
     ) -> InvocationResponse:
         """Serve an invocation that has been admitted, under the idempotency policy.
 
@@ -643,10 +653,13 @@ class InferenceService:
         follows — including the wait on another caller's idempotency claim, which is
         work this invocation is resident for — and the serving code does not have to
         be re-indented to say so.
+
+        ``deadline`` is the one anchored before admission, so the time the queue
+        wait consumed is time the walk no longer has.
         """
         key = request.idempotency_key
         if key is None:
-            response, route, state = await self._invoke_on(request, routes)
+            response, route, state = await self._invoke_on(request, routes, deadline)
             # The answer and its record carry one identifier, minted here when the
             # request did not already carry one: the record must name the
             # invocation the caller was told about, not a second one.
@@ -671,7 +684,7 @@ class InferenceService:
             return replace(response, idempotency_status=IdempotencyStatus.REPLAYED)
 
         try:
-            response, route, state = await self._invoke_on(request, routes)
+            response, route, state = await self._invoke_on(request, routes, deadline)
         except BaseException as error:
             await self._idempotency_store.fail(key, namespace, error)
             raise
@@ -883,6 +896,12 @@ class InferenceService:
         rather than as a stream that failed (PRD section 16).
         """
         routes = self._registry.routes_for(request.model)
+        # Admission comes first, before the streaming capability is asked: the
+        # caller's own limit is a fact about the caller and is the first thing to
+        # say, and a caller over its rate should learn that rather than a fact
+        # about the provider it happens to have asked.
+        deadline = Deadline.after(self._attempt_timeout)
+        self._admit(namespace or "", tenant)
         if not isinstance(self._provider, StreamingTextProvider):
             raise CapabilityError(
                 "this provider cannot stream a chat completion; the gateway does not answer a "
@@ -891,11 +910,10 @@ class InferenceService:
             )
         if request.invocation_id is None:
             request = replace(request, invocation_id=uuid4().hex)
-        self._admit(namespace or "", tenant)
         started = time.monotonic()
-        async with self._tenant_slot(namespace or "", tenant):
+        async with self._tenant_slot(namespace or "", tenant, deadline):
             facts = _StreamFacts()
-            stream = self._invoke_stream_on(request, routes, facts)
+            stream = self._invoke_stream_on(request, routes, facts, deadline=deadline)
             try:
                 try:
                     async for event in stream:
@@ -1001,6 +1019,12 @@ class InferenceService:
         does.
         """
         routes = self._registry.routes_for(request.model)
+        # Admission comes first, before the provider's capability and the request's
+        # own constraints are asked: the caller's limit is a fact about the caller
+        # and is the first thing to say, and a caller over its rate should learn
+        # that rather than a fact about the provider or the request it sent.
+        deadline = Deadline.after(self._attempt_timeout)
+        self._admit(namespace or "", tenant)
         if not isinstance(self._provider, EmbeddingProvider):
             raise CapabilityError(
                 "this provider cannot produce embeddings; the gateway does not answer an "
@@ -1015,10 +1039,9 @@ class InferenceService:
             caller_dimension=request.dimensions is not None,
         )
         _reject_unsupported_dimension(request, plan.primary)
-        self._admit(namespace or "", tenant)
         started = time.monotonic()
 
-        async with self._tenant_slot(namespace or "", tenant):
+        async with self._tenant_slot(namespace or "", tenant, deadline):
             invocation_id = uuid4().hex
 
             async def serve(
@@ -1032,7 +1055,9 @@ class InferenceService:
                     route,
                 )
 
-            result, route, state = await self._walk(request.model, plan, serve)
+            result, route, state = await self._walk(
+                request.model, plan, serve, deadline=deadline
+            )
             self._record(request, _outcome_of(result), route, state, namespace or "", started)
             return result
 
@@ -1109,12 +1134,15 @@ class InferenceService:
         the image request does not carry and the authenticated caller does.
         """
         routes = self._registry.routes_for(request.model)
+        # Admission comes first, before the provider's capability and the route's
+        # are asked, for the reason :meth:`embed` gives.
+        deadline = Deadline.after(self._attempt_timeout)
+        self._admit(namespace or "", tenant)
         _require_image_provider(self._provider)
         plan = _select_routes_for(routes, request.model, (Capability.GENERATION,))
-        self._admit(namespace or "", tenant)
         started = time.monotonic()
 
-        async with self._tenant_slot(namespace or "", tenant):
+        async with self._tenant_slot(namespace or "", tenant, deadline):
             invocation_id = uuid4().hex
 
             async def serve(
@@ -1128,12 +1156,14 @@ class InferenceService:
                     route,
                 )
 
-            result, route, state = await self._walk(request.model, plan, serve)
+            result, route, state = await self._walk(
+                request.model, plan, serve, deadline=deadline
+            )
             self._record(request, _outcome_of(result), route, state, namespace or "", started)
             return result
 
     async def _invoke_on(
-        self, request: InvocationRequest, routes: tuple[Route, ...]
+        self, request: InvocationRequest, routes: tuple[Route, ...], deadline: Deadline
     ) -> tuple[InvocationResponse, Route, InvocationState]:
         """Serve one text invocation from the configured route order, primary first.
 
@@ -1154,6 +1184,7 @@ class InferenceService:
             request.model,
             _select_routes(routes, request),
             self._text_serve(request),
+            deadline=deadline,
         )
         return result, answered_by, state
 
@@ -1162,6 +1193,8 @@ class InferenceService:
         model: str,
         plan: _RoutePlan,
         serve: _Serve[_Result],
+        *,
+        deadline: Deadline | None = None,
     ) -> tuple[_Result, Route, InvocationState]:
         """Walk one operation's route plan under one deadline and one retry loop.
 
@@ -1221,8 +1254,15 @@ class InferenceService:
         that cannot fit inside what is left of the deadline is not made either —
         see :func:`_back_off` — and the route is then treated as used up, so the
         invocation either falls back or reports the failure it already has.
+
+        ``deadline`` is the invocation's one deadline, anchored by the caller when
+        it admitted the invocation so that a queue wait draws from the same budget
+        as the walk. ``None`` anchors one here, which is what a caller that took no
+        admission decision wants and what the tests that drive the walk directly
+        rely on.
         """
-        deadline = Deadline.after(self._attempt_timeout)
+        if deadline is None:
+            deadline = Deadline.after(self._attempt_timeout)
         state = InvocationState()
         failure: BaseException | None = None
 
@@ -1412,7 +1452,12 @@ class InferenceService:
             )
 
     async def _invoke_stream_on(
-        self, request: InvocationRequest, routes: tuple[Route, ...], facts: "_StreamFacts"
+        self,
+        request: InvocationRequest,
+        routes: tuple[Route, ...],
+        facts: "_StreamFacts",
+        *,
+        deadline: Deadline | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Serve one streaming invocation from the configured route order.
 
@@ -1474,7 +1519,8 @@ class InferenceService:
         is how the caller of this method knows there is no answer to account for.
         """
         plan = _select_routes(routes, request)
-        deadline = Deadline.after(self._attempt_timeout)
+        if deadline is None:
+            deadline = Deadline.after(self._attempt_timeout)
         state = InvocationState()
         failure: BaseException | None = None
         output_started = False

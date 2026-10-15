@@ -157,12 +157,39 @@ def test_a_configured_limit_reports_what_it_was_configured_with():
         (1, 0.0),
         (1, -1.0),
         (1, "60"),
+        # NaN passes a check written as ``not window > 0``, because every
+        # comparison with NaN is false — so the check has to be the good case.
+        (1, float("nan")),
+        (1, float("inf")),
+        # A window small enough to overflow the refill division is not a rate: it
+        # refills a bucket to full after any positive interval.
+        (1, 1e-320),
     ],
 )
 def test_a_limit_that_is_not_a_limit_is_refused(requests, window):
     """A bound that bounds nothing is a configuration mistake, not a limit."""
     with pytest.raises(ValueError):
         RateLimiter(requests=requests, window_seconds=window)
+
+
+def test_a_clock_that_goes_backwards_does_not_grant_credit():
+    """A monotonic clock is what the limiter relies on, and a step back must not refill.
+
+    The behaviour is conservative rather than clever: a negative interval refills
+    nothing and leaves the bucket's last-update time alone, so a clock adjustment
+    cannot hand a caller tokens it did not earn. Refills resume once the clock
+    catches up to where it was.
+    """
+    clock = _Clock()
+    limiter = RateLimiter(requests=1, window_seconds=60, clock=clock)
+    limiter.check("cred-a")
+
+    clock.advance(-30.0)
+    with pytest.raises(ResourceExhaustedError):
+        limiter.check("cred-a")
+
+    clock.advance(90.0)
+    limiter.check("cred-a")
 
 
 # --------------------------------------------------------------------------- #
@@ -286,8 +313,14 @@ async def test_a_slot_is_released_when_its_holder_is_cancelled():
         pass
 
 
-async def test_a_limiter_is_built_only_for_a_principal_that_asks_for_one():
-    """The map is bounded by the principals that actually call, not by the bound."""
+async def test_a_limiter_is_built_lazily_for_the_principal_that_asks_for_one():
+    """A principal gets its limiter on first use rather than at construction.
+
+    It does **not** show that the map is bounded, and it is named for laziness
+    rather than for a bound for exactly that reason: this class accepts any
+    principal string and grows with distinct keys, and what bounds the set is the
+    call sites supplying trusted principals rather than anything enforced here.
+    """
     limiter = TenantConcurrencyLimiter(maximum=2)
 
     assert limiter.principals == ()
@@ -604,5 +637,212 @@ async def test_two_credentials_of_one_tenant_share_its_concurrency_bound():
         provider.release.set()
         responses = await asyncio.gather(first, second)
         assert [response.status for response in responses] == [200, 200]
+    finally:
+        await app.stop()
+
+
+# --------------------------------------------------------------------------- #
+# A stream holds its tenant's slot for as long as it is arriving
+# --------------------------------------------------------------------------- #
+
+
+class _BlockingStreamProvider:
+    """A streaming provider that holds its stream open between two events.
+
+    A paused stream is the case a per-tenant bound is most likely to leak on: the
+    invocation is resident while it waits for the next chunk, so it must still
+    occupy the slot it was admitted to.
+    """
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls: list[tuple[Route, object, object]] = []
+
+    async def stream(self, route, request, context):
+        self.calls.append((route, request, context))
+        invocation_id = context.invocation_id or ""
+        yield StreamEvent(
+            kind=StreamEventKind.CONTENT,
+            sequence=0,
+            invocation_id=invocation_id,
+            text="hel",
+        )
+        self.entered.set()
+        await self.release.wait()
+        yield StreamEvent(
+            kind=StreamEventKind.FINISH,
+            sequence=1,
+            invocation_id=invocation_id,
+            finish_reason=FinishReason.STOP,
+        )
+
+
+async def test_a_tenant_slot_is_held_for_the_whole_life_of_a_stream():
+    """A paused stream still occupies its tenant's slot, and frees it when it ends.
+
+    The rate limiter is deliberately absent here: the point is the concurrency
+    bound on the streaming path, and a rate-limit refusal would answer the second
+    request before the bound could.
+    """
+    provider = _BlockingStreamProvider()
+    service = _service(
+        provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4)
+    )
+
+    async def consume():
+        return [event async for event in service.invoke_stream(_request(), tenant="tenant-a")]
+
+    first = asyncio.create_task(consume())
+    await asyncio.wait_for(provider.entered.wait(), timeout=5.0)
+
+    second = asyncio.create_task(consume())
+    await _yield_times()
+
+    assert not second.done()
+    assert len(provider.calls) == 1
+
+    provider.release.set()
+    await asyncio.gather(first, second)
+
+    assert len(provider.calls) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Every operation takes the decisions, and the refusal is a 429
+# --------------------------------------------------------------------------- #
+
+
+class _EmbeddingProvider:
+    """A provider that answers an embeddings request with one vector."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Route, object, object]] = []
+
+    async def embed(self, route, request, context):
+        from model_gateway.domain.embeddings import Embedding, EmbeddingResponse
+
+        self.calls.append((route, request, context))
+        return EmbeddingResponse(
+            model=request.model,
+            upstream_model=route.model_id,
+            data=(Embedding(index=0, values=(0.1, 0.2)),),
+            usage=Usage(input_tokens=1),
+            invocation_id="provider-ignored",
+        )
+
+
+class _ImageProvider:
+    """A provider that answers an image request with one image."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Route, object, object]] = []
+
+    async def generate(self, route, request, context):
+        from model_gateway.domain.images import GeneratedImage, ImageResponse
+
+        self.calls.append((route, request, context))
+        return ImageResponse(
+            model=request.model,
+            upstream_model=route.model_id,
+            created=0,
+            data=(GeneratedImage(b64_json="Zm9v"),),
+            usage=Usage(input_tokens=1),
+            invocation_id="provider-ignored",
+        )
+
+
+async def test_an_embeddings_invocation_is_rate_limited():
+    """The embeddings entry point takes the same decision as the text one."""
+    from model_gateway.domain.embeddings import EmbeddingRequest
+
+    provider = _EmbeddingProvider()
+    service = _service(
+        provider,
+        routes=(_route("upstream-embed", operation=Operation.EMBEDDINGS,
+                       capabilities=frozenset({Capability.EMBEDDINGS})),),
+        rate_limiter=_fresh_limiter(),
+    )
+    request = EmbeddingRequest(model="embedding-default", input=("hello",))
+
+    await service.embed(request, namespace="cred-a")
+    with pytest.raises(ResourceExhaustedError) as refused:
+        await service.embed(request, namespace="cred-a")
+
+    assert refused.value.reason is ErrorReason.RATE_LIMITED
+    assert len(provider.calls) == 1
+
+
+async def test_an_image_invocation_is_rate_limited():
+    """The image entry point takes the same decision as the text one."""
+    from model_gateway.domain.images import ImageRequest
+
+    provider = _ImageProvider()
+    service = _service(
+        provider,
+        routes=(_route("upstream-image", operation=Operation.IMAGE,
+                       capabilities=frozenset({Capability.GENERATION})),),
+        rate_limiter=_fresh_limiter(),
+    )
+    request = ImageRequest(model="image-default", prompt="a red fox")
+
+    await service.generate(request, namespace="cred-a")
+    with pytest.raises(ResourceExhaustedError) as refused:
+        await service.generate(request, namespace="cred-a")
+
+    assert refused.value.reason is ErrorReason.RATE_LIMITED
+    assert len(provider.calls) == 1
+
+
+def _limited_chat_app(provider, **overrides) -> Application:
+    """A chat application with a request rate of one and no concurrency bound."""
+    settings = Settings.from_env(
+        {
+            "GATEWAY_AUTH_ENABLED": "true",
+            "GATEWAY_API_KEYS": f"{_KEY_A}:{_SHARED_TENANT}",
+            **overrides,
+        }
+    )
+    service = InferenceService(
+        ModelRegistry((_route(),)),
+        provider,
+        rate_limiter=RateLimiter(requests=1, window_seconds=60),
+    )
+    app = Application(router=Router())
+    register_error_handlers(app)
+    register_chat_routes(app.router, service)
+    app.middlewares.append(
+        create_auth_middleware(
+            ApiKeySet.from_settings(settings),
+            auth_enabled=True,
+            allow_anonymous_health=True,
+        )
+    )
+    return app
+
+
+async def test_a_rate_limit_refusal_is_a_429_through_the_http_surface():
+    """The transport's own contract for the refusal, end to end rather than by taxonomy."""
+    app = _limited_chat_app(_EchoProvider())
+    body = {"model": "text-default", "messages": [{"role": "user", "content": "hi"}]}
+
+    await app.start()
+    try:
+        client = TestClient(app)
+        headers = {"Authorization": f"Bearer {_KEY_A}"}
+        first = await client.post(
+            "/v1/chat/completions", content=JSONContent(body), headers=headers
+        )
+        second = await client.post(
+            "/v1/chat/completions", content=JSONContent(body), headers=headers
+        )
+
+        assert first.status == 200
+        assert second.status == 429
+        payload = await second.json()
+        assert payload["reason"] == "rate_limited"
+        # The public payload is reason and message only: details are on the
+        # exception but are not published by default.
+        assert "details" not in payload
     finally:
         await app.stop()

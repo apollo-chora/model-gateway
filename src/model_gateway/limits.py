@@ -33,12 +33,22 @@ and of no route, so raising it inside the walk would make the gateway walk a
 request from one provider to the next in an attempt to escape a limit that follows
 the caller, spending every configured provider's capacity on the way.
 
-**Neither map needs eviction, and that follows from keying on the credential.**
-The principals a deployment can see are the credentials it configured, plus the
-single anonymous namespace when authentication is disabled, so the number of
-buckets is bounded by configuration rather than by traffic. A limiter keyed on a
-caller-supplied identifier would grow without limit, which is the same
-unbounded-growth problem the concurrency limiter's waiter bound exists to avoid.
+**Both limiters take an opaque principal, and neither bounds how many it may see.**
+That separation is deliberate: what the principal *is* belongs to the layer that
+holds the authenticated identity, and this module has no access to the credential
+set and must not invent one. The consequence is that the cardinality of these maps
+is a property of the *call sites* rather than of the limiters — a deployment whose
+transports supply the trusted principal sees a set bounded by the credentials it
+configured, while an in-process caller that passed a fresh string on every call
+would grow both maps without limit. The service's ``namespace`` and ``tenant``
+arguments carry that contract and state it; this module does not enforce it.
+
+Eviction is not the answer to that, and it is worth saying why: dropping a bucket
+resets the rate history it holds, and dropping a tenant's limiter splits that
+tenant's concurrency bound between two limiters, so a deployment with unbounded
+principals would get limits that are both unbounded in memory and wrong in effect.
+A deployment that needs a bound on principals needs a bound on its callers, which
+is what authentication is for.
 
 **Both limits are configured into existence rather than always on.** A deployment
 that configures no request rate and no per-tenant bound is one that has not said
@@ -53,6 +63,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from math import isfinite
 
 from model_gateway.errors import ErrorReason, ResourceExhaustedError
 from model_gateway.reliability import ConcurrencyLimiter
@@ -96,11 +107,27 @@ class RateLimiter:
             raise ValueError(f"requests must be a positive integer, got {requests!r}")
         if isinstance(window_seconds, bool) or not isinstance(window_seconds, int | float):
             raise ValueError(f"window_seconds must be a number, got {window_seconds!r}")
-        if not window_seconds > 0:
-            raise ValueError(f"window_seconds must be positive, got {window_seconds!r}")
+        window = float(window_seconds)
+        # Stated as the good case rather than the negation of a bad one, because
+        # every comparison with NaN is false: ``not window > 0`` is False for NaN,
+        # so a NaN window would pass a check written that way and make every
+        # bucket look empty forever.
+        if not isfinite(window) or window <= 0:
+            raise ValueError(
+                f"window_seconds must be a finite positive number, got {window_seconds!r}"
+            )
+        refill = requests / window
+        # A window small enough to overflow the division is not a rate: it would
+        # refill a bucket to full after any positive elapsed interval, which is
+        # the one value that turns a limit into no limit at all.
+        if not isfinite(refill) or refill <= 0:
+            raise ValueError(
+                f"{requests} requests per {window_seconds!r} seconds is not a finite "
+                f"positive refill rate, got {refill!r}"
+            )
         self._requests = requests
-        self._window_seconds = float(window_seconds)
-        self._refill_per_second = requests / float(window_seconds)
+        self._window_seconds = window
+        self._refill_per_second = refill
         self._clock = clock
         self._buckets: dict[str, _Bucket] = {}
 
@@ -157,12 +184,13 @@ class TenantConcurrencyLimiter:
     One :class:`~model_gateway.reliability.ConcurrencyLimiter` per principal, so a
     tenant's burst is bounded by its own limit rather than by how many others
     happen to be calling. The per-principal limiters are built on first use and
-    kept, which is bounded for the reason the module docstring gives: the
-    principals are the credentials the deployment configured.
+    kept, and how many there can be is the caller's business rather than this
+    class's: it accepts any principal string and neither knows nor can check which
+    ones a deployment is entitled to see (see the module docstring).
 
-    What the key is belongs to the caller, and the caller is expected to key on the
-    tenant the credential is bound to. A credential bound to no tenant is its own
-    principal (PRD section 14.2), so keying such a caller on its credential
+    What the key should be belongs to the caller, and the caller is expected to key
+    on the tenant the credential is bound to. A credential bound to no tenant is
+    its own principal (PRD section 14.2), so keying such a caller on its credential
     identifier rather than on a shared empty tenant is what keeps one tenant-less
     caller from consuming the bound the others are entitled to.
     """
