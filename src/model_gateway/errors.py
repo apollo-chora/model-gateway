@@ -84,6 +84,7 @@ __all__ = [
     "UnavailableError",
     "normalise_exception",
     "sanitise_text",
+    "redact_credential_shapes",
 ]
 
 _REDACTED = "[redacted]"
@@ -155,6 +156,20 @@ class GrpcStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+def redact_credential_shapes(text: str) -> str:
+    """Credential material in an assigned or bearer form, replaced.
+
+    The narrow half of :func:`sanitise_text`, exposed because the log redaction
+    wants exactly this and not the rest: collapsing whitespace and removing URLs
+    are right for a message a caller reads and wrong for a log value an operator is
+    reading for a reason. What it recognises is what :func:`sanitise_text`
+    recognises and no more, so the limits stated there apply here too.
+    """
+    if not text:
+        return text
+    return _CREDENTIAL.sub(_REDACTED, _BEARER.sub(_REDACTED, text))
+
+
 def sanitise_text(text: str) -> str:
     """Strip the upstream-identifying shapes this module recognises from text.
 
@@ -175,8 +190,7 @@ def sanitise_text(text: str) -> str:
     markers = [match.start() for pattern in _STACK_MARKERS if (match := pattern.search(cleaned))]
     if markers:
         cleaned = f"{cleaned[: min(markers)]} {_REDACTED}"
-    cleaned = _BEARER.sub(_REDACTED, cleaned)
-    cleaned = _CREDENTIAL.sub(_REDACTED, cleaned)
+    cleaned = redact_credential_shapes(cleaned)
     cleaned = _URL.sub(_REDACTED, cleaned)
     return " ".join(cleaned.split())
 
