@@ -1,0 +1,18 @@
+# Go stub generation for the published contract.
+#
+# The M mapping gives the generated Go code a real import path and package
+# name WITHOUT adding a `go_package` option to the .proto source. That keeps
+# the proto identical for the Python generation (src/model_gateway/grpc/),
+# which has no use for a Go import path.
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: gen/go
+    opt:
+      - paths=source_relative
+      - Mgateway/v1/gateway.proto=github.com/apollo-chora/model-gateway/gen/go/gateway/v1;gatewayv1
+  - local: protoc-gen-go-grpc
+    out: gen/go
+    opt:
+      - paths=source_relative
+      - Mgateway/v1/gateway.proto=github.com/apollo-chora/model-gateway/gen/go/gateway/v1;gatewayv1

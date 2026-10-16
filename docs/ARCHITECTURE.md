@@ -77,6 +77,40 @@ rm -rf .gen
 The same relative-import fixup applies (`from identity.v1 import mana_service_pb2`
 to `from . import mana_service_pb2`).
 
+### Go stubs
+
+Go callers need the same contract as Go code. `buf generate` produces it into
+`gen/go/`, and the `go.mod` at the repository root makes that tree an
+importable module:
+
+```sh
+buf generate --path proto/gateway/v1/gateway.proto
+```
+
+The `--path` is required: the module also holds the governance peer protos
+(`identity/v1`, `observability/v1`), which have no Go import path and exist
+for the Python side only.
+
+The Go import path comes from the `M` mapping in `buf.gen.yaml`, not from a
+`go_package` option in the `.proto`. Adding one would change the descriptor
+the Python stubs are generated from, for no benefit to them.
+
+A caller imports it as:
+
+```go
+import gatewayv1 "github.com/apollo-chora/model-gateway/gen/go/gateway/v1"
+```
+
+and adds to its own `go.mod`:
+
+```
+require github.com/apollo-chora/model-gateway v0.0.0
+replace github.com/apollo-chora/model-gateway => ../model-gateway
+```
+
+The `replace` is what makes a local checkout work before the module is
+tagged and published.
+
 The gRPC health protocol is served without authentication — it is the
 infrastructure protocol, and a prober has no credential to present. The HTTP
 health endpoints follow the deployment's configured auth policy.
