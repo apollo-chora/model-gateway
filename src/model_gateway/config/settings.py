@@ -248,6 +248,19 @@ _FIELDS: tuple[_Field, ...] = (
     _Field("usage_tracking_enabled", "USAGE_TRACKING_ENABLED", "true", _parse_bool),
     _Field("cost_tracking_enabled", "COST_TRACKING_ENABLED", "false", _parse_bool),
     _Field("usage_storage", "USAGE_STORAGE", "memory", _parse_usage_storage),
+    _Field(
+        "observability_dsn",
+        "CHORA_OBSERVABILITY_DSN",
+        "",
+        _parse_optional_text,
+    ),
+    _Field("llm_budget_required", "CHORA_LLM_BUDGET_REQUIRED", "false", _parse_bool),
+    _Field(
+        "llm_budget_required_tenants",
+        "CHORA_LLM_BUDGET_REQUIRED_TENANTS",
+        "",
+        _parse_api_keys,
+    ),
     _Field("otel_enabled", "OTEL_ENABLED", "false", _parse_bool),
     _Field(
         "otel_exporter_otlp_endpoint",
@@ -290,6 +303,15 @@ class Settings:
     usage_tracking_enabled: bool
     cost_tracking_enabled: bool
     usage_storage: UsageStorage
+
+    # Governance. The DSN is the Postgres database the governance mechanisms
+    # (budget, outbox, idempotency) write to; it is required for governance to
+    # function and empty otherwise, so a deployment that does not configure it
+    # runs without a database. The budget flags make budget enforcement
+    # fail-closed: globally, or for the named tenants only.
+    observability_dsn: str
+    llm_budget_required: bool
+    llm_budget_required_tenants: tuple[str, ...]
 
     otel_enabled: bool
     otel_exporter_otlp_endpoint: str

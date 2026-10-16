@@ -13,6 +13,7 @@ BOOLEAN_VARIABLES = [
     "USAGE_TRACKING_ENABLED",
     "COST_TRACKING_ENABLED",
     "OTEL_ENABLED",
+    "CHORA_LLM_BUDGET_REQUIRED",
 ]
 
 PORT_VARIABLES = {
@@ -713,3 +714,44 @@ def test_zero_retry_and_zero_backoff_survive_every_construction_path():
     assert _replaced(provider_retry_count=0).provider_retry_count == 0
     assert _direct(provider_retry_backoff_ms=0).provider_retry_backoff_ms == 0
     assert _replaced(provider_retry_backoff_ms=0).provider_retry_backoff_ms == 0
+
+
+class TestGovernanceSettings:
+    """The governance settings: a DSN that is required for governance, and the
+    budget flags that make enforcement fail-closed."""
+
+    def test_observability_dsn_defaults_to_empty(self):
+        assert Settings.from_env({}).observability_dsn == ""
+
+    def test_observability_dsn_accepts_a_connection_string(self):
+        dsn = "postgresql://user:pass@db.example.com:5432/chora_observability"
+        assert Settings.from_env({"CHORA_OBSERVABILITY_DSN": dsn}).observability_dsn == dsn
+
+    def test_budget_required_defaults_to_false(self):
+        assert Settings.from_env({}).llm_budget_required is False
+
+    def test_budget_required_tenants_defaults_to_empty(self):
+        assert Settings.from_env({}).llm_budget_required_tenants == ()
+
+    def test_budget_required_tenants_are_split_on_commas_and_trimmed(self):
+        settings = Settings.from_env(
+            {"CHORA_LLM_BUDGET_REQUIRED_TENANTS": " 123e4567-e89b-42d3-a456-426614174000 ,"}
+        )
+
+        assert settings.llm_budget_required_tenants == (
+            "123e4567-e89b-42d3-a456-426614174000",
+        )
+
+    def test_budget_required_tenants_ignore_blank_entries(self):
+        settings = Settings.from_env(
+            {"CHORA_LLM_BUDGET_REQUIRED_TENANTS": ",, 123e4567-e89b-42d3-a456-426614174000 ,, "}
+        )
+
+        assert settings.llm_budget_required_tenants == (
+            "123e4567-e89b-42d3-a456-426614174000",
+        )
+
+    def test_governance_defaults_survive_direct_construction_round_trip(self):
+        assert _direct().observability_dsn == ""
+        assert _direct().llm_budget_required is False
+        assert _direct().llm_budget_required_tenants == ()

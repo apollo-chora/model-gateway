@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "AI model gateway"
 requires-python = ">=3.13"
 dependencies = [
+    "asyncpg>=0.32.0",
     "blacksheep==2.6.4",
     "exa-py>=2.25.0",
     "granian==2.8.4",
