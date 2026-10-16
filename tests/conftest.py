@@ -22,3 +22,9 @@ operator configuration, so it is forced here exactly as the seam forces it.
 import os
 
 os.environ["LITELLM_MODE"] = "PRODUCTION"
+
+# The Postgres integration fixtures live in their own module so the unit-test
+# session stays free of the testcontainers import; loading it as a plugin makes
+# its fixtures discoverable without importing them into the test modules (which
+# would shadow the fixture names against the test parameters).
+pytest_plugins = ["conftest_governance"]

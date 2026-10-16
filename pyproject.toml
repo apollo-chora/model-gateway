@@ -29,6 +29,7 @@ dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "ruff==0.17.0",
+    "testcontainers>=4.15.0",
 ]
 
 [build-system]
@@ -43,6 +44,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "live: needs a real provider account, so it is skipped unless one is configured; select it with `-m live`",
+    "postgres: needs a running Postgres container",
 ]
 
 [tool.ruff]
