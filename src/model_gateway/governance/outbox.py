@@ -15,25 +15,36 @@ unique index. ``ON CONFLICT DO NOTHING`` makes a redelivery of the same usage a
 clean no-op: the insert reports whether it actually landed, and the caller
 settles the budget only when it did.
 
-**The payload is bytes and the envelope a flat string map.** ``payload`` is
-the opaque event body the consumer decodes, written to ``BYTEA``; ``envelope``
-is the attribute map the relay publishes alongside it, written to ``JSONB``
-with every value a string — the only shape the relay's reader parses. Neither
-is parsed here: the gateway's contract with the consumer is the bytes it
-wrote, not a shape this module re-validates.
+**The payload is a protobuf and the envelope a flat string map.** ``payload``
+is the canonical ``chora.observability.v1.TokenUsageRecorded`` message the
+consumer ``proto.Unmarshal``s, written to ``BYTEA``; ``envelope`` is the
+attribute map the relay publishes alongside it, written to ``JSONB`` with
+every value a string — the only shape the relay's reader parses. Neither is
+parsed here: the gateway's contract with the consumer is the bytes it
+wrote, not a shape this module re-validates. The payload is built by
+:func:`build_token_usage_payload` from the checked-in contract
+``proto/observability/v1/token_usage.proto``, whose field numbers and types
+mirror the Go gateway's own — the consumer decodes by field number, so a
+renumbered field here is a silently misread ledger row there.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 
 import orjson
 
 from model_gateway.governance.db import Database, rows_affected, validate_uuid
+from model_gateway.governance.observability.v1 import token_usage_pb2
 
 __all__ = [
     "INSERT_TOKEN_USAGE",
+    "SCHEMA_VERSION",
+    "SOURCE_SERVICE",
     "Outbox",
+    "build_token_usage_payload",
+    "token_usage_envelope",
     "validate_usage_event",
 ]
 
@@ -42,6 +53,12 @@ TOPIC = "chora.observability.token_usage.recorded.v1"
 
 AGGREGATE_TYPE = "token_usage"
 """The aggregate type stamped on every token-usage event."""
+
+SOURCE_SERVICE = "chora-model-gateway"
+"""The provenance stamped on every token-usage event envelope."""
+
+SCHEMA_VERSION = 1
+"""The schema major version of the token-usage event payload."""
 
 INSERT_TOKEN_USAGE = """
     INSERT INTO outbox_events (
@@ -88,6 +105,91 @@ def validate_usage_event(
         if not isinstance(key, str) or not isinstance(value, str):
             raise ValueError("outbox 'envelope' must map strings to strings")
     return orjson.dumps(dict(envelope)).decode("utf-8")
+
+
+def token_usage_envelope(
+    *,
+    usage_id: str,
+    tenant_id: str,
+    gcid: str,
+    occurred_at: datetime | None = None,
+    traceparent: str = "",
+    tracestate: str = "",
+) -> dict[str, str]:
+    """The flat canonical envelope map for one token-usage event.
+
+    The keys are the contract's own: the relay's reader reconstructs the
+    Pub/Sub message attributes from this map and validates them, so a key the
+    contract does not name is a key the consumer never sees. Every value is a
+    string, the only shape that reader parses. ``traceparent`` and
+    ``tracestate`` are empty when the invocation carried no W3C trace context;
+    the consumer synthesises deterministic stubs for an absent traceparent
+    rather than dropping the correlation.
+    """
+    return {
+        "event_id": usage_id,
+        "idempotency_key": usage_id,
+        "tenant_id": tenant_id,
+        "gcid": gcid,
+        "traceparent": traceparent,
+        "tracestate": tracestate,
+        "occurred_at": (occurred_at or datetime.now(UTC)).isoformat(),
+        "source_service": SOURCE_SERVICE,
+        "schema_version": str(SCHEMA_VERSION),
+    }
+
+
+def build_token_usage_payload(
+    *,
+    usage_id: str,
+    tenant_id: str,
+    gcid: str,
+    model_id: str,
+    invocation_id: str,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cached_tokens: int = 0,
+    cost_micros: int = 0,
+    action_code: str = "",
+    agent_role: str = "",
+    occurred_at: datetime | None = None,
+) -> bytes:
+    """Build the canonical ``chora.observability.v1.TokenUsageRecorded`` payload.
+
+    The bytes are the Pub/Sub message body the observability service's
+    consumer ``proto.Unmarshal``s into its own copy of the message, so the
+    field numbers and types are the contract's, not this module's: the same
+    shape the Go gateway marshals for the same event. The envelope carries
+    the dedupe key (the usage id, which is unique per invocation), the tenant
+    and learner the usage is attributed to, the W3C trace context the egress
+    span anchors to, and the producer's provenance.
+
+    A token count the provider never reported is zero, not absent: the
+    contract's counts are plain ``int64``, which cannot distinguish the two,
+    and the consumer rejects a negative count — so an unreported count is
+    serialised as the zero the contract reads as "unknown". ``occurred_at``
+    defaults to the gateway's own clock when the caller supplies none.
+    """
+    event = token_usage_pb2.TokenUsageRecorded()
+    event.envelope.event_id = usage_id
+    event.envelope.idempotency_key = usage_id
+    event.envelope.tenant_id = tenant_id
+    event.envelope.gcid = gcid
+    event.envelope.occurred_at.FromDatetime(occurred_at or datetime.now(UTC))
+    event.envelope.source_service = SOURCE_SERVICE
+    event.envelope.schema_version = SCHEMA_VERSION
+    event.usage_id = usage_id
+    event.tenant_id = tenant_id
+    event.gcid = gcid
+    event.model_id = model_id
+    event.input_tokens = input_tokens
+    event.output_tokens = output_tokens
+    event.cached_tokens = cached_tokens
+    event.cost_micros = cost_micros
+    event.invocation_id = invocation_id
+    event.agent_role = agent_role
+    event.action_code = action_code
+    return event.SerializeToString()
 
 
 class Outbox:

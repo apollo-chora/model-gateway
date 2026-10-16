@@ -290,6 +290,20 @@ class TestChatRequestMessages:
         assert "at least one message" in error.value.message
 
 
+class TestChatRequestSurface:
+    def test_the_parsed_request_is_stamped_with_the_openai_compat_surface(self):
+        request = ChatRequest.from_payload(body())
+
+        assert request.invocation.surface == "openai_compat"
+
+    def test_the_stamped_surface_survives_the_invocation_built_for_the_handler(self):
+        request = ChatRequest.from_payload(body())
+
+        invocation = request.to_invocation(invocation_id="inv-1")
+
+        assert invocation.surface == "openai_compat"
+
+
 class TestChatRequestParameters:
     def test_maps_the_sampling_parameters(self):
         payload = body(

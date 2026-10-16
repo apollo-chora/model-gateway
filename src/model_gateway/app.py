@@ -25,6 +25,8 @@ The gateway core never names a provider, so the binding is swappable here withou
 touching routing, policy or the public contract.
 """
 
+from dataclasses import dataclass
+
 import orjson
 import structlog
 from blacksheep import Application
@@ -44,6 +46,15 @@ from model_gateway.config import ConfigurationError, Settings
 from model_gateway.config.routes import Operation
 from model_gateway.config.settings import UsageStorage
 from model_gateway.errors import FailedPreconditionError
+from model_gateway.governance import (
+    BudgetManager,
+    Database,
+    EgressGate,
+    GovernanceManager,
+    IdempotencyClaims,
+    Outbox,
+    SuspensionChecker,
+)
 from model_gateway.grpc.server import GrpcServer
 from model_gateway.health import healthz, readyz
 from model_gateway.http import (
@@ -222,6 +233,44 @@ def _limits(
     return rate, tenant
 
 
+@dataclass(frozen=True)
+class GovernanceWiring:
+    """The governance chain and the database it shares, for one process.
+
+    The database travels with the chain because the process owns both
+    lifecycles: the pool opens at startup and closes at shutdown, and the
+    chain is what every invocation asks for a decision.
+    """
+
+    db: Database
+    manager: GovernanceManager
+
+
+def _governance(settings: Settings) -> GovernanceWiring | None:
+    """The governance chain the deployment configured, or none when it did not.
+
+    Governance is opt-in at the settings layer: a deployment that configures
+    no ``CHORA_OBSERVABILITY_DSN`` gets no database and no chain, and the
+    invocation flow runs exactly as it did before governance existed. The
+    mana meter is not wired here — there is no mana client for it yet — so
+    the chain runs un-metered, exactly as it runs without a budget window.
+    """
+    if not settings.observability_dsn:
+        return None
+    db = Database(settings.observability_dsn)
+    return GovernanceWiring(
+        db,
+        GovernanceManager(
+            db,
+            BudgetManager(db),
+            Outbox(db),
+            IdempotencyClaims(db),
+            SuspensionChecker(db),
+            EgressGate(db),
+        ),
+    )
+
+
 def _orjson_dumps(obj) -> str:
     return orjson.dumps(obj).decode("utf-8")
 
@@ -272,6 +321,14 @@ def create_app(
     taken for one application being reloaded, and the second resets the first's
     routes. A deployment builds one application and is unaffected either way, so
     the default is the safe one.
+
+    Governance is wired when the deployment configures
+    ``CHORA_OBSERVABILITY_DSN``: the factory builds the chain — budget, outbox,
+    idempotency, containment and egress over that database — passes it to the
+    inference service it builds and to the gRPC listener's grounded search, and
+    opens and closes the database with the process. A deployment that
+    configures no DSN gets no chain and no database, and the invocation flow
+    runs exactly as it did before governance existed.
     """
     settings = settings or Settings.from_env()
     configure_logging(settings.log_level)
@@ -281,6 +338,16 @@ def create_app(
     # One registry for the process, shared by the service that counts into it and
     # the endpoint that publishes it: two would be two different sets of numbers.
     metrics = Metrics()
+    # Governance is built before the service, because the service is one of the
+    # two things it gates: a deployment that configures a DSN gets the chain
+    # wired into the inference service it builds and into the gRPC listener's
+    # grounded search, and the database's lifetime is this process's — opened
+    # at start, closed at stop. A deployment that configures none gets no
+    # database and no chain, and every invocation runs exactly as it did
+    # before governance existed.
+    wiring = _governance(settings)
+    manager = wiring.manager if wiring is not None else None
+    db = wiring.db if wiring is not None else None
     # Tracing is configured before the service is built, so a deployment that asked
     # for it and gave it nowhere to send fails at startup rather than dropping
     # every span it produces.
@@ -305,6 +372,7 @@ def create_app(
             tenant_limiter=tenant_limiter,
             metrics=metrics,
             tracer=tracer,
+            governance=manager,
         )
 
     api_keys = ApiKeySet.from_settings(settings)
@@ -315,7 +383,13 @@ def create_app(
     # HTTP-only application the tests drive. It starts and stops with the
     # application, because the application is the process's unit of lifetime.
     grpc_server = (
-        GrpcServer(service=service, registry=registry, settings=settings, api_keys=api_keys)
+        GrpcServer(
+            service=service,
+            registry=registry,
+            settings=settings,
+            api_keys=api_keys,
+            governance=manager,
+        )
         if serve_grpc
         else None
     )
@@ -362,6 +436,13 @@ def create_app(
             http_port=settings.http_port,
             models=[info.id for info in registry.list_models()],
         )
+        if db is not None:
+            # The governance pool opens with the process, so a deployment that
+            # configured a DSN and cannot reach its database fails at startup
+            # rather than on the first invocation — and the pool is closed at
+            # stop, because an unclosed pool keeps the event loop from exiting
+            # cleanly.
+            await db.connect()
         if grpc_server is not None:
             await grpc_server.start()
 
@@ -370,6 +451,8 @@ def create_app(
         logger.info("model-gateway stopped")
         if grpc_server is not None:
             await grpc_server.stop()
+        if db is not None:
+            await db.close()
         if trace_provider is not None:
             # A batch processor holds spans until it exports them, so a process that
             # stops without this loses its last batch — which is the one covering

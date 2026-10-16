@@ -78,7 +78,9 @@ __all__ = [
 ]
 
 _IMAGE_KEYS = frozenset({"b64_json", "url", "revised_prompt"})
-_REQUEST_KEYS = frozenset({"model", "prompt", "size", "response_format", "n", "metadata"})
+_REQUEST_KEYS = frozenset(
+    {"model", "prompt", "size", "response_format", "n", "metadata", "surface"}
+)
 _RESPONSE_KEYS = frozenset(
     {"model", "upstream_model", "created", "data", "usage", "invocation_id"}
 )
@@ -205,6 +207,13 @@ class ImageRequest:
 
     ``metadata`` is non-sensitive request metadata held as an immutable JSON
     object, never forwarded to the model or the provider.
+
+    ``surface`` is the surface the call arrived on, stamped by the HTTP
+    endpoint that parsed the request: the OpenAI image format carries no
+    surface field, so the caller cannot declare one. It is the same
+    ``openai_compat`` token the text endpoints stamp, so an image request
+    states the surface the governance chain requires of every invoke, exactly
+    as the Go gateway's image requests do.
     """
 
     prompt: str
@@ -213,6 +222,7 @@ class ImageRequest:
     n: int | None = None
     metadata: Mapping[str, object] | None = None
     model: str | None = None
+    surface: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model", as_optional_text("model", self.model))
@@ -225,6 +235,7 @@ class ImageRequest:
         )
         object.__setattr__(self, "n", as_optional_int("n", self.n, minimum=1))
         object.__setattr__(self, "metadata", _as_metadata("metadata", self.metadata))
+        object.__setattr__(self, "surface", as_optional_text("surface", self.surface))
 
     def to_dict(self) -> dict[str, JsonDocument]:
         return {
@@ -234,6 +245,7 @@ class ImageRequest:
             "response_format": self.response_format,
             "n": self.n,
             "metadata": None if self.metadata is None else thaw_json(self.metadata),
+            "surface": self.surface,
         }
 
     @classmethod
@@ -251,6 +263,7 @@ class ImageRequest:
             ),
             n=as_optional_int(f"{where} 'n'", payload.get("n"), minimum=1),
             metadata=_as_metadata(f"{where} 'metadata'", payload.get("metadata")),
+            surface=as_optional_text(f"{where} 'surface'", payload.get("surface")),
         )
 
 

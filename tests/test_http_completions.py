@@ -237,6 +237,23 @@ async def test_the_invocation_carries_the_generation_parameters(client, provider
     assert invocation.generation_config.stop_sequences == ("END",)
 
 
+async def test_the_invocation_reaches_the_provider_stamped_with_the_openai_compat_surface(
+    client, provider
+):
+    """The HTTP surface stamps the surface the governance chain requires.
+
+    The OpenAI wire format carries no surface, so the caller cannot declare
+    one; the stamped ``openai_compat`` surface is what lets the invocation
+    pass the governance chain's stamped-surface check rather than being
+    refused as ``surface_unstamped``.
+    """
+    response = await post(client, payload())
+
+    assert response.status == 200
+    _, invocation = provider.calls[0]
+    assert invocation.surface == "openai_compat"
+
+
 async def test_an_array_prompt_is_refused_rather_than_narrowed(client, provider):
     """An array prompt asks for one completion per element, which this shape cannot carry."""
     response = await post(client, payload(prompt=["First prompt.", "Second prompt."]))

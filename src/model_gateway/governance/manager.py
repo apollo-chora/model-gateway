@@ -68,8 +68,11 @@ COMPANION_SURFACES: frozenset[str] = frozenset({"companion_chat", "companion_dia
 
 A turn on one of these surfaces is a Learning Companion turn, and the platform
 and tenant containment tables are read for it uncached on every call. A turn
-on any other surface — or one that states no surface at all — is not a
-companion turn and is never read against the containment tables.
+on any other surface is not a companion turn and is never read against the
+containment tables. A turn that states no surface at all is refused before
+any read: an undeclared turn cannot be evaluated for containment, and the
+refusal is loud (``surface_unstamped``) rather than a silent pass-through
+that would let an unstamped call bypass the control.
 """
 
 FAIL_CLOSED_ACTIONS: frozenset[str] = frozenset(
@@ -109,12 +112,12 @@ class GovernanceDecision:
 
     ``allowed`` is the whole answer for a caller that only needs the gate.
     ``reason`` and ``detail`` are the operator-facing half: ``reason`` is the
-    refusing mechanism's own token — ``companion_suspended``,
-    ``suspension_unreadable``, ``budget_exhausted``, ``insufficient_mana`` —
-    and ``detail`` is that mechanism's own explanation. ``deduped`` marks an
-    invocation whose dispatch key was already claimed: it is allowed through
-    (the turn is served) but settles nothing, because the first delivery
-    already paid for it.
+    refusing mechanism's own token — ``surface_unstamped``,
+    ``companion_suspended``, ``suspension_unreadable``, ``budget_exhausted``,
+    ``insufficient_mana`` — and ``detail`` is that mechanism's own explanation.
+    ``deduped`` marks an invocation whose dispatch key was already claimed: it is
+    allowed through (the turn is served) but settles nothing, because the first
+    delivery already paid for it.
     """
 
     allowed: bool
@@ -124,6 +127,7 @@ class GovernanceDecision:
 
 
 _REFUSAL_CATEGORIES: dict[str, type[GatewayError]] = {
+    "surface_unstamped": FailedPreconditionError,
     "companion_suspended": FailedPreconditionError,
     "budget_exhausted": FailedPreconditionError,
     "insufficient_mana": ResourceExhaustedError,
@@ -136,7 +140,10 @@ _REFUSAL_CATEGORIES: dict[str, type[GatewayError]] = {
 The containment and budget denials are failed preconditions the caller must
 resolve; the mana shortfall is resource exhaustion the caller tops up; and a
 containment store that could not be read is a gateway fault, mapped to
-unavailability for the same reason the egress gate's own unreadable is.
+unavailability for the same reason the egress gate's own unreadable is. An
+unstamped surface is a failed precondition like its sibling containment
+denials: the Go gateway answers it FAILED_PRECONDITION on gRPC, the same
+status the other preconditions carry.
 """
 
 
@@ -217,16 +224,31 @@ class GovernanceManager:
         :func:`governance_refusal` before any provider is called. A
         ``deduped=True`` decision is allowed through but settles nothing.
 
-        The tenant-scoped mechanisms — containment and budget — run only
-        when the request states a tenant: a tenant-less call is not a tenant
-        turn, and the tables they read are keyed by tenant. The learner-scoped
-        ones — the debit claim and the mana quote — run whenever the request
-        states the learner, because they are keyed by GCID and no tenant.
+        The surface is the one field every governed call must state: a request
+        that stamps none is refused with ``surface_unstamped`` before any table
+        is read, because containment cannot be evaluated for an undeclared
+        turn. A stamped non-companion surface passes the containment gate
+        without a read; a stamped companion surface is read against the
+        containment tables, and only when the request states a tenant — the
+        tenant-scoped mechanisms run only for a tenant turn, and the tables
+        they read are keyed by tenant. The learner-scoped ones — the debit
+        claim and the mana quote — run whenever the request states the
+        learner, because they are keyed by GCID and no tenant.
         """
         # 1. Suspension check (companion surfaces only). A contained turn is
         # refused before any debit is even possible, so this is the outermost
-        # gate; a non-companion surface passes without a read.
-        if tenant_id and surface and is_companion_surface(surface):
+        # gate. An absent surface is a loud denial, never a silent pass: a
+        # caller that stamps no surface has not declared what turn this is,
+        # and containment cannot be evaluated for an undeclared turn. A
+        # non-companion surface passes without a read.
+        if not surface:
+            return GovernanceDecision(
+                allowed=False,
+                reason="surface_unstamped",
+                detail="the request states no surface; companion containment cannot be "
+                "evaluated for an undeclared turn",
+            )
+        if tenant_id and is_companion_surface(surface):
             decision = await self._suspension.check(tenant_id, action_code or "")
             if not decision.allowed:
                 return decision

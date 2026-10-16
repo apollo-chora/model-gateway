@@ -291,6 +291,17 @@ _IMAGE_OUTPUT_CAPABILITY = "image_output"
 _REMOTE_IMAGE_CAPABILITY = "remote_image_fetch"
 _INTERLEAVED_OUTPUT_CAPABILITY = "interleaved_output"
 
+_SURFACE = "openai_compat"
+"""The surface every request this endpoint serves is stamped with.
+
+The OpenAI wire format carries no surface field, so a caller cannot declare
+one; the gateway stamps the surface the call arrived on, as the Go gateway
+does. ``openai_compat`` is deliberately non-companion: it states the turn's
+surface — which the governance chain requires of every invoke, refusing an
+undeclared turn — without asking for the companion containment read, which
+an OpenAI-compatible turn is not subject to.
+"""
+
 
 @dataclass(frozen=True)
 class ModelCard:
@@ -369,6 +380,13 @@ class ChatRequest:
     credential — and discards it when the caller is unauthenticated — before
     the invocation is built.
 
+    Every parsed request is stamped ``surface="openai_compat"``: the OpenAI
+    wire format carries no surface, so the caller cannot declare one, and the
+    surface the call arrived on is stamped here rather than left undeclared —
+    a non-companion surface that satisfies the governance chain's
+    stamped-surface requirement without asking for the companion containment
+    read.
+
     The canonical request is built during the parse rather than afterwards, so
     the rules it enforces — a conversation with at least one message, metadata
     that does not name a canonical field, a tool choice the declared tools can
@@ -409,6 +427,7 @@ class ChatRequest:
                 idempotency_key=_as_idempotency_key(
                     f"{where} 'idempotency_key'", body.get("idempotency_key")
                 ),
+                surface=_SURFACE,
             )
         except ValueError as error:
             raise InvalidArgumentError(f"invalid chat completion request: {error}") from error

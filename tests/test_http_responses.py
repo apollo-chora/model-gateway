@@ -219,6 +219,23 @@ async def test_a_string_input_becomes_one_user_message(client, provider):
     assert message.content == (TextPart("Explain recursion."),)
 
 
+async def test_the_invocation_reaches_the_provider_stamped_with_the_responses_surface(
+    client, provider
+):
+    """The HTTP surface stamps the surface the governance chain requires.
+
+    The Responses wire format carries no surface, so the caller cannot declare
+    one; the stamped ``responses`` surface — the token the Go gateway stamps
+    on this endpoint — is what lets the invocation pass the governance chain's
+    stamped-surface check rather than being refused as ``surface_unstamped``.
+    """
+    response = await post(client, payload())
+
+    assert response.status == 200
+    _, invocation = provider.calls[0]
+    assert invocation.surface == "responses"
+
+
 async def test_an_array_input_becomes_the_ordered_conversation(client, provider):
     body = payload(
         input=[

@@ -10,11 +10,22 @@ actually landed.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import orjson
 import pytest
 
 from model_gateway.governance.db import Database
-from model_gateway.governance.outbox import AGGREGATE_TYPE, TOPIC, Outbox
+from model_gateway.governance.observability.v1 import token_usage_pb2
+from model_gateway.governance.outbox import (
+    AGGREGATE_TYPE,
+    SCHEMA_VERSION,
+    SOURCE_SERVICE,
+    TOPIC,
+    Outbox,
+    build_token_usage_payload,
+    token_usage_envelope,
+)
 
 _TENANT_ID = "123e4567-e89b-42d3-a456-426614174000"
 _GCID = "987e6543-e89b-42d3-a456-426614174999"
@@ -194,3 +205,95 @@ class TestValidation:
             await outbox.insert_token_usage(
                 _USAGE_ID, _TENANT_ID, _GCID, b"{}", {"schema_version": 1}  # type: ignore[dict-item]
             )
+
+
+class TestBuildTokenUsagePayload:
+    """The canonical payload is a protobuf the consumer proto.Unmarshal's."""
+
+    def test_the_payload_is_a_valid_token_usage_recorded(self) -> None:
+        payload = build_token_usage_payload(
+            usage_id=_USAGE_ID,
+            tenant_id=_TENANT_ID,
+            gcid=_GCID,
+            model_id="text-default",
+            invocation_id="inv-1",
+            input_tokens=10,
+            output_tokens=20,
+            cost_micros=12_300,
+            action_code="companion_chat",
+            occurred_at=datetime(2026, 10, 16, tzinfo=UTC),
+        )
+
+        # The consumer decodes by field number into its own copy of the
+        # message, so the bytes must parse as the canonical message with the
+        # contract's field numbers — not as JSON and not as an empty body.
+        recorded = token_usage_pb2.TokenUsageRecorded()
+        recorded.ParseFromString(payload)
+        assert recorded.usage_id == _USAGE_ID
+        assert recorded.tenant_id == _TENANT_ID
+        assert recorded.gcid == _GCID
+        assert recorded.model_id == "text-default"
+        assert recorded.invocation_id == "inv-1"
+        assert recorded.input_tokens == 10
+        assert recorded.output_tokens == 20
+        assert recorded.cost_micros == 12_300
+        assert recorded.action_code == "companion_chat"
+        assert recorded.envelope.occurred_at.seconds == 1792108800
+
+    def test_the_envelope_carries_the_canonical_provenance(self) -> None:
+        occurred_at = datetime(2026, 10, 16, tzinfo=UTC)
+        payload = build_token_usage_payload(
+            usage_id=_USAGE_ID,
+            tenant_id=_TENANT_ID,
+            gcid=_GCID,
+            model_id="text-default",
+            invocation_id="inv-1",
+            occurred_at=occurred_at,
+        )
+
+        envelope = token_usage_pb2.TokenUsageRecorded()
+        envelope.ParseFromString(payload)
+        # The dedupe key is the usage id, which is unique per invocation, and
+        # the provenance names this gateway and the contract's schema version.
+        assert envelope.envelope.event_id == _USAGE_ID
+        assert envelope.envelope.idempotency_key == _USAGE_ID
+        assert envelope.envelope.source_service == SOURCE_SERVICE
+        assert envelope.envelope.schema_version == SCHEMA_VERSION
+
+    def test_an_unreported_token_count_is_serialised_as_zero(self) -> None:
+        payload = build_token_usage_payload(
+            usage_id=_USAGE_ID,
+            tenant_id=_TENANT_ID,
+            gcid=_GCID,
+            model_id="text-default",
+            invocation_id="inv-1",
+        )
+
+        recorded = token_usage_pb2.TokenUsageRecorded()
+        recorded.ParseFromString(payload)
+        # The contract's counts are plain int64 and cannot distinguish an
+        # unreported count from zero; the consumer rejects a negative one.
+        assert recorded.input_tokens == 0
+        assert recorded.output_tokens == 0
+
+
+class TestTokenUsageEnvelope:
+    def test_the_envelope_carries_the_canonical_keys(self) -> None:
+        envelope = token_usage_envelope(
+            usage_id=_USAGE_ID,
+            tenant_id=_TENANT_ID,
+            gcid=_GCID,
+            occurred_at=datetime(2026, 10, 16, tzinfo=UTC),
+        )
+
+        assert envelope == {
+            "event_id": _USAGE_ID,
+            "idempotency_key": _USAGE_ID,
+            "tenant_id": _TENANT_ID,
+            "gcid": _GCID,
+            "traceparent": "",
+            "tracestate": "",
+            "occurred_at": "2026-10-16T00:00:00+00:00",
+            "source_service": SOURCE_SERVICE,
+            "schema_version": str(SCHEMA_VERSION),
+        }

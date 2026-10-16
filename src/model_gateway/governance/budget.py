@@ -5,14 +5,23 @@ configures in ``per_tenant_llm_budget``. This module is the gateway's half of
 that contract: it reads the active windows, decides what they allow, and
 settles the spend against them.
 
-**The read locks every active window row, across the decision.**
-:meth:`BudgetManager.active_budgets` selects every window that currently
-encloses ``now()`` with ``FOR UPDATE`` and holds the lock for the caller's
-whole block, so two concurrent invocations of one tenant cannot both read the
-same ``spent`` and both decide there is room: the second waits for the first's
-settlement and then reads the incremented value. A tenant may carry more than
-one active window — overlapping periods, or a window that opened before the
-current one closed — so :func:`decide_strictest` applies the strictest
+**The read locks every active window row, across the decision — and that
+bounds the read, not the spend.** :meth:`BudgetManager.active_budgets` selects
+every window that currently encloses ``now()`` with ``FOR UPDATE`` and holds
+the lock for the caller's whole block, so the budget reads within one
+authorization window are serialized: a second invocation of the same tenant
+waits for the first's read to finish and then reads the incremented
+``spent``, rather than both reading the same value inside the window. What the
+lock does not do is hold the spend: settlement runs after the provider call,
+outside the lock, so two concurrent invocations may both be authorized before
+either settles. A tenant that fires ``n`` concurrent calls at a window with
+room for one can be served ``n`` times and debited ``n`` times afterwards —
+a bounded overshoot the budget absorbs rather than a violation it prevents.
+This is the Go implementation's own behaviour: it reads the window snapshot at
+the start of the invoke, decides from it, and debits after the dispatch, with
+the same window between authorization and settlement. A tenant may carry more
+than one active window — overlapping periods, or a window that opened before
+the current one closed — so :func:`decide_strictest` applies the strictest
 decision across all of them: a block anywhere refuses the call, a downgrade
 anywhere re-routes it, and an alert anywhere reports it. The lock is held only
 for the caller's transaction, which is what bounds contention even when one
@@ -242,15 +251,20 @@ class BudgetManager:
     async def active_budgets(self, tenant_id: str) -> AsyncIterator[tuple[BudgetWindow, ...]]:
         """Every active window enclosing now, locked ``FOR UPDATE`` for the block.
 
-        The lock is held for the whole of the caller's block, so the decision
-        the block makes is made against rows no concurrent settlement can
-        interleave with: a second invocation of the same tenant waits for the
-        first's settlement and then reads the incremented ``spent``, rather
-        than both reading the same value and both deciding there is room. A
-        tenant with no active window yields an empty tuple, which
-        :func:`decide_strictest` reads as an allowed call. A ``tenant_id``
-        that is not a UUID's shape is refused before a connection is taken,
-        the same caller bug the other governance mechanisms refuse.
+        The lock is held for the whole of the caller's block, so the budget
+        reads inside one authorization window are serialized: a second
+        invocation of the same tenant waits for the first's read to finish
+        and then reads the incremented ``spent``, rather than both reading
+        the same value inside the window. The lock is released when the block
+        exits — before the provider call, and long before settlement, which
+        runs after it — so it bounds the read and not the spend: two
+        concurrent invocations may both be authorized before either settles,
+        and the budget absorbs the bounded overshoot rather than preventing
+        it. This is the Go implementation's behaviour too. A tenant with no
+        active window yields an empty tuple, which :func:`decide_strictest`
+        reads as an allowed call. A ``tenant_id`` that is not a UUID's shape
+        is refused before a connection is taken, the same caller bug the
+        other governance mechanisms refuse.
         """
         validate_uuid(tenant_id, "tenant_id")
         async with self._db.transaction(tenant_id=tenant_id) as connection:
