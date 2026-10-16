@@ -27,12 +27,14 @@ from grpc_health.v1 import health_pb2, health_pb2_grpc
 from model_gateway.config import ConfigurationError, Settings
 from model_gateway.grpc import gateway_pb2_grpc
 from model_gateway.grpc.embed import Embed
+from model_gateway.grpc.grounded_search import GroundedSearch
 from model_gateway.grpc.health import HealthServicer
 from model_gateway.grpc.identity import Authenticator
 from model_gateway.grpc.invoke import Invoke
 from model_gateway.grpc.list_models import ListModels
 from model_gateway.grpc.streaming import InvokeStream
 from model_gateway.grpc.tracing import continue_trace
+from model_gateway.providers.exa import ExaConfig
 from model_gateway.registry import ModelRegistry
 from model_gateway.security.api_keys import ApiKeySet
 
@@ -62,6 +64,19 @@ class GrpcServer:
             auth_enabled=settings.auth_enabled,
             allow_anonymous_health=settings.allow_anonymous_health,
         )
+        # The grounded search is served through the Exa adapter rather than the
+        # inference binding, so it is wired from its own settings: the Exa
+        # credential and endpoint, and the synthesis leg's model, endpoint,
+        # credential and provider prefix. A deployment that configures none of
+        # them still boots — the adapter fails closed per call, naming the
+        # missing configuration, rather than refusing to start.
+        exa_config = ExaConfig(
+            api_key=settings.exa_api_key,
+            search_endpoint=settings.exa_search_endpoint,
+            synthesis_model=settings.exa_synthesis_model_id,
+            synthesis_endpoint=settings.exa_synthesis_endpoint,
+            synthesis_api_key=settings.exa_synthesis_api_key,
+        )
         # The same bound the HTTP transport applies, in this transport's own unit:
         # gRPC bounds a message rather than a body, and reports one over the bound
         # as RESOURCE_EXHAUSTED — the status the taxonomy maps for this condition —
@@ -78,6 +93,7 @@ class GrpcServer:
                 Invoke(self._authenticator, service),
                 InvokeStream(self._authenticator, service),
                 Embed(self._authenticator, service),
+                GroundedSearch(self._authenticator, exa_config),
                 ListModels(self._authenticator, registry),
             ),
             self._grpc,
@@ -139,11 +155,17 @@ class ModelGatewayServiceServicer(gateway_pb2_grpc.ModelGatewayServiceServicer):
     """
 
     def __init__(
-        self, invoke: Invoke, invoke_stream: InvokeStream, embed: Embed, list_models: ListModels
+        self,
+        invoke: Invoke,
+        invoke_stream: InvokeStream,
+        embed: Embed,
+        grounded_search: GroundedSearch,
+        list_models: ListModels,
     ) -> None:
         self._invoke = invoke
         self._invoke_stream = invoke_stream
         self._embed = embed
+        self._grounded_search = grounded_search
         self._list_models = list_models
 
     async def Invoke(self, request, context):
@@ -166,6 +188,10 @@ class ModelGatewayServiceServicer(gateway_pb2_grpc.ModelGatewayServiceServicer):
     async def Embed(self, request, context):
         async with continue_trace(context):
             return await self._embed.embed(request, context)
+
+    async def GroundedSearch(self, request, context):
+        async with continue_trace(context):
+            return await self._grounded_search.grounded_search(request, context)
 
     async def ListModels(self, request, context):
         async with continue_trace(context):

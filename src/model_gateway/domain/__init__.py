@@ -69,6 +69,13 @@ from model_gateway.domain.generation import (
     Usage,
     UsageSource,
 )
+from model_gateway.domain.grounded import (
+    GroundedCitation,
+    GroundedFinishReason,
+    GroundedSearchRequest,
+    GroundedSearchResult,
+    GroundedUsage,
+)
 from model_gateway.domain.images import (
     IMAGE_RESPONSE_FORMATS,
     GeneratedImage,
@@ -122,6 +129,11 @@ __all__ = [
     "FrozenJsonObject",
     "GenerationConfig",
     "GeneratedImage",
+    "GroundedCitation",
+    "GroundedFinishReason",
+    "GroundedSearchRequest",
+    "GroundedSearchResult",
+    "GroundedUsage",
     "IMAGE_RESPONSE_FORMATS",
     "IdempotencyStatus",
     "ImagePart",

@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in gateway/v1/gateway_pb2_grpc.py depends on'
+        + ' but the generated code in gateway_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -29,8 +29,9 @@ class ModelGatewayServiceStub:
     """ModelGatewayService serves every inference operation the gateway exposes.
 
     Invoke and InvokeStream are the text operation, Embed the embeddings
-    operation and ListModels the model listing. The standard gRPC Health Checking
-    Protocol is served beside this service, on the same port.
+    operation, GroundedSearch the grounded web search and ListModels the model
+    listing. The standard gRPC Health Checking Protocol is served beside this
+    service, on the same port.
     """
 
     def __init__(self, channel):
@@ -54,6 +55,11 @@ class ModelGatewayServiceStub:
                 request_serializer=gateway_dot_v1_dot_gateway__pb2.EmbedRequest.SerializeToString,
                 response_deserializer=gateway_dot_v1_dot_gateway__pb2.EmbedResponse.FromString,
                 _registered_method=True)
+        self.GroundedSearch = channel.unary_unary(
+                '/gateway.v1.ModelGatewayService/GroundedSearch',
+                request_serializer=gateway_dot_v1_dot_gateway__pb2.GroundedSearchRequest.SerializeToString,
+                response_deserializer=gateway_dot_v1_dot_gateway__pb2.GroundedSearchResponse.FromString,
+                _registered_method=True)
         self.ListModels = channel.unary_unary(
                 '/gateway.v1.ModelGatewayService/ListModels',
                 request_serializer=gateway_dot_v1_dot_gateway__pb2.ListModelsRequest.SerializeToString,
@@ -65,8 +71,9 @@ class ModelGatewayServiceServicer:
     """ModelGatewayService serves every inference operation the gateway exposes.
 
     Invoke and InvokeStream are the text operation, Embed the embeddings
-    operation and ListModels the model listing. The standard gRPC Health Checking
-    Protocol is served beside this service, on the same port.
+    operation, GroundedSearch the grounded web search and ListModels the model
+    listing. The standard gRPC Health Checking Protocol is served beside this
+    service, on the same port.
     """
 
     def Invoke(self, request, context):
@@ -86,6 +93,14 @@ class ModelGatewayServiceServicer:
 
     def Embed(self, request, context):
         """One request, one list of vectors.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GroundedSearch(self, request, context):
+        """One request, one grounded answer with its citations. The gateway searches
+        the web and synthesises an answer grounded only in the sources it found.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -116,6 +131,11 @@ def add_ModelGatewayServiceServicer_to_server(servicer, server):
                     request_deserializer=gateway_dot_v1_dot_gateway__pb2.EmbedRequest.FromString,
                     response_serializer=gateway_dot_v1_dot_gateway__pb2.EmbedResponse.SerializeToString,
             ),
+            'GroundedSearch': grpc.unary_unary_rpc_method_handler(
+                    servicer.GroundedSearch,
+                    request_deserializer=gateway_dot_v1_dot_gateway__pb2.GroundedSearchRequest.FromString,
+                    response_serializer=gateway_dot_v1_dot_gateway__pb2.GroundedSearchResponse.SerializeToString,
+            ),
             'ListModels': grpc.unary_unary_rpc_method_handler(
                     servicer.ListModels,
                     request_deserializer=gateway_dot_v1_dot_gateway__pb2.ListModelsRequest.FromString,
@@ -133,8 +153,9 @@ class ModelGatewayService:
     """ModelGatewayService serves every inference operation the gateway exposes.
 
     Invoke and InvokeStream are the text operation, Embed the embeddings
-    operation and ListModels the model listing. The standard gRPC Health Checking
-    Protocol is served beside this service, on the same port.
+    operation, GroundedSearch the grounded web search and ListModels the model
+    listing. The standard gRPC Health Checking Protocol is served beside this
+    service, on the same port.
     """
 
     @staticmethod
@@ -208,6 +229,33 @@ class ModelGatewayService:
             '/gateway.v1.ModelGatewayService/Embed',
             gateway_dot_v1_dot_gateway__pb2.EmbedRequest.SerializeToString,
             gateway_dot_v1_dot_gateway__pb2.EmbedResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GroundedSearch(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/gateway.v1.ModelGatewayService/GroundedSearch',
+            gateway_dot_v1_dot_gateway__pb2.GroundedSearchRequest.SerializeToString,
+            gateway_dot_v1_dot_gateway__pb2.GroundedSearchResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -54,7 +54,14 @@ __all__ = ["Operation", "Route", "parse_routes"]
 
 
 class Operation(StrEnum):
-    """The upstream operation a configured route performs."""
+    """The upstream operation a configured route performs.
+
+    ``GROUNDED_SEARCH`` names the grounded web-search operation. It is not a
+    configured route: the gateway serves it through the Exa adapter directly,
+    so it appears in the enum — and in the protobuf's ``Operation`` — without a
+    route block to configure. The inference binding never sees it, because the
+    operation has no route to run.
+    """
 
     TEXT = "text"
     IMAGE = "image"
@@ -64,7 +71,7 @@ class Operation(StrEnum):
     # no block for it, and the registry publishes no public model ID, so it is in the
     # enum so a lookup for it fails as the model-not-found it is rather than as a
     # KeyError on the mapping that names the public IDs.
-    GROUNDED_SEARCH = "grounded-search"
+    GROUNDED_SEARCH = "grounded_search"
 
 
 @dataclass(frozen=True)

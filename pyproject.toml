@@ -5,6 +5,7 @@ description = "AI model gateway"
 requires-python = ">=3.13"
 dependencies = [
     "blacksheep==2.6.4",
+    "exa-py>=2.25.0",
     "granian==2.8.4",
     "grpcio-health-checking==1.84.0",
     "grpcio==1.84.0",

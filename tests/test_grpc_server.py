@@ -22,6 +22,7 @@ from model_gateway.app import create_app
 from model_gateway.capabilities import Capability
 from model_gateway.config import Settings
 from model_gateway.config.routes import Operation, Route
+from model_gateway.domain import GroundedFinishReason, GroundedSearchResult, GroundedUsage
 from model_gateway.grpc import gateway_pb2, gateway_pb2_grpc
 from model_gateway.inference import InferenceService
 from model_gateway.providers.mock import MockProvider
@@ -145,6 +146,74 @@ async def test_an_embed_reaches_the_caller(grpc_channel):
     )
     assert [item.index for item in response.data] == [0, 1]
     assert len(response.data[0].embedding) == 4
+
+
+@pytest.fixture
+async def grounded_channel(monkeypatch):
+    """A channel to the listener, with the Exa adapter stood in.
+
+    The adapter is patched before the application is built, because the listener
+    constructs the handler — and the handler the adapter — at start. The patch
+    is the only thing stood in: the listener, the authentication and the
+    dispatch are the real ones, so a GroundedSearch call travels the path a
+    deployment takes.
+    """
+
+    class ScriptedAdapter:
+        async def search(self, grounded_request):
+            return GroundedSearchResult(
+                invocation_id=grounded_request.invocation_id,
+                grounded_answer="Paris is the capital.",
+                web_search_queries=(grounded_request.directive,),
+                usage=GroundedUsage(grounding_units=1, cost_micros=10_000),
+                vendor="exa",
+                model_version="synthesis-model",
+                finish_reason=GroundedFinishReason.COMPLETE,
+                completed_at="2026-10-16T00:00:00+00:00",
+            )
+
+    monkeypatch.setattr(
+        "model_gateway.grpc.grounded_search.ExaGroundedSearch",
+        lambda _config: ScriptedAdapter(),
+    )
+    settings = Settings.from_env({"CHORA_GRPC_PORT": str(_free_port())})
+    app = create_app(
+        settings,
+        registry=_registry(),
+        service=InferenceService(_registry(), MockProvider()),
+        serve_grpc=True,
+    )
+    await app.start()
+    channel = grpc.aio.insecure_channel(f"127.0.0.1:{settings.grpc_port}")
+    try:
+        yield channel
+    finally:
+        await channel.close()
+        await app.stop()
+
+
+async def test_a_grounded_search_reaches_the_exa_adapter(grounded_channel):
+    """A real gRPC client reaches the Exa adapter through the listener.
+
+    The listener registers and dispatches the new RPC beside the inference
+    operations, on the same port — the path a deployment takes, which no unit
+    test of the handler alone covers.
+    """
+    stub = gateway_pb2_grpc.ModelGatewayServiceStub(grounded_channel)
+    response = await stub.GroundedSearch(
+        gateway_pb2.GroundedSearchRequest(
+            invocation_id="inv-grounded-1",
+            tenant_id="tenant-a",
+            gcid="gcid-1",
+            agent_id="familiar_seeker",
+            directive="What is the capital of France?",
+            action_code="external_egress.search",
+        )
+    )
+    assert response.grounded_answer == "Paris is the capital."
+    assert response.vendor == "exa"
+    assert response.finish_reason == gateway_pb2.FINISH_REASON_STOP
+    assert response.usage.cost_micros == 10_000
 
 
 async def test_the_standard_health_protocol_answers_on_the_same_port(grpc_channel):

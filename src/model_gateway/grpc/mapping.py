@@ -42,6 +42,11 @@ from model_gateway.domain import (
     EmbeddingResponse,
     FinishReason,
     GenerationConfig,
+    GroundedCitation,
+    GroundedFinishReason,
+    GroundedSearchRequest,
+    GroundedSearchResult,
+    GroundedUsage,
     IdempotencyStatus,
     ImagePart,
     InvocationRequest,
@@ -70,6 +75,8 @@ __all__ = [
     "embed_request_from_proto",
     "embedding_response_to_proto",
     "generation_config_from_proto",
+    "grounded_search_request_from_proto",
+    "grounded_search_response_to_proto",
     "image_part_from_proto",
     "invocation_request_from_proto",
     "invoke_response_to_proto",
@@ -113,6 +120,15 @@ _TOOL_CHOICE_MODES: dict[int, ToolChoiceMode] = {
     pb.TOOL_CHOICE_MODE_NONE: ToolChoiceMode.NONE,
     pb.TOOL_CHOICE_MODE_REQUIRED: ToolChoiceMode.REQUIRED,
     pb.TOOL_CHOICE_MODE_SPECIFIC: ToolChoiceMode.SPECIFIC,
+}
+
+# The grounded operation's own finish reason is mapped onto the text
+# operation's enum rather than extended, because the contract reuses the
+# existing FinishReason and a completed synthesis is the enum's "finished
+# normally" member. An unrecognised value is refused, like every other enum.
+_GROUNDED_FINISH_REASONS: dict[GroundedFinishReason, int] = {
+    GroundedFinishReason.UNSPECIFIED: pb.FINISH_REASON_UNSPECIFIED,
+    GroundedFinishReason.COMPLETE: pb.FINISH_REASON_STOP,
 }
 
 # The closed vocabulary of counts the gateway may have derived. The canonical
@@ -437,6 +453,28 @@ def embed_request_from_proto(request: pb.EmbedRequest) -> EmbeddingRequest:
         raise InvalidArgumentError(f"the embeddings request is not valid: {error}") from error
 
 
+def grounded_search_request_from_proto(request: pb.GroundedSearchRequest) -> GroundedSearchRequest:
+    """The canonical grounded search a gRPC request asks for.
+
+    The fields cross as the caller stated them: which of them a search requires
+    is the handler's validation, not this mapping's, so a request that states too
+    little reaches the handler and is refused there with the rule's name rather
+    than being repaired or refused here.
+    """
+    return GroundedSearchRequest(
+        invocation_id=request.invocation_id,
+        tenant_id=request.tenant_id,
+        gcid=request.gcid,
+        agent_id=request.agent_id,
+        crew_kind=request.crew_kind,
+        directive=request.directive,
+        max_results=request.max_results,
+        action_code=request.action_code,
+        traceparent=request.traceparent,
+        tracestate=request.tracestate,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Response side: canonical -> protobuf
 # --------------------------------------------------------------------------- #
@@ -630,6 +668,71 @@ def embedding_response_to_proto(response: EmbeddingResponse) -> pb.EmbedResponse
         pb.Embedding(index=embedding.index, embedding=embedding.values)
         for embedding in response.data
     )
+    return result
+
+
+def _grounded_citation_to_proto(citation: GroundedCitation) -> pb.GroundedCitation:
+    """One protobuf citation, carrying the source the answer rests on."""
+    return pb.GroundedCitation(
+        uri=citation.uri,
+        title=citation.title,
+        domain=citation.domain,
+        snippet=citation.snippet,
+        confidence=citation.confidence,
+    )
+
+
+def _grounded_usage_to_proto(usage: GroundedUsage) -> pb.GroundedUsage:
+    """The protobuf usage of one grounded search.
+
+    Every count the gateway accounted is written: the grounded usage always
+    carries a value for each field, because the gateway meters the call itself
+    — even a search that found nothing renderable billed the per-search
+    surcharge.
+    """
+    return pb.GroundedUsage(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        total_tokens=usage.total_tokens,
+        grounding_units=usage.grounding_units,
+        cost_micros=usage.cost_micros,
+    )
+
+
+def _grounded_finish_reason_to_proto(reason: GroundedFinishReason) -> int:
+    """The protobuf finish reason a grounded finish selects, or a refusal."""
+    try:
+        return _GROUNDED_FINISH_REASONS[reason]
+    except KeyError as error:
+        defined = ", ".join(repr(member.value) for member in _GROUNDED_FINISH_REASONS)
+        raise InvalidArgumentError(
+            f"finish_reason must be one of {defined}, got {reason!r}"
+        ) from error
+
+
+def grounded_search_response_to_proto(response: GroundedSearchResult) -> pb.GroundedSearchResponse:
+    """The protobuf answer to one GroundedSearch.
+
+    The citations cross in the order the search found them, so the answer
+    carries the sources it rests on in the order the gateway ranked them. An
+    empty citation list crosses as empty — the in-band anomaly the caller
+    hedges on — rather than being dropped or turned into an error.
+    """
+    result = pb.GroundedSearchResponse(
+        invocation_id=response.invocation_id,
+        grounded_answer=response.grounded_answer,
+        search_entry_point_html=response.search_entry_point_html,
+        vendor=response.vendor,
+        model_version=response.model_version,
+        finish_detail=response.finish_detail,
+        completed_at=response.completed_at,
+    )
+    result.citations.extend(
+        _grounded_citation_to_proto(citation) for citation in response.citations
+    )
+    result.web_search_queries.extend(response.web_search_queries)
+    result.usage.CopyFrom(_grounded_usage_to_proto(response.usage))
+    result.finish_reason = _grounded_finish_reason_to_proto(response.finish_reason)
     return result
 
 
