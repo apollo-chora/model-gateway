@@ -18,11 +18,20 @@ the identity service is not part of this process; what is asserted about the
 charge reads the database's own rows and the stub's own call record, never the
 gateway's intent.
 
-The four tests state the two halves of the invariant. A served invocation writes
+The tests state the two halves of the invariant. A served invocation writes
 exactly one outbox row and debits the budget once; a redelivery of the same
 dispatch key is served but settles nothing more; a refused invocation settles
 nothing at all; and a failure after billable work settles exactly the partial
 spend it incurred and no more.
+
+The mana debit is a separate invariant, because it follows the committed
+settlement rather than sharing it. A debit that fails after the budget and
+outbox transaction commits is logged, never raised: the call has already been
+served, and an unrecorded mana charge is a bookkeeping outcome rather than a
+reason to un-serve it. A redelivery of the same dispatch key is still served,
+but settles nothing — no second budget debit, no second outbox row and no second
+mana debit — so the retry can neither double-charge the learner nor blindly
+re-attempt the charge that never landed.
 """
 
 from __future__ import annotations
@@ -35,6 +44,7 @@ import asyncpg
 import grpc
 import orjson
 import pytest
+from structlog.testing import capture_logs
 
 from model_gateway.capabilities import Capability
 from model_gateway.config import Settings
@@ -114,6 +124,23 @@ class _StubManaClient:
     ) -> ManaResult:
         self.debit_calls.append((gcid, tenant_id, action_code, idem_key))
         return ManaResult(success=True, balance_after_units=90)
+
+
+class _FailingManaClient(_StubManaClient):
+    """A stub mana client whose quotes succeed but whose debits raise.
+
+    The crash boundary under test sits between the committed settlement and the
+    external charge, so the seam must fail exactly there: the quote passes (the
+    learner is admitted) and the debit raises (the charge never lands). The
+    parent's call record still stands, so a test asserts the debit was attempted
+    — and failed — rather than trusting the gateway's intent.
+    """
+
+    async def debit(
+        self, gcid: str, tenant_id: str, action_code: str, idem_key: str
+    ) -> ManaResult:
+        self.debit_calls.append((gcid, tenant_id, action_code, idem_key))
+        raise RuntimeError("the mana service is unreachable")
 
 
 class _CostedMockProvider(MockProvider):
@@ -558,3 +585,160 @@ class TestPartialFailureProducesPartialSettlement:
         # But the failed call earned no mana debit: the learner is not charged for
         # an answer that was never produced.
         assert mana_client.debit_calls == []
+
+
+# ---------------------------------------------------------------------------
+# 5. A failed mana debit after settlement is logged, never un-served
+# ---------------------------------------------------------------------------
+
+
+class TestManaDebitFailureAfterSettlement:
+    """A debit that fails after the committed settlement leaves the call served."""
+
+    async def test_a_failed_mana_debit_is_logged_and_the_call_still_served(
+        self, postgres_db: Database
+    ) -> None:
+        db = postgres_db
+        await _insert_budget(db, _TENANT, budget_micros=1_000_000, spent_micros=0)
+        mana_client = _FailingManaClient()
+        manager = _manager(db, mana=ManaMeter(mana_client))
+        provider = _CostedMockProvider(MockSpec(usage=Usage(input_tokens=10, output_tokens=20)))
+        service = InferenceService(_text_registry(), provider, governance=manager)
+
+        with capture_logs() as logs:
+            async with _serve(service, _text_registry(), manager) as stub:
+                response = await stub.Invoke(
+                    _invoke_request(invocation_id="inv-e2e-mana-fail"), metadata=_bearer()
+                )
+
+        # The caller read a successful answer: the failed debit is a bookkeeping
+        # outcome, never a reason to un-serve a call that was already served.
+        assert response.invocation_id == "inv-e2e-mana-fail"
+        assert response.model == _PUBLIC_MODEL
+        assert len(provider.calls) == 1
+
+        # The budget was debited and the outbox row landed, in the transaction
+        # that committed before the debit was attempted.
+        assert await _spent_micros(db, _TENANT) == _COST_MICROS
+        rows = await _outbox_rows(db, _TENANT)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["idempotency_key"] == row["id"]
+        event = token_usage_pb2.TokenUsageRecorded.FromString(row["payload"])
+        assert event.invocation_id == "inv-e2e-mana-fail"
+        assert event.cost_micros == _COST_MICROS
+
+        # The mana debit was attempted exactly once, under the invocation id, and
+        # it failed.
+        assert mana_client.debit_calls == [(_GCID, _TENANT, _ACTION_CODE, "inv-e2e-mana-fail")]
+
+        # The failure is logged loudly rather than raised to the caller.
+        recorded = [
+            entry
+            for entry in logs
+            if entry["event"] == "mana debit not recorded after a served call"
+        ]
+        assert len(recorded) == 1
+        assert recorded[0]["result"] == "error"
+        assert recorded[0]["invocation_id"] == "inv-e2e-mana-fail"
+
+
+# ---------------------------------------------------------------------------
+# 6. A redelivery does not re-attempt the mana debit
+# ---------------------------------------------------------------------------
+
+
+class TestRedeliveredDispatchDoesNotReAttemptManaDebit:
+    """A redelivered dispatch settles nothing, so its mana debit is not repeated."""
+
+    async def test_a_redelivered_dispatch_does_not_re_attempt_the_mana_debit(
+        self, postgres_db: Database
+    ) -> None:
+        db = postgres_db
+        await _insert_budget(db, _TENANT, budget_micros=1_000_000, spent_micros=0)
+        mana_client = _StubManaClient()
+        manager = _manager(db, mana=ManaMeter(mana_client))
+        provider = _CostedMockProvider()
+        service = InferenceService(_text_registry(), provider, governance=manager)
+
+        async with _serve(service, _text_registry(), manager) as stub:
+            first = await stub.Invoke(
+                _invoke_request(
+                    invocation_id="inv-mana-first", dispatch_idempotency_key="dispatch-mana-1"
+                ),
+                metadata=_bearer(),
+            )
+            second = await stub.Invoke(
+                _invoke_request(
+                    invocation_id="inv-mana-second", dispatch_idempotency_key="dispatch-mana-1"
+                ),
+                metadata=_bearer(),
+            )
+
+        # Both turns were served, but the mana debit ran once: the redelivery
+        # settled nothing and so did not charge the learner a second time.
+        assert first.invocation_id == "inv-mana-first"
+        assert second.invocation_id == "inv-mana-second"
+        assert len(provider.calls) == 2
+        assert mana_client.debit_calls == [(_GCID, _TENANT, _ACTION_CODE, "inv-mana-first")]
+        assert await _spent_micros(db, _TENANT) == _COST_MICROS
+        assert len(await _outbox_rows(db, _TENANT)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 7. A crash between settlement and the mana debit, then a retry
+# ---------------------------------------------------------------------------
+
+
+class TestCrashBetweenSettlementAndManaDebitBillsOnce:
+    """A crash after the committed settlement bills the learner exactly once."""
+
+    async def test_a_crash_before_the_mana_debit_does_not_double_charge_on_retry(
+        self, postgres_db: Database
+    ) -> None:
+        db = postgres_db
+        await _insert_budget(db, _TENANT, budget_micros=1_000_000, spent_micros=0)
+        mana_client = _FailingManaClient()
+        manager = _manager(db, mana=ManaMeter(mana_client))
+        provider = _CostedMockProvider()
+        service = InferenceService(_text_registry(), provider, governance=manager)
+
+        with capture_logs() as logs:
+            async with _serve(service, _text_registry(), manager) as stub:
+                first = await stub.Invoke(
+                    _invoke_request(
+                        invocation_id="inv-crash-first", dispatch_idempotency_key="dispatch-crash-1"
+                    ),
+                    metadata=_bearer(),
+                )
+                rows_after_first = await _outbox_rows(db, _TENANT)
+                spent_after_first = await _spent_micros(db, _TENANT)
+                second = await stub.Invoke(
+                    _invoke_request(
+                        invocation_id="inv-crash-second",
+                        dispatch_idempotency_key="dispatch-crash-1",
+                    ),
+                    metadata=_bearer(),
+                )
+
+        # The first call was served and its budget + outbox transaction committed
+        # before the mana debit was attempted — the crash boundary.
+        assert first.invocation_id == "inv-crash-first"
+        assert second.invocation_id == "inv-crash-second"
+        assert len(provider.calls) == 2
+        assert spent_after_first == _COST_MICROS
+        assert len(rows_after_first) == 1
+
+        # The debit failed, loudly logged, and the retry was still served.
+        assert mana_client.debit_calls == [(_GCID, _TENANT, _ACTION_CODE, "inv-crash-first")]
+        recorded = [
+            entry
+            for entry in logs
+            if entry["event"] == "mana debit not recorded after a served call"
+        ]
+        assert len(recorded) == 1
+
+        # The retry settled nothing: one budget debit, one outbox row and no
+        # second mana debit, so the learner is never charged twice for one dispatch.
+        assert await _spent_micros(db, _TENANT) == _COST_MICROS
+        assert len(await _outbox_rows(db, _TENANT)) == 1

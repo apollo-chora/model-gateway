@@ -330,6 +330,17 @@ class GovernanceManager:
         subsidy slice it draws down is the one the call's tenant names.
         ``dispatch_key`` is carried onto the event envelope so the redelivery
         proof can read which dispatch the usage belonged to.
+
+        **The crash boundary is the debit, not the settlement.** The budget and
+        outbox transaction commits before the mana debit is attempted, so a crash
+        between the two leaves the learner charged for the call and the mana wallet
+        undrawn. That is the intended behaviour, matching the Go gateway: the mana
+        debit is best-effort after a successful call, and an unrecorded charge is a
+        bookkeeping outcome rather than a reason to un-serve the answer. A retry
+        with the same dispatch key is still served, but settles nothing — no second
+        budget debit, no second outbox row and no second mana debit — so it can
+        neither double-charge the learner nor blindly re-attempt the charge that
+        never landed.
         """
         envelope = {**envelope, **({"dispatch_key": dispatch_key} if dispatch_key else {})}
         settled = await self._budget.debit_and_enqueue(
