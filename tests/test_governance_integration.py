@@ -300,15 +300,17 @@ class _CostedMockProvider(MockProvider):
 
 
 class TestAuthorizeInvoke:
-    async def test_an_ungoverned_request_is_allowed_without_reading_a_table(self) -> None:
+    async def test_a_surface_less_request_is_refused_without_reading_a_table(self) -> None:
         connection = StubConnection()
         manager = _manager(connection)
 
         decision = await manager.authorize_invoke("", None, None, None, None, "inv-1")
 
-        assert decision.allowed
-        assert not decision.deduped
-        # No tenant, no learner, no dispatch key: nothing to read.
+        # An unstamped surface is refused loudly, before any table is read:
+        # containment cannot be evaluated for an undeclared turn, and the
+        # refusal must not be a silent pass-through.
+        assert not decision.allowed
+        assert decision.reason == "surface_unstamped"
         assert connection.calls == []
 
     async def test_a_tenant_with_no_budget_window_is_allowed(self) -> None:
@@ -316,13 +318,13 @@ class TestAuthorizeInvoke:
         manager = _manager(connection)
 
         decision = await manager.authorize_invoke(
-            _TENANT_ID, _GCID, "companion_chat", None, None, "inv-1"
+            _TENANT_ID, _GCID, "companion_chat", None, "qgen", "inv-1"
         )
 
         assert decision.allowed
         # The tenant budget was read and found no window; the fail-open absence.
         # No learner-scoped action ran (the meter is not wired), and no
-        # containment read ran (no companion surface was stated).
+        # containment read ran (a non-companion surface is not contained).
         assert connection.budget_reads() == 1
         assert connection.read_containment() == 0
 
@@ -334,7 +336,7 @@ class TestAuthorizeInvoke:
         manager = _manager(connection)
 
         decision = await manager.authorize_invoke(
-            _TENANT_ID, _GCID, None, None, None, "inv-1"
+            _TENANT_ID, _GCID, None, None, "qgen", "inv-1"
         )
 
         assert not decision.allowed
@@ -377,7 +379,7 @@ class TestAuthorizeInvoke:
         manager = _manager(connection)
 
         decision = await manager.authorize_invoke(
-            _TENANT_ID, _GCID, "companion_chat", "dispatch-key-1", None, "inv-2"
+            _TENANT_ID, _GCID, "companion_chat", "dispatch-key-1", "qgen", "inv-2"
         )
 
         assert decision.allowed
@@ -396,7 +398,7 @@ class TestAuthorizeInvoke:
         manager = _manager(connection, mana=mana)
 
         decision = await manager.authorize_invoke(
-            _TENANT_ID, _GCID, "companion_chat_turn_standard", None, None, "inv-1"
+            _TENANT_ID, _GCID, "companion_chat_turn_standard", None, "qgen", "inv-1"
         )
 
         assert not decision.allowed
@@ -410,7 +412,7 @@ class TestAuthorizeInvoke:
         manager = _manager(connection, mana=mana)
 
         decision = await manager.authorize_invoke(
-            _TENANT_ID, _GCID, "content_moderation", None, None, "inv-1"
+            _TENANT_ID, _GCID, "content_moderation", None, "qgen", "inv-1"
         )
 
         assert decision.allowed
@@ -428,7 +430,7 @@ class TestAuthorizeInvoke:
         # An action the catalogue does not price quotes affordable; only a
         # definitive shortfall on a priced action refuses.
         decision = await manager.authorize_invoke(
-            _TENANT_ID, _GCID, "coach_session_full", None, None, "inv-1"
+            _TENANT_ID, _GCID, "coach_session_full", None, "qgen", "inv-1"
         )
 
         assert decision.allowed
@@ -531,6 +533,20 @@ class TestInvokeGovernance:
         assert error.value.details["reason"] == "companion_suspended"
         assert provider.calls == []
 
+    async def test_an_unstamped_surface_is_refused_before_the_provider(self) -> None:
+        connection = StubConnection()
+        provider = MockProvider()
+        service = _service(provider, _manager(connection))
+
+        with pytest.raises(FailedPreconditionError) as error:
+            await service.invoke(_request(), namespace="ns", tenant=_TENANT_ID)
+
+        # The refusal is loud: an undeclared turn is refused as surface_unstamped
+        # by the governance chain, never silently passed as "not a companion
+        # turn", and the provider is never reached.
+        assert error.value.details["reason"] == "surface_unstamped"
+        assert provider.calls == []
+
     async def test_an_overdrawn_call_is_refused_before_the_provider(self) -> None:
         connection = StubConnection()
         connection.budget_rows = [
@@ -540,7 +556,9 @@ class TestInvokeGovernance:
         service = _service(provider, _manager(connection))
 
         with pytest.raises(FailedPreconditionError) as error:
-            await service.invoke(_request(), namespace="ns", tenant=_TENANT_ID)
+            await service.invoke(
+                _request(surface="qgen"), namespace="ns", tenant=_TENANT_ID
+            )
 
         assert error.value.details["reason"] == "budget_exhausted"
         assert provider.calls == []
@@ -559,7 +577,9 @@ class TestInvokeGovernance:
 
         with pytest.raises(ResourceExhaustedError) as error:
             await service.invoke(
-                _request(action_code="coach_session_full"), namespace="ns", tenant=_TENANT_ID
+                _request(action_code="coach_session_full", surface="qgen"),
+                namespace="ns",
+                tenant=_TENANT_ID,
             )
 
         assert error.value.details["reason"] == "insufficient_mana"
@@ -590,7 +610,9 @@ class TestInvokeGovernance:
         service = _service(provider, _manager(connection, mana=ManaMeter(mana_client)))
 
         response = await service.invoke(
-            _request(action_code="companion_chat"), namespace="ns", tenant=_TENANT_ID
+            _request(action_code="companion_chat", surface="qgen"),
+            namespace="ns",
+            tenant=_TENANT_ID,
         )
 
         assert len(provider.calls) == 1
@@ -612,6 +634,7 @@ class TestInvokeGovernance:
                 invocation_id="inv-1",
                 action_code="companion_chat",
                 dispatch_idempotency_key="dispatch-key-1",
+                surface="qgen",
             ),
             namespace="ns",
             tenant=_TENANT_ID,
@@ -621,6 +644,7 @@ class TestInvokeGovernance:
                 invocation_id="inv-2",
                 action_code="companion_chat",
                 dispatch_idempotency_key="dispatch-key-1",
+                surface="qgen",
             ),
             namespace="ns",
             tenant=_TENANT_ID,
@@ -641,7 +665,9 @@ class TestInvokeGovernance:
         provider = MockProvider()
         service = _service(provider, _manager(connection))
 
-        response = await service.invoke(_request(), namespace="ns", tenant=_TENANT_ID)
+        response = await service.invoke(
+            _request(surface="qgen"), namespace="ns", tenant=_TENANT_ID
+        )
 
         # The provider was called and its answer returned; the settlement
         # failure was logged, not raised.
@@ -658,7 +684,11 @@ class TestInvokeGovernance:
 
         for index in range(5):
             await service.invoke(
-                _request(invocation_id=f"inv-{index}", action_code="companion_chat"),
+                _request(
+                    invocation_id=f"inv-{index}",
+                    action_code="companion_chat",
+                    surface="qgen",
+                ),
                 namespace="ns",
                 tenant=_TENANT_ID,
             )
@@ -674,7 +704,7 @@ class TestInvokeGovernance:
         service = _service(provider, _manager(connection))
 
         response = await service.invoke(
-            _request(tenant_id=None), namespace="ns", tenant=None
+            _request(tenant_id=None, surface="qgen"), namespace="ns", tenant=None
         )
 
         # No tenant: no budget to read, no outbox to write, no mana to debit —

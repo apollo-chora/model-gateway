@@ -154,6 +154,17 @@ _OBJECT_TEXT_COMPLETION = "text_completion"
 _COMPLETION_ID_PREFIX = "cmpl-"
 _DONE = "[DONE]"
 
+_SURFACE = "openai_compat"
+"""The surface every request this endpoint serves is stamped with.
+
+The OpenAI wire format carries no surface field, so a caller cannot declare
+one; the gateway stamps the surface the call arrived on, as the Go gateway
+does. ``openai_compat`` is deliberately non-companion: it states the turn's
+surface — which the governance chain requires of every invoke, refusing an
+undeclared turn — without asking for the companion containment read, which
+an OpenAI-compatible turn is not subject to.
+"""
+
 _REQUEST_KEYS = frozenset(
     {
         "model",
@@ -309,6 +320,13 @@ class CompletionRequest:
     the gateway cannot represent is refused as malformed input, not discovered to
     be unrepresentable halfway through an invocation.
 
+    Every parsed request is stamped ``surface="openai_compat"``: the OpenAI
+    wire format carries no surface, so the caller cannot declare one, and the
+    surface the call arrived on is stamped here rather than left undeclared —
+    a non-companion surface that satisfies the governance chain's
+    stamped-surface requirement without asking for the companion containment
+    read.
+
     ``stream`` is carried rather than acted on here. What the caller asked for is
     recorded so the handler can serve it as Server-Sent Events or refuse it with
     a capability error naming ``streaming`` when the bound provider cannot
@@ -340,6 +358,7 @@ class CompletionRequest:
                 idempotency_key=_as_idempotency_key(
                     f"{where} 'idempotency_key'", body.get("idempotency_key")
                 ),
+                surface=_SURFACE,
             )
         except ValueError as error:
             raise InvalidArgumentError(f"invalid completion request: {error}") from error

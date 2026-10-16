@@ -1,0 +1,135 @@
+// =============================================================================
+// chora.observability.v1 — Token usage / cost ledger events
+// =============================================================================
+//
+// The canonical billing-grade ledger event the Model Gateway emits via its
+// transactional outbox on every successful model invocation. The relay drains
+// outbox_events rows to the canonical topic
+//   chora.observability.token_usage.recorded.v1
+// and the observability service's TokenUsageConsumer proto.Unmarshal's the
+// payload column into its own chora.observability.v1.TokenUsageRecorded.
+//
+// This file is the Python gateway's copy of the canonical contract in
+// chora-contracts/proto/events/observability/token_usage.proto. Field numbers
+// and types MUST stay in sync with that file: the consumer decodes by field
+// number, so a renumbered field here is a silently misread ledger row there.
+// The EventEnvelope message is inlined rather than imported so this file has
+// no cross-file imports to resolve at generation time; inlining changes
+// nothing on the wire, where a message is identified by its field number.
+//
+// Owning domain : Observability (chora_observability database)
+// Topic prefix  : chora.observability.token_usage.*
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.observability.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// EventEnvelope wraps every domain event published to Pub/Sub. The gateway
+// stamps it onto every token-usage event so the consumer can attribute the
+// cost, correlate the trace and deduplicate a redelivery.
+message EventEnvelope {
+  // UUIDv7 — globally unique; sortable by time.
+  string event_id = 1;
+  // Producer-supplied dedup key. Subscribers MUST be idempotent on this.
+  string idempotency_key = 2;
+  // Tenant scope. Required for ALL events (multi-tenant isolation).
+  string tenant_id = 3;
+  // Global Chora ID (UUIDv7) of the actor — learner / admin / agent.
+  string gcid = 4;
+  // When the domain event semantically occurred (producer clock).
+  google.protobuf.Timestamp occurred_at = 5;
+  // When the producer published to Pub/Sub (after txn commit).
+  google.protobuf.Timestamp published_at = 6;
+  // W3C Trace Context — REQUIRED for distributed tracing across Pub/Sub.
+  string traceparent = 7;
+  string tracestate = 8;
+  // Provenance — which project + service emitted this.
+  string source_project = 9;
+  string source_service = 10;
+  // Schema major version of the event payload (matches v{N} in topic).
+  int32 schema_version = 11;
+  // Optional correlation across saga steps / multi-event flows.
+  string correlation_id = 12;
+  // Optional causation: event_id of the event that caused this one.
+  string causation_id = 13;
+  // Optional IMDA dimension this event is evidence for.
+  string chora_imda_dimension = 14;
+  // Optional IMDA lifecycle stage classifier.
+  string imda_lifecycle_stage = 15;
+}
+
+// TokenUsageRecorded is emitted at the Model Gateway via the transactional
+// outbox on every successful model invocation. It carries the token counts
+// for input/output/cached and the canonical micro-dollar cost.
+//
+// Note: the gcid field carries either a learner GCID OR an agent AGID. The
+// agent_role field disambiguates the calling agent's role within its crew.
+message TokenUsageRecorded {
+  EventEnvelope envelope = 1;
+
+  // UUIDv7 — TokenUsageLedger entry identifier.
+  string usage_id = 2;
+
+  // Tenant scope (also carried in envelope.tenant_id for redundancy).
+  string tenant_id = 3;
+
+  // Either GCID (learner-attributed cost) or AGID (system-attributed cost).
+  string gcid = 4;
+
+  // Model identifier (e.g., "gemini-2.5-flash", "text-embedding-004").
+  string model_id = 5;
+
+  // Input prompt tokens.
+  int64 input_tokens = 6;
+
+  // Output completion tokens.
+  int64 output_tokens = 7;
+
+  // Cached prompt tokens (discounted billing).
+  int64 cached_tokens = 8;
+
+  // Canonical cost in micro-dollars (1e-6 USD). Integer to avoid float drift.
+  int64 cost_micros = 9;
+
+  // Correlation back to the invocation chain.
+  string invocation_id = 10;
+
+  // Free-text role of the calling agent within its crew. Empty for
+  // non-agentic direct calls.
+  string agent_role = 11;
+
+  google.protobuf.Timestamp recorded_at = 12;
+
+  // Resolved vendor identifier (e.g., "openai_byoa").
+  string vendor = 13;
+
+  // Adapter dispatch chain. Length 1 on the happy path.
+  repeated string fallback_chain = 14;
+
+  ModelArmorVerdict model_armor_verdict_pre = 15;
+  ModelArmorVerdict model_armor_verdict_post = 16;
+
+  // Build identifier of the gateway that emitted this event.
+  string gateway_version = 17;
+
+  // Mana units charged for this call (0 = unknown / un-metered).
+  int64 mana_units = 18;
+
+  // Stable mana action code. Empty = unknown.
+  string action_code = 19;
+}
+
+// ModelArmorVerdict mirrors chora.services.model_gateway.v1.ModelArmorVerdict
+// so the events tree stays import-free. Values MUST stay numerically in sync
+// with the service-side enum.
+enum ModelArmorVerdict {
+  MODEL_ARMOR_VERDICT_UNSPECIFIED = 0;
+  MODEL_ARMOR_VERDICT_ALLOW = 1;
+  MODEL_ARMOR_VERDICT_BLOCK = 2;
+  MODEL_ARMOR_VERDICT_SANITISE = 3;
+  MODEL_ARMOR_VERDICT_ERROR = 4;
+  MODEL_ARMOR_VERDICT_BYPASSED = 5;
+}

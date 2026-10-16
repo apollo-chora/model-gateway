@@ -74,6 +74,17 @@ __all__ = [
 
 ImagesHandler = Callable[[Request], Awaitable[Response]]
 
+_SURFACE = "openai_compat"
+"""The surface every request this endpoint serves is stamped with.
+
+The OpenAI wire format carries no surface field, so a caller cannot declare
+one; the gateway stamps the surface the call arrived on, as the Go gateway
+does. ``openai_compat`` is deliberately non-companion: it states the turn's
+surface — which the governance chain requires of every invoke, refusing an
+undeclared turn — without asking for the companion containment read, which
+an OpenAI-compatible turn is not subject to.
+"""
+
 _GENERATION_REQUEST_KEYS = frozenset(
     {"model", "prompt", "size", "response_format", "n", "metadata"}
 )
@@ -127,6 +138,13 @@ def image_generation_request_from_payload(payload: object) -> ImageRequest:
     invalid-request error carrying the domain's own gateway-authored message,
     which names the field that failed. An unknown key is refused the same
     way: the boundary does not ignore a parameter it does not understand.
+
+    The parsed request is stamped ``surface="openai_compat"``: the OpenAI
+    image format carries no surface, so the caller cannot declare one, and the
+    surface the call arrived on is stamped here rather than left undeclared —
+    a non-companion surface that satisfies the governance chain's
+    stamped-surface requirement without asking for the companion containment
+    read.
     """
     where = "the request body"
     try:
@@ -141,6 +159,7 @@ def image_generation_request_from_payload(payload: object) -> ImageRequest:
             ),
             n=as_optional_int(f"{where} 'n'", body.get("n"), minimum=1),
             metadata=_as_metadata(f"{where} 'metadata'", body.get("metadata")),
+            surface=_SURFACE,
         )
     except ValueError as error:
         raise InvalidArgumentError(f"invalid image request: {error}") from error

@@ -313,6 +313,7 @@ async def test_the_factory_gives_the_built_service_the_configured_attempt_budget
             tenant_limiter=None,
             metrics=None,
             tracer=None,
+            governance=None,
         ):
             captured["attempt_timeout"] = attempt_timeout
 
@@ -352,6 +353,7 @@ async def test_the_factory_gives_the_built_service_every_configured_reliability_
             tenant_limiter=None,
             metrics=None,
             tracer=None,
+            governance=None,
         ):
             captured.update(
                 attempt_timeout=attempt_timeout,
@@ -408,6 +410,7 @@ async def test_the_factory_gives_the_built_service_the_configured_limits(monkeyp
             tenant_limiter=None,
             metrics=None,
             tracer=None,
+            governance=None,
         ):
             captured.update(rate_limiter=rate_limiter, tenant_limiter=tenant_limiter)
 
@@ -450,6 +453,7 @@ async def test_a_deployment_that_configures_no_limits_is_given_none(monkeypatch)
             tenant_limiter=None,
             metrics=None,
             tracer=None,
+            governance=None,
         ):
             captured.update(rate_limiter=rate_limiter, tenant_limiter=tenant_limiter)
 

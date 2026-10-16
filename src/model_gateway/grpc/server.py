@@ -25,6 +25,7 @@ import structlog
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
 from model_gateway.config import ConfigurationError, Settings
+from model_gateway.governance.manager import GovernanceManager
 from model_gateway.grpc import gateway_pb2_grpc
 from model_gateway.grpc.embed import Embed
 from model_gateway.grpc.grounded_search import GroundedSearch
@@ -46,7 +47,14 @@ _BIND_ADDRESS = "0.0.0.0"
 
 
 class GrpcServer:
-    """The gRPC listener, ready to be started beside the HTTP server."""
+    """The gRPC listener, ready to be started beside the HTTP server.
+
+    ``governance`` is the chain the grounded search runs through before the
+    egress, or ``None`` for a deployment that wired no governance manager —
+    one that configures no ``CHORA_OBSERVABILITY_DSN``. The inference RPCs are
+    gated by the service's own chain, so the manager is passed here for the
+    one RPC the service does not serve.
+    """
 
     def __init__(
         self,
@@ -55,10 +63,12 @@ class GrpcServer:
         registry: ModelRegistry,
         settings: Settings,
         api_keys: ApiKeySet,
+        governance: GovernanceManager | None = None,
     ) -> None:
         self._service = service
         self._registry = registry
         self._settings = settings
+        self._governance = governance
         self._authenticator = Authenticator(
             api_keys,
             auth_enabled=settings.auth_enabled,
@@ -93,7 +103,7 @@ class GrpcServer:
                 Invoke(self._authenticator, service),
                 InvokeStream(self._authenticator, service),
                 Embed(self._authenticator, service),
-                GroundedSearch(self._authenticator, exa_config),
+                GroundedSearch(self._authenticator, exa_config, governance=self._governance),
                 ListModels(self._authenticator, registry),
             ),
             self._grpc,

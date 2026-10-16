@@ -154,10 +154,10 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import TypeVar
 from uuid import uuid4
 
-import orjson
 import structlog
 from opentelemetry.trace import Tracer
 
@@ -198,6 +198,7 @@ from model_gateway.governance.manager import (
     GovernanceManager,
     governance_refusal,
 )
+from model_gateway.governance.outbox import build_token_usage_payload, token_usage_envelope
 from model_gateway.idempotency import (
     IdempotencyStore,
     MemoryIdempotencyStore,
@@ -775,16 +776,23 @@ class InferenceService:
 
         The budget debit, the token-usage outbox record and the mana debit run
         after the answer has been produced, because a call that produced output
-        is a call the gateway owes for. A settlement failure is logged, never
-        raised: the answer is already in the caller's hands, and a ledger the
-        operator misconfigured is not a reason to withhold it — the same rule
-        the accounting record follows. A request with no tenant settles
-        nothing: the budget and the outbox are tenant-scoped, and there is no
-        tenant to attribute the spend to.
+        is a call the gateway owes for. The outbox payload is the canonical
+        ``chora.observability.v1.TokenUsageRecorded`` protobuf — the bytes the
+        consumer ``proto.Unmarshal``s — built by
+        :func:`~model_gateway.governance.outbox.build_token_usage_payload`, and
+        the envelope beside it carries the contract's own keys. A settlement
+        failure is logged, never raised: the answer is already in the caller's
+        hands, and a ledger the operator misconfigured is not a reason to
+        withhold it — the same rule the accounting record follows. A request
+        with no tenant settles nothing: the budget and the outbox are
+        tenant-scoped, and there is no tenant to attribute the spend to.
         """
         assert self._governance is not None
         if not request.tenant_id:
             return
+        usage = response.usage
+        occurred_at = datetime.now(UTC)
+        usage_id = uuid4().hex
         try:
             await self._governance.settle_invoke(
                 tenant_id=request.tenant_id,
@@ -792,29 +800,28 @@ class InferenceService:
                 action_code=request.action_code,
                 dispatch_key=request.dispatch_idempotency_key,
                 invocation_id=response.invocation_id or "",
-                usage_id=uuid4().hex,
+                usage_id=usage_id,
                 cost_micros=_cost_micros(response.estimated_cost),
-                payload=orjson.dumps(
-                    {
-                        "invocation_id": response.invocation_id,
-                        "tenant_id": request.tenant_id,
-                        "gcid": request.gcid,
-                        "action_code": request.action_code,
-                        "model": response.model,
-                        "upstream_model": response.upstream_model,
-                        "usage": response.usage.to_dict(),
-                        "estimated_cost": response.estimated_cost,
-                        "cost_currency": response.cost_currency,
-                        "attempt_count": response.attempt_count,
-                        "fallback_used": response.fallback_used,
-                    }
+                payload=build_token_usage_payload(
+                    usage_id=usage_id,
+                    tenant_id=request.tenant_id,
+                    gcid=request.gcid or "",
+                    model_id=response.model,
+                    invocation_id=response.invocation_id or "",
+                    input_tokens=usage.input_tokens or 0,
+                    output_tokens=usage.output_tokens or 0,
+                    cached_tokens=usage.cached_tokens or 0,
+                    cost_micros=_cost_micros(response.estimated_cost),
+                    action_code=request.action_code or "",
+                    agent_role=request.actor_id or "",
+                    occurred_at=occurred_at,
                 ),
-                envelope={
-                    "invocation_id": response.invocation_id or "",
-                    "tenant_id": request.tenant_id,
-                    "gcid": request.gcid or "",
-                    "action_code": request.action_code or "",
-                },
+                envelope=token_usage_envelope(
+                    usage_id=usage_id,
+                    tenant_id=request.tenant_id,
+                    gcid=request.gcid or "",
+                    occurred_at=occurred_at,
+                ),
             )
         except Exception as error:
             logger.error(
