@@ -1,0 +1,20 @@
+# Buf module for the gateway's published contract.
+#
+# The .proto files under proto/ are the source of truth. The Python stubs
+# under src/model_gateway/ and the Go stubs under gen/go/ are generated from
+# them and checked in — regenerate, never hand-edit.
+#
+#   buf generate --path proto/gateway/v1/gateway.proto   # Go stubs; needs
+#                                                        # buf + the two Go
+#                                                        # plugins on PATH
+#
+# Plain `buf generate` is NOT equivalent. It would also feed the governance
+# peer protos (identity/v1, observability/v1) to the Go plugins, and those
+# have no Go import path — they exist for the Python side only.
+#
+# The module path is deliberately the Python repository's own: this contract
+# is published, not imported. Go callers add the module to their go.mod and
+# a `replace` pointing at their local checkout.
+version: v2
+modules:
+  - path: proto
