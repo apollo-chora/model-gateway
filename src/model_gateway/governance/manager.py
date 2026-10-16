@@ -303,6 +303,30 @@ class GovernanceManager:
 
         return GovernanceDecision(allowed=True, reason="", detail="")
 
+    async def claim_dispatch(
+        self,
+        gcid: str,
+        dispatch_key: str,
+        action_code: str,
+        invocation_id: str,
+    ) -> bool:
+        """Claim the debit for one dispatch key; ``True`` when this caller won.
+
+        The first claim on a ``(gcid, dispatch_key, action_code)`` triple inserts
+        its row and wins; a later claim on the same triple inserts nothing, records
+        itself as a dedupe on the winning row, and loses. An empty ``gcid`` or
+        ``dispatch_key`` passes the claim through without touching the database —
+        an unkeyed turn has nothing to dedupe. A ``gcid`` that is not a valid
+        UUID also passes through: the claim's identity is unusable without one,
+        and refusing to debit an unkeyed turn would bill nobody.
+        """
+        if not gcid or not dispatch_key:
+            return True
+        try:
+            return await self._idempotency.claim(gcid, dispatch_key, action_code, invocation_id)
+        except ValueError:
+            return True
+
     async def settle_invoke(
         self,
         tenant_id: str,
