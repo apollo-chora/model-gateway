@@ -148,6 +148,16 @@ def _as_gateway_error(error: GroundedError) -> GatewayError:
     category whose transport status the chain declares for it. A reason outside
     the table is an internal error: it names a failure the gateway cannot
     classify, which is a misconfiguration rather than a caller's remedy.
+
+    When the failure carries partial spend — the Exa search billed but the
+    synthesis failed — the usage is included in the error details so the
+    caller can account the cost the provider already charged.
     """
     category = _GROUNDED_CATEGORIES.get(error.reason, InternalError)
-    return category(error.detail or error.reason)
+    details = None
+    if error.usage is not None:
+        details = {
+            "partial_grounding_units": str(error.usage.grounding_units),
+            "partial_cost_micros": str(error.usage.cost_micros),
+        }
+    return category(error.detail or error.reason, details=details)

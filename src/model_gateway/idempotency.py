@@ -116,7 +116,7 @@ def request_fingerprint(request: InvocationRequest) -> RequestFingerprint:
     requests, and answering one from the other would leak an answer across a
     boundary the gateway is required to hold.
 
-    Four fields are deliberately excluded, each for a stated reason:
+    Five fields are deliberately excluded, each for a stated reason:
 
     * ``invocation_id`` — the gateway mints its own identifier and discards a
       provider's, so it is not a property of what the caller asked. Fingerprinting
@@ -127,6 +127,9 @@ def request_fingerprint(request: InvocationRequest) -> RequestFingerprint:
       cannot change the answer. This holds while ``FORWARDABLE_METADATA_KEYS``
       stays empty; a metadata key that becomes semantically consumed changes this
       fingerprint with that contract, not before it.
+    * ``model`` — the operation is resolved from the transport, not from the
+      caller's model string, so the field cannot change the answer and two
+      requests differing only in it are the same request.
     * ``fallback_models`` — the caller's permitted fallbacks no longer choose
       anything: the operation is resolved from the transport and the configured
       route order applies, so the field cannot change the answer and two requests

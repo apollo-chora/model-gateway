@@ -569,6 +569,20 @@ def test_routes_for_operation_raises_for_an_unconfigured_operation():
     assert "image-default" in error.value.message
 
 
+def test_routes_for_operation_raises_model_not_found_for_grounded_search():
+    """GROUNDED_SEARCH has no public ID and no routes; the lookup must not raise KeyError.
+
+    The operation is served through the Exa adapter directly, so it appears in
+    the enum without a route block and without a public model ID. The registry
+    must raise ModelNotFoundError — the same error an unknown public ID raises —
+    rather than a raw KeyError from the mapping lookup.
+    """
+    models = registry(block())
+
+    with pytest.raises(ModelNotFoundError):
+        models.routes_for_operation(Operation.GROUNDED_SEARCH)
+
+
 # ---------------------------------------------------------------------------
 # The model info itself
 # ---------------------------------------------------------------------------

@@ -225,7 +225,9 @@ class ModelRegistry:
         if routes is None:
             public_id = PUBLIC_MODEL_IDS.get(operation)
             if public_id is None:
-                raise _unknown_model_error(f"<operation {operation.value}>", self.list_models())
+                raise ModelNotFoundError(
+                    f"the operation {operation.value!r} has no configured routes"
+                )
             raise _unknown_model_error(public_id, self.list_models())
         return routes
 

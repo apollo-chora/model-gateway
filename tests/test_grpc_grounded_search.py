@@ -250,6 +250,30 @@ async def test_a_governance_denial_maps_onto_its_status(wire_adapter, reason, st
     assert reason in error.value.details()
 
 
+async def test_a_synthesis_failure_includes_partial_spend_in_the_error_details(wire_adapter):
+    """A grounded failure carrying partial usage publishes it in the gRPC error details.
+
+    When the Exa search succeeds but the synthesis fails, the provider billed
+    for the search. The error response carries the partial cost so the caller
+    can account it — the same reason the Go adapter returns the usage with the
+    error.
+    """
+    partial_usage = GroundedUsage(grounding_units=1, cost_micros=10_000)
+    adapter = ScriptedAdapter(
+        GroundedError("vendor_unavailable", "the synthesis call failed", usage=partial_usage)
+    )
+    wire_adapter(adapter)
+
+    async with serve(adapter) as (stub, adapter):
+        with pytest.raises(grpc.aio.AioRpcError) as error:
+            await stub.GroundedSearch(request(), metadata=bearer())
+
+    assert error.value.code() == grpc.StatusCode.UNAVAILABLE
+    details = error.value.details()
+    assert "partial_cost_micros" in details
+    assert "10000" in details
+
+
 async def test_an_unconfigured_gateway_is_an_internal_error(wire_adapter):
     adapter = ScriptedAdapter(GroundedError("not_configured", "the Exa API key is not configured"))
     wire_adapter(adapter)

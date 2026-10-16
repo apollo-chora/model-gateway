@@ -137,19 +137,16 @@ def test_the_payload_states_exactly_which_fields_participate():
         "response_modality",
         "tenant",
     }
-    for excluded in ("invocation_id", "idempotency_key", "metadata", "fallback_models"):
+    for excluded in ("invocation_id", "idempotency_key", "metadata", "fallback_models", "model"):
         assert excluded not in payload
 
 
 def test_the_model_field_is_not_part_of_the_fingerprint():
-    """The caller's model string cannot change the answer, so it cannot split a request.
+    """Two requests differing only in model have the same fingerprint.
 
-    The operation is resolved from the transport and the response is stamped with
-    the gateway's fixed public model ID, so a request that names no model and one
-    that names the public ID are the same request — and two requests naming
-    arbitrary models the caller made up are the same request too. Fingerprinting
-    the field would make every retry that drops it a miss, and a miss is a second
-    invocation: the duplicate accounting the key exists to prevent.
+    The operation is resolved from the transport, not from the caller's model
+    string, so the model cannot change the answer. A repeat with a different
+    model is the same request and must replay.
     """
     assert request_fingerprint(request(model=None)).digest == request_fingerprint(
         request(model="text-default")
@@ -157,6 +154,49 @@ def test_the_model_field_is_not_part_of_the_fingerprint():
     assert request_fingerprint(request(model="foo")).digest == request_fingerprint(
         request(model="bar")
     ).digest
+
+
+async def test_the_same_key_replays_across_absent_and_valid_models():
+    """A key answered with model=None replays for model="text-default".
+
+    The model is resolved from the transport, not from the caller's string, so
+    two requests differing only in model are the same request and a repeat
+    replays the recorded answer.
+    """
+    store = MemoryIdempotencyStore()
+    await store.acquire("key-1", request_fingerprint(request(model=None)), "acme")
+    await store.complete("key-1", "acme", answered(request(model=None)))
+
+    replay = await store.acquire(
+        "key-1", request_fingerprint(request(model="text-default")), "acme"
+    )
+    assert replay.kind == "completed"
+
+
+async def test_the_same_key_replays_across_two_arbitrary_models():
+    """A key answered with model="foo" replays for model="bar"."""
+    store = MemoryIdempotencyStore()
+    await store.acquire("key-1", request_fingerprint(request(model="foo")), "acme")
+    await store.complete("key-1", "acme", answered(request(model="foo")))
+
+    replay = await store.acquire(
+        "key-1", request_fingerprint(request(model="bar")), "acme"
+    )
+    assert replay.kind == "completed"
+
+
+async def test_simultaneous_equivalent_requests_differing_only_in_model_coalesce():
+    """Two simultaneous requests differing only in model coalesce into one invocation."""
+    store = MemoryIdempotencyStore()
+    owner = await store.acquire("key-1", request_fingerprint(request(model=None)), "acme")
+    waiter = await store.acquire(
+        "key-1", request_fingerprint(request(model="text-default")), "acme"
+    )
+
+    assert owner.kind == "owner"
+    assert waiter.kind == "waiter"
+    await store.complete("key-1", "acme", answered(request(model=None)))
+    assert (await settle(waiter.future)).idempotency_status is IdempotencyStatus.NEW
 
 
 # --------------------------------------------------------------------------- #
@@ -379,64 +419,6 @@ async def test_simultaneous_identical_requests_coalesce_so_one_invocation_serves
     assert owner.kind == "owner"
     assert second.idempotency_status is IdempotencyStatus.NEW
     assert second.upstream_model == owner_response().upstream_model
-
-
-async def test_the_same_key_replays_across_absent_and_valid_models():
-    """A key answered for one request answers a repeat that names the public model.
-
-    The first caller may name no model at all and the repeat may name
-    ``text-default`` — or the other way round. Both are the same request, so the
-    repeat is answered from the record rather than executed a second time.
-    """
-    store = MemoryIdempotencyStore()
-    await store.acquire("key-1", request_fingerprint(request(model=None)), "")
-    await store.complete("key-1", "", answered(request()))
-
-    claim = await store.acquire(
-        "key-1", request_fingerprint(request(model="text-default")), ""
-    )
-
-    assert claim.kind == "completed"
-    assert claim.record is not None
-    assert store._entries[("", "key-1")].record is claim.record
-
-
-async def test_the_same_key_replays_across_two_arbitrary_models():
-    """A key answered for one caller's arbitrary model string answers another's.
-
-    A caller-supplied model name is carried for the caller's own correlation and
-    ignored for routing, so two names the gateway never heard of are as equivalent
-    as none and the public ID.
-    """
-    store = MemoryIdempotencyStore()
-    await store.acquire("key-1", request_fingerprint(request(model="foo")), "")
-    await store.complete("key-1", "", answered(request()))
-
-    claim = await store.acquire("key-1", request_fingerprint(request(model="bar")), "")
-
-    assert claim.kind == "completed"
-    assert claim.record is not None
-
-
-async def test_simultaneous_equivalent_requests_differing_only_in_model_coalesce():
-    """Two callers arriving together are one invocation, whatever model each named.
-
-    The first claims the key; the second, arriving while the first is still
-    deciding, waits on the same claim rather than starting a second invocation —
-    even though the two requests name different models, because the model string
-    is not part of what makes a request the request it is.
-    """
-    store = MemoryIdempotencyStore()
-    owner = await store.acquire("key-1", request_fingerprint(request(model="foo")), "")
-    waiter = await store.acquire("key-1", request_fingerprint(request(model="bar")), "")
-
-    assert owner.kind == "owner"
-    assert waiter.kind == "waiter"
-
-    await store.complete("key-1", "", owner_response())
-
-    assert (await settle(waiter.future)).idempotency_status is IdempotencyStatus.NEW
-    assert len(store) == 1
 
 
 def owner_response():
