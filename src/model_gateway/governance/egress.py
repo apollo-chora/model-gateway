@@ -62,7 +62,7 @@ _RECORD_EGRESS = """
     INSERT INTO grounded_search_daily_usage (tenant_id, usage_date, call_count)
     VALUES ($1::uuid, current_date, 1)
     ON CONFLICT (tenant_id, usage_date)
-    DO UPDATE SET call_count = call_count + 1, updated_at = now()
+    DO UPDATE SET call_count = grounded_search_daily_usage.call_count + 1, updated_at = now()
 """
 
 _KILL_SWITCH_ENGAGED = "kill_switch_engaged"

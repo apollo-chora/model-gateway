@@ -55,6 +55,10 @@ class StubConnection:
         self.calls.append((query, args))
         return self.row
 
+    async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        self.calls.append((query, args))
+        return [self.row] if self.row is not None else []
+
 
 class StubPool:
     def __init__(self, connection: StubConnection) -> None:

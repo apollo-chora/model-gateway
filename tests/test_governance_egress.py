@@ -264,7 +264,7 @@ class TestRecordEgress:
         query, params = _main_call(entitled, "grounded_search_daily_usage")
         assert "INSERT INTO grounded_search_daily_usage" in query
         assert "ON CONFLICT (tenant_id, usage_date)" in query
-        assert "call_count = call_count + 1" in query
+        assert "call_count = grounded_search_daily_usage.call_count + 1" in query
         assert "updated_at = now()" in query
         assert params == (_TENANT_ID,)
 

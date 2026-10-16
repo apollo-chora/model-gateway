@@ -19,6 +19,12 @@ returned as allowed-with-error and logged, never raised: the gateway's
 resilience rule is that a dependent control's outage is not a reason to refuse a
 call the caller is entitled to. The error rides on the result so the caller can
 count it, and the log carries the failure's type and the action it was pricing.
+
+**Which actions fail closed is the meter's own policy.** Only the premium-
+learner actions — :data:`FAIL_CLOSED_ACTIONS` exactly and
+:data:`FAIL_CLOSED_PREFIXES` by prefix — pre-flight a quote and refuse on a
+definitive shortfall; every other action is fail-open and is served, its debit
+best-effort after the call.
 """
 
 from __future__ import annotations
@@ -32,6 +38,8 @@ import structlog
 from model_gateway.domain.serialization import as_int
 
 __all__ = [
+    "FAIL_CLOSED_ACTIONS",
+    "FAIL_CLOSED_PREFIXES",
     "ManaClient",
     "ManaDebit",
     "ManaDebitResult",
@@ -39,9 +47,52 @@ __all__ = [
     "ManaQuote",
     "ManaResult",
     "UnknownAction",
+    "is_fail_closed",
 ]
 
 logger = structlog.get_logger(__name__)
+
+FAIL_CLOSED_ACTIONS: frozenset[str] = frozenset(
+    {
+        "knowledge_graph_traverse",
+        "boss_challenge_atom_gen",
+        "daily_dose_coach",
+        "coach_session_full",
+    }
+)
+"""The action codes that hard-block on a definitive mana shortfall.
+
+A fail-closed action pre-flight a dry-run affordability check before any
+compute is spent, because a learner who cannot pay for a premium action must
+not receive it — the shortfall refuses the call with the two balances as the
+caller's upsell context, rather than serving the call and discovering the
+shortfall at a debit that can no longer be afforded.
+"""
+
+FAIL_CLOSED_PREFIXES: tuple[str, ...] = ("companion_chat", "familiar_chat")
+"""The action-code prefixes that are fail-closed, matching :data:`FAIL_CLOSED_ACTIONS`.
+
+The companion chat turns price under per-tier codes that carry the base name
+as a prefix — ``companion_chat_turn_standard`` and its siblings — and the
+legacy ``familiar_chat_turn_*`` codes remain fail-closed through the rename
+overlap, so these two match by prefix and the rest match exactly.
+"""
+
+
+def is_fail_closed(action_code: str) -> bool:
+    """Whether an action hard-blocks on a definitive mana shortfall.
+
+    The premium-learner actions: the graph traversal, the boss-challenge atom
+    generation, the daily-dose coach and the full coach session are fail-closed
+    exactly, and the companion chat turn codes are fail-closed by their
+    ``companion_chat`` and ``familiar_chat`` prefixes. Every other action is
+    fail-open — authoring, instructor and free-tier calls are served and their
+    debit is best-effort post-success, so a shortfall there is reported rather
+    than refused.
+    """
+    return action_code in FAIL_CLOSED_ACTIONS or any(
+        action_code.startswith(prefix) for prefix in FAIL_CLOSED_PREFIXES
+    )
 
 
 class UnknownAction(Exception):
