@@ -911,9 +911,7 @@ async def test_an_idempotency_key_reaches_the_provider(client, provider):
 
 
 @pytest.mark.parametrize("overrides", [{}, {"idempotency_key": None}])
-async def test_a_request_without_an_idempotency_key_is_answered_not_applicable(
-    client, overrides
-):
+async def test_a_request_without_an_idempotency_key_is_answered_not_applicable(client, overrides):
     """No key means deduplication was never in play, and the answer says so."""
     response = await post(client, payload(**overrides))
 
@@ -921,9 +919,7 @@ async def test_a_request_without_an_idempotency_key_is_answered_not_applicable(
     assert (await response.json())["idempotency_status"] == "not_applicable"
 
 
-async def test_a_repeated_idempotency_key_is_answered_from_the_gateway_record(
-    client, provider
-):
+async def test_a_repeated_idempotency_key_is_answered_from_the_gateway_record(client, provider):
     """A repeat is answered from the record, so the provider is asked once."""
     first = await post(client, payload(idempotency_key="recursion-question"))
     second = await post(client, payload(idempotency_key="recursion-question"))
@@ -935,9 +931,7 @@ async def test_a_repeated_idempotency_key_is_answered_from_the_gateway_record(
 
 
 @pytest.mark.parametrize("key", [7, True, ["recursion-question"], {"key": "recursion"}])
-async def test_a_non_string_idempotency_key_is_refused_naming_the_field(
-    client, provider, key
-):
+async def test_a_non_string_idempotency_key_is_refused_naming_the_field(client, provider, key):
     """The format defines the key as a string, so anything else is malformed input."""
     response = await post(client, payload(idempotency_key=key))
 
@@ -948,9 +942,7 @@ async def test_a_non_string_idempotency_key_is_refused_naming_the_field(
     assert provider.calls == []
 
 
-async def test_an_empty_idempotency_key_is_refused_rather_than_read_as_absent(
-    client, provider
-):
+async def test_an_empty_idempotency_key_is_refused_rather_than_read_as_absent(client, provider):
     """An empty string is no key at all, not a key that happens to be empty."""
     response = await post(client, payload(idempotency_key=""))
 

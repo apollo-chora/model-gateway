@@ -81,9 +81,7 @@ _IMAGE_KEYS = frozenset({"b64_json", "url", "revised_prompt"})
 _REQUEST_KEYS = frozenset(
     {"model", "prompt", "size", "response_format", "n", "metadata", "surface"}
 )
-_RESPONSE_KEYS = frozenset(
-    {"model", "upstream_model", "created", "data", "usage", "invocation_id"}
-)
+_RESPONSE_KEYS = frozenset({"model", "upstream_model", "created", "data", "usage", "invocation_id"})
 
 IMAGE_RESPONSE_FORMATS: frozenset[str] = frozenset({"url", "b64_json"})
 """The wire representations an image request may ask for.
@@ -343,9 +341,7 @@ def as_images(where: str, value: object) -> tuple[GeneratedImage, ...]:
     items = as_sequence(where, value)
     for index, item in enumerate(items):
         if not isinstance(item, GeneratedImage):
-            raise ValueError(
-                f"{where}[{index}] must be a GeneratedImage, got {describe(item)}"
-            )
+            raise ValueError(f"{where}[{index}] must be a GeneratedImage, got {describe(item)}")
     return items
 
 

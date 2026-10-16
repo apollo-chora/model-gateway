@@ -331,9 +331,7 @@ async def test_the_text_limits_are_not_advertised_on_another_operations_model():
 
 
 async def test_a_call_without_a_credential_is_refused_when_authentication_is_enabled():
-    async with open_listing(
-        configured_registry(), auth_enabled=True, api_keys=(API_KEY,)
-    ) as stub:
+    async with open_listing(configured_registry(), auth_enabled=True, api_keys=(API_KEY,)) as stub:
         with pytest.raises(grpc.aio.AioRpcError) as refusal:
             await stub.ListModels(pb.ListModelsRequest())
 
@@ -342,9 +340,7 @@ async def test_a_call_without_a_credential_is_refused_when_authentication_is_ena
 
 
 async def test_a_call_with_an_invalid_credential_is_refused():
-    async with open_listing(
-        configured_registry(), auth_enabled=True, api_keys=(API_KEY,)
-    ) as stub:
+    async with open_listing(configured_registry(), auth_enabled=True, api_keys=(API_KEY,)) as stub:
         with pytest.raises(grpc.aio.AioRpcError) as refusal:
             await stub.ListModels(pb.ListModelsRequest(), metadata=bearer(WRONG_KEY))
 
@@ -353,9 +349,7 @@ async def test_a_call_with_an_invalid_credential_is_refused():
 
 
 async def test_a_call_with_a_valid_credential_lists_the_models():
-    async with open_listing(
-        configured_registry(), auth_enabled=True, api_keys=(API_KEY,)
-    ) as stub:
+    async with open_listing(configured_registry(), auth_enabled=True, api_keys=(API_KEY,)) as stub:
         response = await stub.ListModels(pb.ListModelsRequest(), metadata=bearer(API_KEY))
 
     assert [model.id for model in response.models] == [

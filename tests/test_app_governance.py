@@ -201,9 +201,7 @@ class TestGovernanceWiring:
             captured["governance"] = governance
             return real_grounded(authenticator, config, governance=governance)
 
-        monkeypatch.setattr(
-            "model_gateway.grpc.server.GroundedSearch", recording_grounded
-        )
+        monkeypatch.setattr("model_gateway.grpc.server.GroundedSearch", recording_grounded)
         _wire_database(monkeypatch, connection)
 
         settings = _standalone_settings(CHORA_GRPC_PORT=str(_free_port()))

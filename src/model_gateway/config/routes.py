@@ -399,9 +399,7 @@ def _parse_entries(
             f"{variable} must be a JSON array of route objects, got {_json_type(parsed)}"
         )
     return [
-        _parse_entry(
-            block, variable, index, entry, resolver=resolver, allowed_hosts=allowed_hosts
-        )
+        _parse_entry(block, variable, index, entry, resolver=resolver, allowed_hosts=allowed_hosts)
         for index, entry in enumerate(parsed, start=1)
     ]
 
@@ -432,9 +430,7 @@ def _parse_entry(
     path = _entry_optional_text(where, entry, _ENTRY_PATH)
     allow_absolute_path_url = _entry_flag(where, entry, _ENTRY_ALLOW_ABSOLUTE_PATH_URL)
     dimensions = _entry_dimensions(where, entry.get(_ENTRY_DIMENSIONS))
-    supports_dimensions_param = _entry_flag(
-        where, entry, _ENTRY_SUPPORTS_DIMENSIONS_PARAM
-    )
+    supports_dimensions_param = _entry_flag(where, entry, _ENTRY_SUPPORTS_DIMENSIONS_PARAM)
 
     return Route(
         operation=block.operation,
@@ -542,9 +538,7 @@ def _entry_dimensions(where: str, value: object) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ConfigurationError(
-            f"{label} must be a positive integer, got {_json_type(value)}"
-        )
+        raise ConfigurationError(f"{label} must be a positive integer, got {_json_type(value)}")
     return _dimensions_from(label, str(value))
 
 
@@ -553,9 +547,7 @@ def _dimensions_from(label: str, raw: str) -> int:
     try:
         value = int(raw)
     except ValueError:
-        raise ConfigurationError(
-            f"{label} must be a positive integer, got {raw!r}"
-        ) from None
+        raise ConfigurationError(f"{label} must be a positive integer, got {raw!r}") from None
     if value < 1:
         raise ConfigurationError(f"{label} must be a positive integer, got {raw!r}")
     return value

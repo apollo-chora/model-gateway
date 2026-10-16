@@ -261,8 +261,14 @@ def test_the_advertised_dimensions_are_the_primary_routes_own():
     """A fallback route's declared dimensionality is not the model's contract."""
     env = environment(EMBEDDINGS_DIMENSIONS="1024")
     env["EMBEDDINGS_ROUTES_JSON"] = json.dumps(
-        [{"endpoint": f"https://{PUBLIC_ADDRESS}/fallback/v1", "model_id": "fallback",
-          "format": "ollama", "dimensions": 512}]
+        [
+            {
+                "endpoint": f"https://{PUBLIC_ADDRESS}/fallback/v1",
+                "model_id": "fallback",
+                "format": "ollama",
+                "dimensions": 512,
+            }
+        ]
     )
     models = ModelRegistry.from_env(env)
 
@@ -270,8 +276,14 @@ def test_the_advertised_dimensions_are_the_primary_routes_own():
 
     undeclared = environment()
     undeclared["EMBEDDINGS_ROUTES_JSON"] = json.dumps(
-        [{"endpoint": f"https://{PUBLIC_ADDRESS}/fallback/v1", "model_id": "fallback",
-          "format": "ollama", "dimensions": 512}]
+        [
+            {
+                "endpoint": f"https://{PUBLIC_ADDRESS}/fallback/v1",
+                "model_id": "fallback",
+                "format": "ollama",
+                "dimensions": 512,
+            }
+        ]
     )
     models = ModelRegistry.from_env(undeclared)
 
@@ -321,9 +333,7 @@ def test_a_malformed_dimensionality_is_rejected_rather_than_guessed():
         ModelRegistry.from_env(environment(EMBEDDINGS_DIMENSIONS="plenty"))
 
 
-@pytest.mark.parametrize(
-    "variable", ["TEXT_LLM_CONTEXT_WINDOW", "TEXT_LLM_MAX_OUTPUT_TOKENS"]
-)
+@pytest.mark.parametrize("variable", ["TEXT_LLM_CONTEXT_WINDOW", "TEXT_LLM_MAX_OUTPUT_TOKENS"])
 def test_a_negative_text_limit_is_rejected(variable):
     with pytest.raises(ConfigurationError, match=f"{variable} must not be negative"):
         ModelRegistry.from_env(environment(**{variable: "-1"}))
@@ -555,9 +565,9 @@ def test_routes_for_operation_never_returns_a_route_of_another_operation():
     assert [route.operation for route in models.routes_for_operation(Operation.TEXT)] == [
         Operation.TEXT
     ]
-    assert [
-        route.operation for route in models.routes_for_operation(Operation.EMBEDDINGS)
-    ] == [Operation.EMBEDDINGS]
+    assert [route.operation for route in models.routes_for_operation(Operation.EMBEDDINGS)] == [
+        Operation.EMBEDDINGS
+    ]
 
 
 def test_routes_for_operation_raises_for_an_unconfigured_operation():

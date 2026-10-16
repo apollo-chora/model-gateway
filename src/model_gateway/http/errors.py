@@ -45,9 +45,7 @@ __all__ = [
 logger = structlog.get_logger(__name__)
 
 
-async def handle_gateway_error(
-    app: Application, request: Request, error: Exception
-) -> Response:
+async def handle_gateway_error(app: Application, request: Request, error: Exception) -> Response:
     """Render a classified gateway error with its own status and reason.
 
     The payload is the taxonomy's, not this module's: ``reason`` is the stable
@@ -59,9 +57,7 @@ async def handle_gateway_error(
     return json(gateway_error.to_payload(), status=gateway_error.http_status)
 
 
-async def handle_unexpected_error(
-    app: Application, request: Request, error: Exception
-) -> Response:
+async def handle_unexpected_error(app: Application, request: Request, error: Exception) -> Response:
     """Turn any unclassified failure into a sanitised 500.
 
     The original exception is discarded from the response and kept only as

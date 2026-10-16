@@ -219,9 +219,7 @@ def payload(**overrides):
 
 
 async def post(client, body, *, headers=None):
-    return await client.post(
-        "/v1/chat/completions", content=JSONContent(body), headers=headers
-    )
+    return await client.post("/v1/chat/completions", content=JSONContent(body), headers=headers)
 
 
 async def test_happy_path_returns_the_documented_response_shape(client):
@@ -392,9 +390,7 @@ async def test_the_first_frame_of_a_stream_is_the_conventional_assistant_role_de
     assert response.status == 200
     frames = _sse_data_frames(await response.text())
     first = json.loads(frames[0])
-    assert first["choices"] == [
-        {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
-    ]
+    assert first["choices"] == [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]
     # The role frame carries neither an error nor usage.
     assert "error" not in first
     assert "usage" not in first
@@ -594,7 +590,7 @@ class _BlockingStreamProvider:
 
 def _sse_data_frames(body: str) -> list[str]:
     """Extract the ``data`` payloads from a Server-Sent Events body, in order."""
-    return [line[len("data: "):] for line in body.splitlines() if line.startswith("data: ")]
+    return [line[len("data: ") :] for line in body.splitlines() if line.startswith("data: ")]
 
 
 async def test_a_remote_image_url_is_refused_before_the_provider_is_called(client, provider):
@@ -714,9 +710,7 @@ async def test_a_request_without_an_idempotency_key_is_answered_not_applicable(c
     assert (await response.json())["idempotency_status"] == "not_applicable"
 
 
-async def test_a_repeated_idempotency_key_is_answered_from_the_gateway_record(
-    client, provider
-):
+async def test_a_repeated_idempotency_key_is_answered_from_the_gateway_record(client, provider):
     """A repeat is answered from the record, so the provider is asked once."""
     first = await post(client, payload(idempotency_key="recursion-question"))
     second = await post(client, payload(idempotency_key="recursion-question"))
@@ -728,9 +722,7 @@ async def test_a_repeated_idempotency_key_is_answered_from_the_gateway_record(
 
 
 @pytest.mark.parametrize("key", [7, True, ["recursion-question"], {"key": "recursion"}])
-async def test_a_non_string_idempotency_key_is_refused_naming_the_field(
-    client, provider, key
-):
+async def test_a_non_string_idempotency_key_is_refused_naming_the_field(client, provider, key):
     """The format defines the key as a string, so anything else is malformed input."""
     response = await post(client, payload(idempotency_key=key))
 
@@ -741,9 +733,7 @@ async def test_a_non_string_idempotency_key_is_refused_naming_the_field(
     assert provider.calls == []
 
 
-async def test_an_empty_idempotency_key_is_refused_rather_than_read_as_absent(
-    client, provider
-):
+async def test_an_empty_idempotency_key_is_refused_rather_than_read_as_absent(client, provider):
     """An empty string is no key at all, not a key that happens to be empty."""
     response = await post(client, payload(idempotency_key=""))
 
@@ -847,15 +837,9 @@ async def test_two_credentials_sharing_a_key_are_two_independent_operations(clie
         headers_a = {"Authorization": f"Bearer {CREDENTIAL_A}"}
         headers_b = {"Authorization": f"Bearer {CREDENTIAL_B}"}
 
-        first = await post(
-            a_client, payload(idempotency_key="shared-key"), headers=headers_a
-        )
-        second = await post(
-            b_client, payload(idempotency_key="shared-key"), headers=headers_b
-        )
-        repeat = await post(
-            a_client, payload(idempotency_key="shared-key"), headers=headers_a
-        )
+        first = await post(a_client, payload(idempotency_key="shared-key"), headers=headers_a)
+        second = await post(b_client, payload(idempotency_key="shared-key"), headers=headers_b)
+        repeat = await post(a_client, payload(idempotency_key="shared-key"), headers=headers_a)
 
         assert first.status == second.status == repeat.status == 200
         assert (await first.json())["idempotency_status"] == "new"

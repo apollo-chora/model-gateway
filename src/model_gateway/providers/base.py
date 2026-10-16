@@ -347,4 +347,3 @@ def _is_usable_budget(value: float) -> bool:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return False
     return isfinite(value) and value > 0
-

@@ -11,6 +11,7 @@ run with.
 
 import math
 import os
+import socket
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -92,9 +93,18 @@ def _parse_bool(name: str, value: object) -> bool:
     if text in _FALSE_VALUES:
         return False
     expected = ", ".join(repr(option) for option in _BOOLEAN_VALUES)
-    raise ConfigurationError(
-        f"{name} must be a boolean, got {text!r}; expected one of {expected}"
-    )
+    raise ConfigurationError(f"{name} must be a boolean, got {text!r}; expected one of {expected}")
+
+
+def _parse_bind_address(name: str, value: object) -> str:
+    text = _parse_text(name, value)
+    try:
+        socket.getaddrinfo(text, None)
+    except socket.gaierror as exc:
+        raise ConfigurationError(
+            f"{name} must be an IP address or a resolvable host, got {text!r}"
+        ) from exc
+    return text
 
 
 def _parse_port(name: str, value: object) -> int:
@@ -130,9 +140,7 @@ def _parse_non_negative_int(name: str, value: object) -> int:
     try:
         number = int(text)
     except ValueError as exc:
-        raise ConfigurationError(
-            f"{name} must be a non-negative integer, got {text!r}"
-        ) from exc
+        raise ConfigurationError(f"{name} must be a non-negative integer, got {text!r}") from exc
     if number < 0:
         raise ConfigurationError(f"{name} must be a non-negative integer, got {text!r}")
     return number
@@ -205,9 +213,7 @@ def _parse_api_keys(name: str, value: object) -> tuple[str, ...]:
     elif isinstance(value, Iterable):
         items = value
     else:
-        raise ConfigurationError(
-            f"{name} must be a comma-separated list of keys, got {value!r}"
-        )
+        raise ConfigurationError(f"{name} must be a comma-separated list of keys, got {value!r}")
     keys = (str(item).strip() for item in items)
     return tuple(key for key in keys if key)
 
@@ -225,6 +231,7 @@ _FIELDS: tuple[_Field, ...] = (
     _Field("environment", "CHORA_ENVIRONMENT", "development", _parse_environment),
     _Field("http_port", "CHORA_HTTP_PORT", "8080", _parse_port),
     _Field("grpc_port", "CHORA_GRPC_PORT", "9090", _parse_port),
+    _Field("bind_address", "CHORA_BIND_ADDRESS", "0.0.0.0", _parse_bind_address),  # nosec B104
     _Field("log_level", "LOG_LEVEL", "info", _parse_log_level),
     _Field("auth_enabled", "GATEWAY_AUTH_ENABLED", "false", _parse_bool),
     _Field("api_keys", "GATEWAY_API_KEYS", "", _parse_api_keys),
@@ -319,6 +326,7 @@ class Settings:
     environment: Environment
     http_port: int
     grpc_port: int
+    bind_address: str
     log_level: str
 
     auth_enabled: bool

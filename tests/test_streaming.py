@@ -128,9 +128,7 @@ def library_trailing_usage(prompt_tokens: int, completion_tokens: int) -> Usage:
                 "object": "chat.completion.chunk",
                 "created": 1,
                 "model": "gpt-4o",
-                "choices": [
-                    {"index": 0, "delta": {"content": "Hello"}, "finish_reason": None}
-                ],
+                "choices": [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": None}],
             },
             {
                 "id": "chatcmpl-library",
@@ -296,9 +294,7 @@ class TestStreamEventConstructionRefusals:
 
     def test_content_event_without_text_is_refused(self) -> None:
         with pytest.raises(ValueError, match="carries none of"):
-            StreamEvent(
-                kind=StreamEventKind.CONTENT, sequence=0, invocation_id=INVOCATION_ID
-            )
+            StreamEvent(kind=StreamEventKind.CONTENT, sequence=0, invocation_id=INVOCATION_ID)
 
     def test_content_event_with_empty_text_is_refused(self) -> None:
         """An empty fragment asserts no content change while claiming to report one."""
@@ -312,9 +308,7 @@ class TestStreamEventConstructionRefusals:
 
     def test_tool_call_event_without_a_delta_is_refused(self) -> None:
         with pytest.raises(ValueError, match="carries none of"):
-            StreamEvent(
-                kind=StreamEventKind.TOOL_CALL, sequence=0, invocation_id=INVOCATION_ID
-            )
+            StreamEvent(kind=StreamEventKind.TOOL_CALL, sequence=0, invocation_id=INVOCATION_ID)
 
     def test_usage_event_without_usage_is_refused(self) -> None:
         with pytest.raises(ValueError, match="carries none of"):
@@ -703,15 +697,11 @@ class TestFromLitellmChunkContent:
 
     def test_empty_delta_chunk_produces_no_event(self) -> None:
         """LiteLLM emits keep-alive chunks with no reportable content at all."""
-        chunk = ModelResponseStream(
-            choices=[StreamingChoices(index=0, delta=Delta(content=None))]
-        )
+        chunk = ModelResponseStream(choices=[StreamingChoices(index=0, delta=Delta(content=None))])
         assert from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0) == ()
 
     def test_empty_text_delta_produces_no_event(self) -> None:
-        chunk = ModelResponseStream(
-            choices=[StreamingChoices(index=0, delta=Delta(content=""))]
-        )
+        chunk = ModelResponseStream(choices=[StreamingChoices(index=0, delta=Delta(content=""))])
         assert from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0) == ()
 
 
@@ -765,11 +755,15 @@ class TestFromLitellmChunkToolCalls:
                         content=None,
                         tool_calls=[
                             ChatCompletionDeltaToolCall(
-                                index=0, id="call_1", type="function",
+                                index=0,
+                                id="call_1",
+                                type="function",
                                 function=Function(arguments=None, name="first"),
                             ),
                             ChatCompletionDeltaToolCall(
-                                index=1, id="call_2", type="function",
+                                index=1,
+                                id="call_2",
+                                type="function",
                                 function=Function(arguments=None, name="second"),
                             ),
                         ],
@@ -784,9 +778,7 @@ class TestFromLitellmChunkToolCalls:
     def test_index_only_tool_call_delta_produces_no_event(self) -> None:
         """A delta that says nothing about the call is a keep-alive, not a fragment."""
         assert (
-            from_litellm_chunk(
-                tool_call_chunk(index=0), invocation_id=INVOCATION_ID, sequence=0
-            )
+            from_litellm_chunk(tool_call_chunk(index=0), invocation_id=INVOCATION_ID, sequence=0)
             == ()
         )
 
@@ -885,9 +877,7 @@ class TestFromLitellmChunkUsage:
         details = usage.completion_tokens_details
         assert details is not None
         set_fields = {
-            name
-            for name in type(details).model_fields
-            if getattr(details, name, None) is not None
+            name for name in type(details).model_fields if getattr(details, name, None) is not None
         }
         assert set_fields == {"reasoning_tokens", "text_tokens"}
         assert details.reasoning_tokens == 0
@@ -1015,9 +1005,7 @@ class TestFromLitellmChunkFinish:
         it reports STOP with the raw value the library handed it, which states
         plainly that the reason arrived already normalised.
         """
-        chunk = ModelResponseStream(
-            choices=[StreamingChoices(index=0, finish_reason="stop")]
-        )
+        chunk = ModelResponseStream(choices=[StreamingChoices(index=0, finish_reason="stop")])
         events = from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
         assert events[0].finish_reason is FinishReason.STOP
         assert events[0].raw_finish_reason == "stop"
@@ -1033,11 +1021,7 @@ class TestFromLitellmChunkOrdering:
     def test_content_and_finish_in_one_chunk_produce_two_ordered_events(self) -> None:
         """The finish event is terminal, so it is emitted last."""
         chunk = ModelResponseStream(
-            choices=[
-                StreamingChoices(
-                    index=0, delta=Delta(content="Done"), finish_reason="stop"
-                )
-            ]
+            choices=[StreamingChoices(index=0, delta=Delta(content="Done"), finish_reason="stop")]
         )
         events = from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
         assert [event.kind for event in events] == [StreamEventKind.CONTENT, StreamEventKind.FINISH]
@@ -1053,7 +1037,9 @@ class TestFromLitellmChunkOrdering:
                         content="Let me check.",
                         tool_calls=[
                             ChatCompletionDeltaToolCall(
-                                index=0, id="call_1", type="function",
+                                index=0,
+                                id="call_1",
+                                type="function",
                                 function=Function(arguments=None, name="get_weather"),
                             )
                         ],
@@ -1285,7 +1271,9 @@ class TestFromLitellmChunkRefusals:
                         content=None,
                         tool_calls=[
                             ChatCompletionDeltaToolCall(
-                                index=-1, id="call_1", type="function",
+                                index=-1,
+                                id="call_1",
+                                type="function",
                                 function=Function(arguments=None, name="f"),
                             )
                         ],
@@ -1324,6 +1312,4 @@ class TestFromLitellmChunkRefusals:
 
     def test_a_negative_sequence_is_refused(self) -> None:
         with pytest.raises(ValueError, match="non-negative integer"):
-            from_litellm_chunk(
-                content_chunk("hi"), invocation_id=INVOCATION_ID, sequence=-1
-            )
+            from_litellm_chunk(content_chunk("hi"), invocation_id=INVOCATION_ID, sequence=-1)

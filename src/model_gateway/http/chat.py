@@ -343,9 +343,7 @@ def _chunk_from_event(
     """
     chunk = _chunk_envelope(completion_id, created, model)
     if event.kind is StreamEventKind.CONTENT:
-        chunk["choices"] = [
-            {"index": 0, "delta": {"content": event.text}, "finish_reason": None}
-        ]
+        chunk["choices"] = [{"index": 0, "delta": {"content": event.text}, "finish_reason": None}]
     elif event.kind is StreamEventKind.TOOL_CALL:
         chunk["choices"] = [
             {
@@ -358,9 +356,7 @@ def _chunk_from_event(
         chunk["choices"] = []
         chunk["usage"] = _usage_chunk(event.usage)
     elif event.kind is StreamEventKind.FINISH:
-        chunk["choices"] = [
-            {"index": 0, "delta": {}, "finish_reason": _finish_reason_chunk(event)}
-        ]
+        chunk["choices"] = [{"index": 0, "delta": {}, "finish_reason": _finish_reason_chunk(event)}]
     elif event.kind is StreamEventKind.ERROR:
         chunk["choices"] = []
         chunk["error"] = {"reason": event.error_reason, "message": event.error_message}

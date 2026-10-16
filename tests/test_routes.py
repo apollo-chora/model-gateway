@@ -1484,8 +1484,7 @@ def test_an_entry_dimensions_flag_must_be_a_boolean():
     }
 
     assert message(env) == (
-        "EMBEDDINGS_ROUTES_JSON entry 1 'supports_dimensions_param' must be a boolean, "
-        "got a string"
+        "EMBEDDINGS_ROUTES_JSON entry 1 'supports_dimensions_param' must be a boolean, got a string"
     )
 
 

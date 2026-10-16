@@ -65,9 +65,7 @@ class _StubManaClient:
         self.quote_calls.append((gcid, tenant_id, action_code))
         return ManaResult(success=True, balance_after_units=100)
 
-    async def debit(
-        self, gcid: str, tenant_id: str, action_code: str, idem_key: str
-    ) -> ManaResult:
+    async def debit(self, gcid: str, tenant_id: str, action_code: str, idem_key: str) -> ManaResult:
         self.debit_calls.append((gcid, tenant_id, action_code, idem_key))
         return ManaResult(success=True, balance_after_units=90)
 
@@ -269,9 +267,7 @@ class TestBudgetAdmission:
 class TestOutboxIdempotency:
     """The outbox insert is the idempotency guard: one usage, one row."""
 
-    async def test_insert_then_redelivery_does_not_duplicate(
-        self, postgres_db: Database
-    ) -> None:
+    async def test_insert_then_redelivery_does_not_duplicate(self, postgres_db: Database) -> None:
         db = postgres_db
         outbox = Outbox(db)
         payload = build_token_usage_payload(
@@ -295,9 +291,7 @@ class TestOutboxIdempotency:
         assert row["aggregate_type"] == "token_usage"
 
         # A redelivery of the same usage inserts nothing and reports False.
-        assert not await outbox.insert_token_usage(
-            "usage-1", _TENANT_A, _GCID, payload, envelope
-        )
+        assert not await outbox.insert_token_usage("usage-1", _TENANT_A, _GCID, payload, envelope)
 
         async with db.transaction(tenant_id=_TENANT_A) as connection:
             count = await connection.fetchval(
@@ -404,15 +398,11 @@ class TestEgressAuthorization:
         assert not decision.allowed
         assert decision.reason == "external_egress_disabled"
 
-    async def test_an_engaged_kill_switch_refuses_every_tenant(
-        self, postgres_db: Database
-    ) -> None:
+    async def test_an_engaged_kill_switch_refuses_every_tenant(self, postgres_db: Database) -> None:
         db = postgres_db
         await _insert_egress_policy(db, _TENANT_A, enabled=True, ceiling=50)
         async with db.transaction() as connection:
-            await connection.execute(
-                "UPDATE platform_egress_killswitch SET engaged = TRUE"
-            )
+            await connection.execute("UPDATE platform_egress_killswitch SET engaged = TRUE")
 
         decision = await EgressGate(db).authorize(_TENANT_A)
 
@@ -648,9 +638,7 @@ class TestPartialFailureSettlement:
         assert window is not None
         assert window.spent_usd_micros == 10_000
         # The outbox row was inserted under the invocation id.
-        row = await db.fetch_one(
-            "SELECT id FROM outbox_events WHERE id = $1", "inv-partial-1"
-        )
+        row = await db.fetch_one("SELECT id FROM outbox_events WHERE id = $1", "inv-partial-1")
         assert row is not None
         # The failed call earned neither a mana debit nor an egress count.
         assert mana_client.debit_calls == []

@@ -507,9 +507,7 @@ def test_image_default_resolves_to_the_configured_image_routes():
 
 
 def test_image_default_resolves_to_its_fallbacks_in_configured_order():
-    models = registry(
-        {**text_block(), **image_block(), **image_fallback("image-fallback")}
-    )
+    models = registry({**text_block(), **image_block(), **image_fallback("image-fallback")})
 
     routes = models.routes_for("image-default")
 

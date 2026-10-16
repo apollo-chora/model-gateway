@@ -100,10 +100,7 @@ class FakeEmbeddingProvider:
         if self.result is not None:
             return self.result
         return embedding_response(
-            data=tuple(
-                Embedding(index=index, values=VECTOR)
-                for index in range(len(request.input))
-            )
+            data=tuple(Embedding(index=index, values=VECTOR) for index in range(len(request.input)))
         )
 
 

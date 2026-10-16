@@ -193,9 +193,7 @@ class IdempotencyStore(Protocol):
     makes two simultaneous identical requests coalesce instead of both executing.
     """
 
-    async def acquire(
-        self, key: str, fingerprint: RequestFingerprint, namespace: str
-    ) -> _Claim:
+    async def acquire(self, key: str, fingerprint: RequestFingerprint, namespace: str) -> _Claim:
         """Claim ``key`` in ``namespace``, or report what is already there.
 
         Returns ``completed`` with the stored answer when the key has finished and
@@ -247,9 +245,7 @@ class MemoryIdempotencyStore:
         self._entries: dict[tuple[str, str], _Entry] = {}
         self._order: list[tuple[str, str]] = []
 
-    async def acquire(
-        self, key: str, fingerprint: RequestFingerprint, namespace: str
-    ) -> _Claim:
+    async def acquire(self, key: str, fingerprint: RequestFingerprint, namespace: str) -> _Claim:
         """Atomically claim the key, or report what is already there.
 
         No ``await`` appears between the read and the write, which is the whole of
@@ -278,9 +274,7 @@ class MemoryIdempotencyStore:
         self._evict()
         return _Claim("owner", future=future)
 
-    async def complete(
-        self, key: str, namespace: str, response: InvocationResponse
-    ) -> None:
+    async def complete(self, key: str, namespace: str, response: InvocationResponse) -> None:
         """Record the answer and resolve every waiter's future with it."""
         entry = self._entries.get((namespace, key))
         if entry is None or entry.future is None:

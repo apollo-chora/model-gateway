@@ -25,6 +25,7 @@ model-gateway = "model_gateway.__main__:main"
 
 [dependency-groups]
 dev = [
+    "bandit==1.9.4",
     "grpcio-tools==1.84.0",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",

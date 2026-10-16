@@ -621,8 +621,7 @@ class TestChatRequestParameterWireTypes:
 
     def test_accepts_the_text_only_default(self):
         assert (
-            ChatRequest.from_payload(body(modalities=["text"])).invocation.model
-            == "text-default"
+            ChatRequest.from_payload(body(modalities=["text"])).invocation.model == "text-default"
         )
 
     @pytest.mark.parametrize("value", [[], ["text", "audio"]])

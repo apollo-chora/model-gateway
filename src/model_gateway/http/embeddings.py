@@ -81,9 +81,7 @@ EmbeddingsHandler = Callable[[Request], Awaitable[Response]]
 _OBJECT_LIST = "list"
 _OBJECT_EMBEDDING = "embedding"
 
-_REQUEST_KEYS = frozenset(
-    {"model", "input", "dimensions", "encoding_format", "user", "metadata"}
-)
+_REQUEST_KEYS = frozenset({"model", "input", "dimensions", "encoding_format", "user", "metadata"})
 """The request fields this endpoint accepts, which are the canonical request's own.
 
 The set is closed on purpose: the gateway's OpenAI compatibility is a supported
@@ -145,9 +143,7 @@ def embedding_request_from_payload(payload: object) -> EmbeddingRequest:
         return EmbeddingRequest(
             model=as_optional_text(f"{where} 'model'", body.get("model")),
             input=_as_input(f"{where} 'input'", body.get("input")),
-            dimensions=as_optional_int(
-                f"{where} 'dimensions'", body.get("dimensions"), minimum=1
-            ),
+            dimensions=as_optional_int(f"{where} 'dimensions'", body.get("dimensions"), minimum=1),
             encoding_format=as_optional_text(
                 f"{where} 'encoding_format'", body.get("encoding_format")
             ),

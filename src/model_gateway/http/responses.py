@@ -311,9 +311,7 @@ class _Feature(NamedTuple):
 
 
 _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
-    "background": _Feature(
-        "background_responses", _Wire(frozenset({_WIRE_BOOLEAN}), False)
-    ),
+    "background": _Feature("background_responses", _Wire(frozenset({_WIRE_BOOLEAN}), False)),
     "context_management": _Feature(
         "context_management", _Wire(frozenset({_WIRE_ARRAY, _WIRE_NULL}), None)
     ),
@@ -325,9 +323,7 @@ _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
     "max_tool_calls": _Feature(
         "tool_call_limit", _Wire(frozenset({_WIRE_INTEGER, _WIRE_NULL}), None)
     ),
-    "moderation": _Feature(
-        "output_moderation", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)
-    ),
+    "moderation": _Feature("output_moderation", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)),
     # Refused whatever its value, unlike the defaults above. ``true`` asks for
     # parallel tool calls and ``false`` asks for a guarantee of sequential ones,
     # and this slice implements neither and models no distinction between them,
@@ -340,9 +336,7 @@ _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
     "previous_response_id": _Feature(
         "response_chaining", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)
     ),
-    "prompt": _Feature(
-        "prompt_templates", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)
-    ),
+    "prompt": _Feature("prompt_templates", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)),
     "prompt_cache_key": _Feature(
         "prompt_caching", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)
     ),
@@ -352,24 +346,18 @@ _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
     "prompt_cache_retention": _Feature(
         "prompt_caching", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)
     ),
-    "reasoning": _Feature(
-        "reasoning_effort", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)
-    ),
+    "reasoning": _Feature("reasoning_effort", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)),
     "safety_identifier": _Feature(
         "safety_identifier", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)
     ),
-    "service_tier": _Feature(
-        "service_tier", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)
-    ),
+    "service_tier": _Feature("service_tier", _Wire(frozenset({_WIRE_STRING, _WIRE_NULL}), None)),
     # ``store: false`` is accepted because it is the one value that agrees with
     # what the gateway does — it stores nothing — while ``true`` asks for the
     # Responses format's own default of a retained response, which the gateway
     # cannot provide.
     "store": _Feature("response_storage", _Wire(frozenset({_WIRE_BOOLEAN}), False)),
     "stream_options": _Feature("streaming", _Wire(frozenset({_WIRE_OBJECT}), {})),
-    "text": _Feature(
-        "text_configuration", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)
-    ),
+    "text": _Feature("text_configuration", _Wire(frozenset({_WIRE_OBJECT, _WIRE_NULL}), None)),
     "top_logprobs": _Feature(
         "log_probabilities", _Wire(frozenset({_WIRE_INTEGER, _WIRE_NULL}), None)
     ),
@@ -1096,9 +1084,7 @@ def _tool_choice_from(where: str, value: object) -> ToolChoice | None:
         )
     function = _as_object(f"{where} 'function'", body.get("function"))
     _reject_nested_keys(f"{where} 'function'", function, _NAMED_CHOICE_FUNCTION_KEYS)
-    return ToolChoice.specific(
-        _required_text(f"{where} 'function' 'name'", function.get("name"))
-    )
+    return ToolChoice.specific(_required_text(f"{where} 'function' 'name'", function.get("name")))
 
 
 def _metadata_from(where: str, value: object) -> Mapping[str, JsonValue]:

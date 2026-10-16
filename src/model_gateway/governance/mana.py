@@ -130,9 +130,7 @@ class ManaResult:
         object.__setattr__(
             self,
             "current_balance_units",
-            as_int(
-                "mana result 'current_balance_units'", self.current_balance_units, minimum=0
-            ),
+            as_int("mana result 'current_balance_units'", self.current_balance_units, minimum=0),
         )
         object.__setattr__(
             self,
@@ -255,9 +253,7 @@ class ManaMeter:
             )
         return ManaQuote(affordable=True, available=result.balance_after_units)
 
-    async def debit(
-        self, gcid: str, tenant_id: str, action_code: str, idem_key: str
-    ) -> ManaDebit:
+    async def debit(self, gcid: str, tenant_id: str, action_code: str, idem_key: str) -> ManaDebit:
         """Charge one action against the learner's wallet, idempotently.
 
         ``idem_key`` is the caller's own key, so a retried debit collapses onto

@@ -43,8 +43,6 @@ __all__ = ["GrpcServer", "ModelGatewayServiceServicer"]
 
 logger = structlog.get_logger(__name__)
 
-_BIND_ADDRESS = "0.0.0.0"
-
 
 class GrpcServer:
     """The gRPC listener, ready to be started beside the HTTP server.
@@ -115,7 +113,7 @@ class GrpcServer:
         # can read that state and there is nothing to correct.
         self._health = HealthServicer()
         health_pb2_grpc.add_HealthServicer_to_server(self._health, self._grpc)
-        self._port = self._grpc.add_insecure_port(f"{_BIND_ADDRESS}:{settings.grpc_port}")
+        self._port = self._grpc.add_insecure_port(f"{settings.bind_address}:{settings.grpc_port}")
         if not self._port:
             raise ConfigurationError(
                 f"CHORA_GRPC_PORT is {settings.grpc_port} but the gRPC listener could not bind it; "

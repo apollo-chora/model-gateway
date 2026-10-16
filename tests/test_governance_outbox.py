@@ -147,9 +147,7 @@ class TestInsertTokenUsage:
         _, params = _main_call(connection, "INSERT INTO outbox_events")
         assert orjson.loads(params[4]) == _ENVELOPE  # type: ignore[arg-type]
 
-    async def test_canonical_event_shape(
-        self, outbox: Outbox, connection: StubConnection
-    ) -> None:
+    async def test_canonical_event_shape(self, outbox: Outbox, connection: StubConnection) -> None:
         await outbox.insert_token_usage(_USAGE_ID, _TENANT_ID, _GCID, b"{}", _ENVELOPE)
 
         query, _ = _main_call(connection, "INSERT INTO outbox_events")
@@ -203,7 +201,11 @@ class TestValidation:
     async def test_refuses_a_non_string_envelope_value(self, outbox: Outbox) -> None:
         with pytest.raises(ValueError, match="envelope"):
             await outbox.insert_token_usage(
-                _USAGE_ID, _TENANT_ID, _GCID, b"{}", {"schema_version": 1}  # type: ignore[dict-item]
+                _USAGE_ID,
+                _TENANT_ID,
+                _GCID,
+                b"{}",
+                {"schema_version": 1},  # type: ignore[dict-item]
             )
 
 

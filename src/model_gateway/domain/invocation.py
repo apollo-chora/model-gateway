@@ -444,9 +444,7 @@ class InvocationResponse:
     idempotency_status: IdempotencyStatus = IdempotencyStatus.NOT_APPLICABLE
 
     def __post_init__(self) -> None:
-        estimated_cost = as_optional_float(
-            "estimated_cost", self.estimated_cost, minimum=0.0
-        )
+        estimated_cost = as_optional_float("estimated_cost", self.estimated_cost, minimum=0.0)
         cost_currency = _as_currency("cost_currency", self.cost_currency)
         if (estimated_cost is None) != (cost_currency is None):
             raise ValueError(
@@ -482,9 +480,7 @@ class InvocationResponse:
         object.__setattr__(
             self,
             "idempotency_status",
-            as_enumeration(
-                "idempotency_status", self.idempotency_status, IdempotencyStatus
-            ),
+            as_enumeration("idempotency_status", self.idempotency_status, IdempotencyStatus),
         )
 
     @property
@@ -547,9 +543,7 @@ class InvocationResponse:
             estimated_cost=as_optional_float(
                 f"{where} 'estimated_cost'", payload.get("estimated_cost"), minimum=0.0
             ),
-            cost_currency=_as_currency(
-                f"{where} 'cost_currency'", payload.get("cost_currency")
-            ),
+            cost_currency=_as_currency(f"{where} 'cost_currency'", payload.get("cost_currency")),
             attempt_count=as_int(
                 f"{where} 'attempt_count'", payload.get("attempt_count", 1), minimum=1
             ),
@@ -655,8 +649,7 @@ def _as_currency(where: str, value: object) -> str | None:
         return None
     if len(currency) != _CURRENCY_LENGTH or not currency.isascii() or not currency.isalpha():
         raise ValueError(
-            f"{where} must be a three-letter ISO 4217 currency code such as 'USD', got "
-            f"{currency!r}"
+            f"{where} must be a three-letter ISO 4217 currency code such as 'USD', got {currency!r}"
         )
     if currency != currency.upper():
         raise ValueError(f"{where} must be an uppercase ISO 4217 code, got {currency!r}")

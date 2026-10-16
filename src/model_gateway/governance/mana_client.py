@@ -84,9 +84,7 @@ class GrpcManaClient:
             gcid, tenant_id, action_code, dry_run=True, idem_key=uuid.uuid4().hex
         )
 
-    async def debit(
-        self, gcid: str, tenant_id: str, action_code: str, idem_key: str
-    ) -> ManaResult:
+    async def debit(self, gcid: str, tenant_id: str, action_code: str, idem_key: str) -> ManaResult:
         """Charge one action against the learner's wallet, idempotently.
 
         ``idem_key`` is the caller's own key, so a retried debit collapses

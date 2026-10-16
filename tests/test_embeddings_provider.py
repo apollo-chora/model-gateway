@@ -287,7 +287,8 @@ class TestTheCall:
         provider, embedding = wire(response_from(embedding_payload()))
 
         await provider.embed(
-            make_route(supports_dimensions_param=True), make_request(dimensions=256),
+            make_route(supports_dimensions_param=True),
+            make_request(dimensions=256),
             make_context(),
         )
 
@@ -706,9 +707,7 @@ def _payload_with_zero_usage() -> dict[str, object]:
     return payload
 
 
-async def _library_embedding(
-    dialect: str, payload: dict[str, object]
-) -> LiteLLMEmbeddingResponse:
+async def _library_embedding(dialect: str, payload: dict[str, object]) -> LiteLLMEmbeddingResponse:
     """Drive the pinned library's own ``aembedding`` entry point with a scripted wire.
 
     The client is the per-dialect construction the binding injects — an

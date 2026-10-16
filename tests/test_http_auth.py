@@ -123,9 +123,7 @@ class StubKeySet:
         if presented is None:
             raise UnauthenticatedError("no credential was presented")
         if presented not in self._bindings:
-            raise UnauthenticatedError(
-                "the credential was rejected", reason="invalid_credentials"
-            )
+            raise UnauthenticatedError("the credential was rejected", reason="invalid_credentials")
         return Identity(
             authenticated=True,
             tenant=self._bindings[presented],

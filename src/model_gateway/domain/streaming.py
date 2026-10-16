@@ -146,9 +146,7 @@ class ToolCallDelta:
     arguments_delta: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "index", as_int("tool call delta 'index'", self.index, minimum=0)
-        )
+        object.__setattr__(self, "index", as_int("tool call delta 'index'", self.index, minimum=0))
         object.__setattr__(self, "id", as_optional_text("tool call delta 'id'", self.id))
         object.__setattr__(self, "name", as_optional_text("tool call delta 'name'", self.name))
         object.__setattr__(
@@ -354,9 +352,7 @@ class StreamEvent:
             raw_finish_reason=(
                 None
                 if payload.get("raw_finish_reason") is None
-                else as_text(
-                    f"{where} 'raw_finish_reason'", payload.get("raw_finish_reason")
-                )
+                else as_text(f"{where} 'raw_finish_reason'", payload.get("raw_finish_reason"))
             ),
             error_reason=as_optional_text(f"{where} 'error_reason'", payload.get("error_reason")),
             error_message=as_optional_text(

@@ -96,9 +96,10 @@ def test_the_fingerprint_covers_the_tenant():
     is required to hold, so the tenant is part of what makes a
     request the request it is.
     """
-    assert request_fingerprint(request(tenant_id="acme")).digest != request_fingerprint(
-        request(tenant_id="other")
-    ).digest
+    assert (
+        request_fingerprint(request(tenant_id="acme")).digest
+        != request_fingerprint(request(tenant_id="other")).digest
+    )
 
 
 def test_the_invocation_identifier_is_not_part_of_the_fingerprint():
@@ -108,16 +109,18 @@ def test_the_invocation_identifier_is_not_part_of_the_fingerprint():
     caller asked; fingerprinting it would make every retry a miss and defeat the
     mechanism.
     """
-    assert request_fingerprint(request(invocation_id="inv-1")).digest == request_fingerprint(
-        request(invocation_id="inv-2")
-    ).digest
+    assert (
+        request_fingerprint(request(invocation_id="inv-1")).digest
+        == request_fingerprint(request(invocation_id="inv-2")).digest
+    )
 
 
 def test_the_fingerprint_ignores_bookkeeping_that_cannot_change_the_answer():
     """Metadata and the key itself are excluded, for the reason the module gives."""
-    assert request_fingerprint(request(metadata={"trace": "a"})).digest == request_fingerprint(
-        request(metadata={"trace": "b"})
-    ).digest
+    assert (
+        request_fingerprint(request(metadata={"trace": "a"})).digest
+        == request_fingerprint(request(metadata={"trace": "b"})).digest
+    )
 
 
 def test_a_fingerprint_is_a_fixed_length_digest():
@@ -148,12 +151,14 @@ def test_the_model_field_is_not_part_of_the_fingerprint():
     string, so the model cannot change the answer. A repeat with a different
     model is the same request and must replay.
     """
-    assert request_fingerprint(request(model=None)).digest == request_fingerprint(
-        request(model="text-default")
-    ).digest
-    assert request_fingerprint(request(model="foo")).digest == request_fingerprint(
-        request(model="bar")
-    ).digest
+    assert (
+        request_fingerprint(request(model=None)).digest
+        == request_fingerprint(request(model="text-default")).digest
+    )
+    assert (
+        request_fingerprint(request(model="foo")).digest
+        == request_fingerprint(request(model="bar")).digest
+    )
 
 
 async def test_the_same_key_replays_across_absent_and_valid_models():
@@ -179,9 +184,7 @@ async def test_the_same_key_replays_across_two_arbitrary_models():
     await store.acquire("key-1", request_fingerprint(request(model="foo")), "acme")
     await store.complete("key-1", "acme", answered(request(model="foo")))
 
-    replay = await store.acquire(
-        "key-1", request_fingerprint(request(model="bar")), "acme"
-    )
+    replay = await store.acquire("key-1", request_fingerprint(request(model="bar")), "acme")
     assert replay.kind == "completed"
 
 

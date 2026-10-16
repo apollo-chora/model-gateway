@@ -101,9 +101,7 @@ class FakeImageProvider:
         self.result = result
         self.error = error
 
-    async def generate(
-        self, route: Route, request: ImageRequest, context: object
-    ) -> ImageResponse:
+    async def generate(self, route: Route, request: ImageRequest, context: object) -> ImageResponse:
         self.calls.append((route, request))
         if self.error is not None:
             raise self.error
@@ -186,9 +184,7 @@ class TestTheHappyPath:
         app = build_app(provider)
         await app.start()
         try:
-            response = await post_generations(
-                TestClient(app), payload(model=PUBLIC_MODEL)
-            )
+            response = await post_generations(TestClient(app), payload(model=PUBLIC_MODEL))
         finally:
             await app.stop()
 
@@ -219,9 +215,7 @@ class TestTheHappyPath:
         assert body["data"][0]["revised_prompt"] == "A city"
 
     async def test_the_stated_parameters_reach_the_request(self, client, provider) -> None:
-        await post_generations(
-            client, payload(size="1024x1024", response_format="b64_json", n=2)
-        )
+        await post_generations(client, payload(size="1024x1024", response_format="b64_json", n=2))
 
         (_, request) = provider.calls[0]
         assert request.size == "1024x1024"
@@ -514,9 +508,7 @@ class TestTheMalformedAnswer:
         )
         await app.start()
         try:
-            response = await post_generations(
-                TestClient(app), payload(model=PUBLIC_MODEL, n=2)
-            )
+            response = await post_generations(TestClient(app), payload(model=PUBLIC_MODEL, n=2))
         finally:
             await app.stop()
 
@@ -587,9 +579,7 @@ class TestTheFactory:
         try:
             response = await TestClient(app).post(
                 "/v1/images/edits",
-                content=JSONContent(
-                    {"model": PUBLIC_MODEL, "prompt": "rainy", "image": PAYLOAD}
-                ),
+                content=JSONContent({"model": PUBLIC_MODEL, "prompt": "rainy", "image": PAYLOAD}),
             )
         finally:
             await app.stop()

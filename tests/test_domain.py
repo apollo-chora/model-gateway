@@ -827,9 +827,7 @@ def test_tool_result_defaults() -> None:
 
 
 def test_tool_result_round_trip() -> None:
-    result = ToolResult(
-        tool_call_id="call_01", content=(TextPart(text="18C"),), is_error=True
-    )
+    result = ToolResult(tool_call_id="call_01", content=(TextPart(text="18C"),), is_error=True)
 
     assert ToolResult.from_dict(result.to_dict()) == result
     assert result.to_dict() == {
@@ -1116,9 +1114,7 @@ def test_response_format_refuses_a_schema_mode_without_a_schema() -> None:
         ResponseFormat(mode=ResponseFormatMode.JSON_SCHEMA, name="weather_report", strict=True)
 
 
-@pytest.mark.parametrize(
-    "mode", [ResponseFormatMode.TEXT, ResponseFormatMode.JSON_OBJECT]
-)
+@pytest.mark.parametrize("mode", [ResponseFormatMode.TEXT, ResponseFormatMode.JSON_OBJECT])
 def test_response_format_refuses_a_schema_in_a_mode_that_does_not_use_one(
     mode: ResponseFormatMode,
 ) -> None:
@@ -1128,9 +1124,7 @@ def test_response_format_refuses_a_schema_in_a_mode_that_does_not_use_one(
         ResponseFormat(mode=mode, schema=True)
 
 
-@pytest.mark.parametrize(
-    "mode", [ResponseFormatMode.TEXT, ResponseFormatMode.JSON_OBJECT]
-)
+@pytest.mark.parametrize("mode", [ResponseFormatMode.TEXT, ResponseFormatMode.JSON_OBJECT])
 def test_response_format_refuses_a_name_in_a_mode_that_has_no_schema(
     mode: ResponseFormatMode,
 ) -> None:
@@ -1138,9 +1132,7 @@ def test_response_format_refuses_a_name_in_a_mode_that_has_no_schema(
         ResponseFormat(mode=mode, name="weather_report")
 
 
-@pytest.mark.parametrize(
-    "mode", [ResponseFormatMode.TEXT, ResponseFormatMode.JSON_OBJECT]
-)
+@pytest.mark.parametrize("mode", [ResponseFormatMode.TEXT, ResponseFormatMode.JSON_OBJECT])
 def test_response_format_refuses_strictness_without_a_schema(mode: ResponseFormatMode) -> None:
     with pytest.raises(ValueError, match="must not be strict"):
         ResponseFormat(mode=mode, strict=True)
@@ -1315,9 +1307,7 @@ def test_request_defaults_to_no_model() -> None:
 
 
 def test_request_parses_a_document_with_no_model() -> None:
-    parsed = InvocationRequest.from_dict(
-        {"messages": [{"role": "user", "content": []}]}
-    )
+    parsed = InvocationRequest.from_dict({"messages": [{"role": "user", "content": []}]})
 
     assert parsed.model is None
     assert parsed == InvocationRequest(messages=(Message(role=Role.USER),))

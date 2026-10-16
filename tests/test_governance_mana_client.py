@@ -66,9 +66,7 @@ class StubManaService(mana_service_pb2_grpc.ManaServiceServicer):
 
     def __init__(self) -> None:
         self.calls: list[mana_service_pb2.DeductManaRequest] = []
-        self.response = mana_service_pb2.DeductManaResponse(
-            success=True, balance_after_units=90
-        )
+        self.response = mana_service_pb2.DeductManaResponse(success=True, balance_after_units=90)
         self.code: grpc.StatusCode | None = None
         self.details = ""
 
@@ -149,9 +147,7 @@ class TestGrpcManaClient:
 
             result = await client.debit(_GCID, _TENANT_ID, "companion_chat", "idem-key-1")
 
-        assert result == ManaResult(
-            success=False, required_units=50, current_balance_units=20
-        )
+        assert result == ManaResult(success=False, required_units=50, current_balance_units=20)
 
     async def test_an_unpriced_action_is_the_services_invalid_argument(self) -> None:
         service = StubManaService()
@@ -508,9 +504,7 @@ class TestGroundedSettlementEndToEnd:
                 channel = grpc.aio.insecure_channel(f"{_HOST}:{settings.grpc_port}")
                 try:
                     stub = gateway_pb2_grpc.ModelGatewayServiceStub(channel)
-                    response = await stub.GroundedSearch(
-                        _grounded_request(), metadata=_bearer()
-                    )
+                    response = await stub.GroundedSearch(_grounded_request(), metadata=_bearer())
                 finally:
                     await channel.close()
             finally:

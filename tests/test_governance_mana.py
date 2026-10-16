@@ -52,9 +52,7 @@ class StubManaClient:
             raise self.quote_error
         return self.quote_result
 
-    async def debit(
-        self, gcid: str, tenant_id: str, action_code: str, idem_key: str
-    ) -> ManaResult:
+    async def debit(self, gcid: str, tenant_id: str, action_code: str, idem_key: str) -> ManaResult:
         self.debit_calls.append((gcid, tenant_id, action_code, idem_key))
         if self.debit_error is not None:
             raise self.debit_error
@@ -76,9 +74,7 @@ class TestQuote:
 
     async def test_a_shortfall_denies_with_both_balances(self) -> None:
         meter, _ = _meter(
-            quote_result=ManaResult(
-                success=False, required_units=50, current_balance_units=20
-            )
+            quote_result=ManaResult(success=False, required_units=50, current_balance_units=20)
         )
 
         assert await meter.quote(_GCID, _TENANT_ID, _ACTION_CODE) == ManaQuote(
@@ -118,9 +114,7 @@ class TestDebit:
 
     async def test_a_shortfall_is_reported_not_raised(self) -> None:
         meter, _ = _meter(
-            debit_result=ManaResult(
-                success=False, required_units=50, current_balance_units=20
-            )
+            debit_result=ManaResult(success=False, required_units=50, current_balance_units=20)
         )
 
         assert await meter.debit(_GCID, _TENANT_ID, _ACTION_CODE, _IDEM_KEY) == ManaDebit(

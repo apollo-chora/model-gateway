@@ -240,8 +240,10 @@ METRIC_NAMES: tuple[str, ...] = tuple(metric.name for metric in Metrics().all())
 
 def _render_metric(metric: Counter | Gauge | Histogram) -> list[str]:
     """One metric as its exposition lines."""
-    kind = "histogram" if isinstance(metric, Histogram) else (
-        "gauge" if isinstance(metric, Gauge) else "counter"
+    kind = (
+        "histogram"
+        if isinstance(metric, Histogram)
+        else ("gauge" if isinstance(metric, Gauge) else "counter")
     )
     lines = [f"# HELP {metric.name} {_escape_help(metric.help)}", f"# TYPE {metric.name} {kind}"]
     if isinstance(metric, Histogram):

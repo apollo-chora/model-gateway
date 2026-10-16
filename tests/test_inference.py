@@ -227,9 +227,7 @@ async def test_invoke_never_lets_a_callers_model_name_choose_the_route():
     provider = MockProvider()
     inference = InferenceService(ModelRegistry((route(),)), provider)
 
-    result = await inference.invoke(
-        request(model="https://unconfigured.example/v1/internal-model")
-    )
+    result = await inference.invoke(request(model="https://unconfigured.example/v1/internal-model"))
 
     assert len(provider.calls) == 1
     route_, request_, _ = provider.calls[0]
@@ -615,9 +613,7 @@ async def test_a_fallback_that_preserves_the_advertised_capabilities_is_a_candid
     primary = full_route(model_id="primary")
     fallback = full_route(model_id="fallback")
 
-    plan = _select_routes(
-        (primary, fallback), request(tools=(ToolDefinition(name="get_weather"),))
-    )
+    plan = _select_routes((primary, fallback), request(tools=(ToolDefinition(name="get_weather"),)))
 
     assert plan.primary is primary
     assert plan.fallbacks == (fallback,)
@@ -923,9 +919,7 @@ async def test_a_failure_a_repeat_cannot_change_is_not_retried():
 
 
 async def test_the_attempt_number_advances_with_each_retry():
-    provider = MockProvider(
-        (MockSpec(error=UnavailableError("down")), MockSpec(text="recovered"))
-    )
+    provider = MockProvider((MockSpec(error=UnavailableError("down")), MockSpec(text="recovered")))
     inference = InferenceService(
         ModelRegistry((route(),)), provider, retry_count=1, retry_backoff_ms=0
     )
@@ -936,9 +930,7 @@ async def test_the_attempt_number_advances_with_each_retry():
 
 
 async def test_a_retry_waits_the_configured_backoff_before_the_next_attempt():
-    provider = MockProvider(
-        (MockSpec(error=UnavailableError("down")), MockSpec(text="recovered"))
-    )
+    provider = MockProvider((MockSpec(error=UnavailableError("down")), MockSpec(text="recovered")))
     inference = InferenceService(
         ModelRegistry((route(),)), provider, retry_count=1, retry_backoff_ms=200
     )
@@ -1227,9 +1219,7 @@ class _RecordingLimiter:
 
 async def test_simultaneous_attempts_are_bounded_by_the_injected_limiter():
     provider = _ConcurrencyProbe()
-    inference = InferenceService(
-        ModelRegistry((route(),)), provider, limiter=ConcurrencyLimiter(2)
-    )
+    inference = InferenceService(ModelRegistry((route(),)), provider, limiter=ConcurrencyLimiter(2))
 
     await asyncio.gather(*(inference.invoke(request()) for _ in range(6)))
 
@@ -1256,9 +1246,7 @@ async def test_the_concurrency_slot_is_released_before_the_backoff_wait(monkeypa
         return True
 
     monkeypatch.setattr(inference_module, "_back_off", recording_back_off)
-    provider = MockProvider(
-        (MockSpec(error=UnavailableError("down")), MockSpec(text="recovered"))
-    )
+    provider = MockProvider((MockSpec(error=UnavailableError("down")), MockSpec(text="recovered")))
     inference = InferenceService(
         ModelRegistry((route(),)),
         provider,
@@ -1468,9 +1456,7 @@ def _gateway_over(transport: httpx.AsyncBaseTransport, **overrides) -> Inference
     library retries a connection error on by itself.
     """
     binding = LiteLLMProvider(resolver=_stub_resolver, inner_factory=lambda: transport)
-    return InferenceService(
-        ModelRegistry((route(format="anthropic"),)), binding, **overrides
-    )
+    return InferenceService(ModelRegistry((route(format="anthropic"),)), binding, **overrides)
 
 
 async def test_the_librarys_internal_retry_does_reach_the_wire_when_nothing_cancels():

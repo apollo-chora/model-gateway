@@ -746,9 +746,7 @@ class InferenceService:
         if usage.output_tokens is not None:
             metrics.tokens_output_total.inc(usage.output_tokens)
 
-    async def _governance_authorize(
-        self, request: InvocationRequest
-    ) -> GovernanceDecision | None:
+    async def _governance_authorize(self, request: InvocationRequest) -> GovernanceDecision | None:
         """The governance chain's decision for one invoke, or ``None`` when ungoverned.
 
         ``None`` means the deployment wired no governance manager: the
@@ -787,7 +785,8 @@ class InferenceService:
         with no tenant settles nothing: the budget and the outbox are
         tenant-scoped, and there is no tenant to attribute the spend to.
         """
-        assert self._governance is not None
+        # The assert is load-bearing: it narrows the optional for the type checker.
+        assert self._governance is not None  # nosec B101
         if not request.tenant_id:
             return
         usage = response.usage
@@ -1414,9 +1413,7 @@ class InferenceService:
             async def serve(
                 route: Route, state: InvocationState, deadline: Deadline
             ) -> tuple[EmbeddingResponse, Route]:
-                response = await self._embed_attempt(
-                    route, request, state, deadline, invocation_id
-                )
+                response = await self._embed_attempt(route, request, state, deadline, invocation_id)
                 return (
                     _normalise_embeddings(route, request, response, invocation_id=invocation_id),
                     route,
@@ -1520,17 +1517,13 @@ class InferenceService:
             async def serve(
                 route: Route, state: InvocationState, deadline: Deadline
             ) -> tuple[ImageResponse, Route]:
-                response = await self._image_attempt(
-                    route, request, state, deadline, invocation_id
-                )
+                response = await self._image_attempt(route, request, state, deadline, invocation_id)
                 return (
                     _normalise_images(route, request, response, invocation_id=invocation_id),
                     route,
                 )
 
-            result, route, state = await self._walk(
-                Operation.IMAGE, plan, serve, deadline=deadline
-            )
+            result, route, state = await self._walk(Operation.IMAGE, plan, serve, deadline=deadline)
             self._record(request, _outcome_of(result), route, state, namespace or "", started)
             return result
 
@@ -1666,9 +1659,7 @@ class InferenceService:
             raise _deadline_exceeded(operation, state)
         raise failure
 
-    def _text_serve(
-        self, request: InvocationRequest
-    ) -> _Serve[InvocationResponse]:
+    def _text_serve(self, request: InvocationRequest) -> _Serve[InvocationResponse]:
         """Bind one text invocation's attempt to its answer shape.
 
         The walk performs the call and nothing else; this closure is where the
@@ -2019,9 +2010,7 @@ class InferenceService:
             finally:
                 await upstream.aclose()
                 if self._metrics is not None:
-                    self._metrics.upstream_duration_seconds.observe(
-                        time.monotonic() - started
-                    )
+                    self._metrics.upstream_duration_seconds.observe(time.monotonic() - started)
 
 
 @asynccontextmanager
@@ -2119,15 +2108,12 @@ def _deadline_exceeded(operation: Operation, state: InvocationState) -> Deadline
     """
     model = PUBLIC_MODEL_IDS[operation]
     return DeadlineExceededError(
-        f"the invocation deadline for model {model!r} expired before a provider "
-        f"could serve it",
+        f"the invocation deadline for model {model!r} expired before a provider could serve it",
         details={"model": model, "attempts": str(state.attempt_count)},
     )
 
 
-def _error_event(
-    request: InvocationRequest, error: BaseException, *, sequence: int
-) -> StreamEvent:
+def _error_event(request: InvocationRequest, error: BaseException, *, sequence: int) -> StreamEvent:
     """The terminal event that ends a stream which failed after output began.
 
     A failure after the first event cannot be retried or walked to another
@@ -2277,9 +2263,7 @@ def _route_can_serve(
     return not caller_dimension or route.supports_dimensions_param
 
 
-def _first_missing_capability(
-    route: Route, required: tuple[Capability, ...]
-) -> Capability | None:
+def _first_missing_capability(route: Route, required: tuple[Capability, ...]) -> Capability | None:
     """The first capability ``route`` lacks, or ``None`` if it has them all.
 
     ``required`` is reported in a deterministic order by whoever built it, so the
@@ -2356,9 +2340,7 @@ def _requires_structured_output(request: InvocationRequest) -> bool:
 def _carries_images(request: InvocationRequest) -> bool:
     """Whether any message in the conversation carries an image part."""
     return any(
-        isinstance(part, ImagePart)
-        for message in request.messages
-        for part in message.content
+        isinstance(part, ImagePart) for message in request.messages for part in message.content
     )
 
 

@@ -485,17 +485,11 @@ async def test_one_callers_rate_limit_does_not_refuse_another():
 async def test_a_tenants_simultaneous_invocations_are_bounded():
     """The second invocation of a one-slot tenant waits rather than reaching upstream."""
     provider = _BlockingProvider()
-    service = _service(
-        provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4)
-    )
+    service = _service(provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4))
 
-    first = asyncio.create_task(
-        service.invoke(_request(), namespace="cred-a", tenant="tenant-a")
-    )
+    first = asyncio.create_task(service.invoke(_request(), namespace="cred-a", tenant="tenant-a"))
     await asyncio.wait_for(provider.entered.wait(), timeout=5.0)
-    second = asyncio.create_task(
-        service.invoke(_request(), namespace="cred-b", tenant="tenant-a")
-    )
+    second = asyncio.create_task(service.invoke(_request(), namespace="cred-b", tenant="tenant-a"))
     await _yield_times()
 
     assert not second.done()
@@ -508,17 +502,11 @@ async def test_a_tenants_simultaneous_invocations_are_bounded():
 async def test_one_tenants_bound_does_not_hold_another_back():
     """Two credentials of two tenants are two principals for this bound."""
     provider = _BlockingProvider()
-    service = _service(
-        provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4)
-    )
+    service = _service(provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4))
 
-    first = asyncio.create_task(
-        service.invoke(_request(), namespace="cred-a", tenant="tenant-a")
-    )
+    first = asyncio.create_task(service.invoke(_request(), namespace="cred-a", tenant="tenant-a"))
     await asyncio.wait_for(provider.entered.wait(), timeout=5.0)
-    second = asyncio.create_task(
-        service.invoke(_request(), namespace="cred-b", tenant="tenant-b")
-    )
+    second = asyncio.create_task(service.invoke(_request(), namespace="cred-b", tenant="tenant-b"))
     await _settle(lambda: len(provider.calls) == 2)
 
     provider.release.set()
@@ -528,9 +516,7 @@ async def test_one_tenants_bound_does_not_hold_another_back():
 async def test_a_tenant_slot_is_released_when_the_invocation_ends():
     """A leaked slot would refuse the tenant's next invocation, which this would catch."""
     provider = _EchoProvider()
-    service = _service(
-        provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=0)
-    )
+    service = _service(provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=0))
 
     for _ in range(3):
         await service.invoke(_request(), namespace="cred-a", tenant="tenant-a")
@@ -551,9 +537,7 @@ async def test_a_streamed_invocation_is_admitted_too():
     assert [event async for event in stream]
 
     with pytest.raises(ResourceExhaustedError) as refused:
-        async for _ in service.invoke_stream(
-            _request(), namespace="cred-a", tenant="tenant-a"
-        ):
+        async for _ in service.invoke_stream(_request(), namespace="cred-a", tenant="tenant-a"):
             pass
 
     assert refused.value.reason is ErrorReason.RATE_LIMITED
@@ -686,9 +670,7 @@ async def test_a_tenant_slot_is_held_for_the_whole_life_of_a_stream():
     request before the bound could.
     """
     provider = _BlockingStreamProvider()
-    service = _service(
-        provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4)
-    )
+    service = _service(provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4))
 
     async def consume():
         return [event async for event in service.invoke_stream(_request(), tenant="tenant-a")]
@@ -717,9 +699,7 @@ async def test_a_paused_stream_that_is_cancelled_frees_its_tenant_slot():
     process restarted.
     """
     provider = _BlockingStreamProvider()
-    service = _service(
-        provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4)
-    )
+    service = _service(provider, tenant_limiter=TenantConcurrencyLimiter(maximum=1, max_waiters=4))
 
     async def consume():
         return [event async for event in service.invoke_stream(_request(), tenant="tenant-a")]
@@ -789,8 +769,13 @@ async def test_an_embeddings_invocation_is_rate_limited():
     provider = _EmbeddingProvider()
     service = _service(
         provider,
-        routes=(_route("upstream-embed", operation=Operation.EMBEDDINGS,
-                       capabilities=frozenset({Capability.EMBEDDINGS})),),
+        routes=(
+            _route(
+                "upstream-embed",
+                operation=Operation.EMBEDDINGS,
+                capabilities=frozenset({Capability.EMBEDDINGS}),
+            ),
+        ),
         rate_limiter=_fresh_limiter(),
     )
     request = EmbeddingRequest(model="embedding-default", input=("hello",))
@@ -810,8 +795,13 @@ async def test_an_image_invocation_is_rate_limited():
     provider = _ImageProvider()
     service = _service(
         provider,
-        routes=(_route("upstream-image", operation=Operation.IMAGE,
-                       capabilities=frozenset({Capability.GENERATION})),),
+        routes=(
+            _route(
+                "upstream-image",
+                operation=Operation.IMAGE,
+                capabilities=frozenset({Capability.GENERATION}),
+            ),
+        ),
         rate_limiter=_fresh_limiter(),
     )
     request = ImageRequest(model="image-default", prompt="a red fox")

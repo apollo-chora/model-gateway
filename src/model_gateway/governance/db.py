@@ -41,9 +41,7 @@ __all__ = [
     "validate_uuid",
 ]
 
-_UUID = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-)
+_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 """The exact shape of a UUID, any version — the only form ``SET LOCAL`` may inline."""
 
 

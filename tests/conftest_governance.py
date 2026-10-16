@@ -107,9 +107,7 @@ async def _prepare_database(admin_dsn: str) -> None:
         await connection.execute(
             f"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {_APP_ROLE}"
         )
-        await connection.execute(
-            f"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO {_APP_ROLE}"
-        )
+        await connection.execute(f"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO {_APP_ROLE}")
     finally:
         await connection.close()
 
@@ -182,9 +180,7 @@ async def _reset_governance_tables(admin_dsn: str) -> None:
 
 
 @pytest.fixture
-async def postgres_db(
-    postgres_dsn: str, postgres_admin_dsn: str
-) -> AsyncIterator[Database]:
+async def postgres_db(postgres_dsn: str, postgres_admin_dsn: str) -> AsyncIterator[Database]:
     """A governance Database connected to the test container's application role.
 
     The governance tables are reset before each test, so a test sees only the

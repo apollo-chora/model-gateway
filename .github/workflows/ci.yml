@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint, security scan and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      # The governance integration tests apply the chora-observability
+      # migrations; the fixture resolves them through this variable when the
+      # sibling checkout a developer workspace has is absent.
+      - name: Check out chora-observability migrations
+        uses: actions/checkout@v7
+        with:
+          repository: apollo-chora/chora-observability
+          ref: 81f5c10b4f5fd6d26082456293f219903af8278b
+          path: chora-observability
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
+
+      - name: Lockfile is fresh
+        run: uv lock --check
+
+      - name: Ruff lint
+        run: uv run ruff check src tests
+
+      - name: Ruff format
+        run: uv run ruff format --check src tests
+
+      - name: Bandit
+        run: uv run bandit -r src -q
+
+      - name: Pytest
+        run: uv run pytest -q
+        env:
+          CHORA_OBSERVABILITY_MIGRATIONS: chora-observability/migrations

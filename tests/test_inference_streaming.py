@@ -60,6 +60,7 @@ class _TickingClock:
         self._now += self._step
         return reading
 
+
 INVOCATION_ID = "inv-stream-1"
 
 
@@ -281,8 +282,7 @@ class TestTheHappyPath:
         sequences = [event.sequence for event in events]
         assert sequences == [0, 1, 2, 3]
         assert all(
-            later > earlier
-            for earlier, later in zip(sequences, sequences[1:], strict=False)
+            later > earlier for earlier, later in zip(sequences, sequences[1:], strict=False)
         )
 
     async def test_every_event_carries_the_invocation_id(self):
@@ -345,9 +345,7 @@ class TestTheHappyPath:
 
         with pytest.raises(CapabilityError):
             await collect(
-                inference.invoke_stream(
-                    request(tools=(ToolDefinition(name="get_weather"),))
-                )
+                inference.invoke_stream(request(tools=(ToolDefinition(name="get_weather"),)))
             )
 
         assert provider.calls == []
@@ -374,9 +372,7 @@ class TestNoFallbackAfterOutput:
                 [content_event("fallback", 0), finish_event(FinishReason.STOP, 1)],
             ]
         )
-        inference = service(
-            (route("primary"), route("fallback")), provider, retry_count=0
-        )
+        inference = service((route("primary"), route("fallback")), provider, retry_count=0)
 
         events: list[StreamEvent] = []
         with pytest.raises(UnavailableError):
@@ -415,9 +411,7 @@ class TestNoFallbackAfterOutput:
                 [content_event("Hello", 0), finish_event(FinishReason.STOP, 1)],
             ]
         )
-        inference = service(
-            (route("primary"), route("fallback")), provider, retry_count=0
-        )
+        inference = service((route("primary"), route("fallback")), provider, retry_count=0)
 
         events = await collect(inference.invoke_stream(request()))
 
@@ -453,9 +447,7 @@ class TestNoFallbackAfterOutput:
                 ],
             ]
         )
-        inference = service(
-            (route("primary"), route("fallback")), provider, retry_count=0
-        )
+        inference = service((route("primary"), route("fallback")), provider, retry_count=0)
 
         events = await collect(inference.invoke_stream(request()))
 
