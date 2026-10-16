@@ -53,6 +53,12 @@ the Exa search succeeded and the synthesis failed — settles the partial spend
 only: the budget debit and the outbox record, with no mana debit and no egress
 counter, because the call never completed. A deployment that wired no
 governance manager gates and settles nothing.
+
+**The dispatch is claimed before the Exa call, so a redelivery is not charged
+twice.** The invocation id is the dispatch key: the first search with that id
+claims the dispatch, runs the Exa call and settles; a redelivery with the same
+id finds the dispatch already claimed, skips the Exa call and returns a deduped
+response — no second budget debit, no second outbox row, no second mana debit.
 """
 
 from __future__ import annotations
@@ -64,7 +70,12 @@ from datetime import UTC, datetime
 import grpc
 import structlog
 
-from model_gateway.domain import GroundedSearchRequest, GroundedSearchResult
+from model_gateway.domain import (
+    GroundedFinishReason,
+    GroundedSearchRequest,
+    GroundedSearchResult,
+    GroundedUsage,
+)
 from model_gateway.errors import (
     FailedPreconditionError,
     GatewayError,
@@ -148,6 +159,29 @@ class GroundedSearch:
             _validate(grounded_request)
             if self._governance is not None:
                 await _authorize_grounded(self._governance, grounded_request)
+                # Claim the dispatch before the Exa call. The dispatch key is
+                # the invocation id, so a redelivered search with the same
+                # invocation id is deduped: the claim fails, the Exa call is
+                # skipped, and the caller gets a deduped response.
+                claimed = await self._governance.claim_dispatch(
+                    gcid=grounded_request.gcid,
+                    dispatch_key=invocation_id,
+                    action_code=grounded_request.action_code,
+                    invocation_id=invocation_id,
+                )
+                if not claimed:
+                    return mapping.grounded_search_response_to_proto(
+                        GroundedSearchResult(
+                            invocation_id=invocation_id,
+                            grounded_answer="",
+                            citations=(),
+                            usage=GroundedUsage(),
+                            vendor="",
+                            model_version="",
+                            finish_reason=GroundedFinishReason.UNSPECIFIED,
+                            completed_at="",
+                        )
+                    )
             result = await self._adapter.search(grounded_request)
             if self._governance is not None:
                 await _settle_grounded(self._governance, grounded_request, result)
@@ -254,7 +288,7 @@ async def _settle_grounded(
             tenant_id=request.tenant_id,
             gcid=request.gcid,
             action_code=request.action_code,
-            dispatch_key=None,
+            dispatch_key=request.invocation_id,
             invocation_id=request.invocation_id,
             usage_id=usage_id,
             cost_micros=usage.cost_micros,

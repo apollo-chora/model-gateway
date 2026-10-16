@@ -761,7 +761,7 @@ def _grounded_request(**overrides) -> pb.GroundedSearchRequest:
     fields = {
         "invocation_id": "inv-grounded-1",
         "tenant_id": _GRPC_TENANT,
-        "gcid": "gcid-1",
+        "gcid": _GCID,
         "agent_id": "familiar_seeker",
         "crew_kind": "familiar",
         "directive": "What is the capital of France?",
@@ -1053,7 +1053,7 @@ class TestGroundedSearchSettlement:
         # collapses onto the ledger row the first settlement wrote, and it
         # carries the tenant the egress is priced under.
         assert mana_client.debit_calls == [
-            ("gcid-1", _GRPC_TENANT, "external_egress.search", "inv-grounded-1")
+            (_GCID, _GRPC_TENANT, "external_egress.search", "inv-grounded-1")
         ]
 
     async def test_a_served_search_records_the_model_that_produced_the_tokens(
@@ -1236,7 +1236,7 @@ class TestGroundedSearchSettlement:
         assert connection.debited_budget() == 1
         assert connection.wrote_outbox_rows() == 1
         assert mana_client.debit_calls == [
-            ("gcid-1", _GRPC_TENANT, "external_egress.search", response.invocation_id)
+            (_GCID, _GRPC_TENANT, "external_egress.search", response.invocation_id)
         ]
         insert = next(
             call for call in connection.calls if "INSERT INTO outbox_events" in call[0]
@@ -1294,3 +1294,104 @@ class TestGroundedSearchSettlement:
         # The failed call earned neither a mana debit nor an egress count.
         assert mana_client.debit_calls == []
         assert connection.recorded_egress() == 0
+
+
+class TestGroundedSearchDispatchClaim:
+    """A redelivered grounded search is served, but settles nothing a second time.
+
+    The dispatch-claim mechanism protects the grounded search the same way it
+    protects an invoke: the first search with an invocation id claims the
+    dispatch, runs the Exa call and settles; a redelivery with the same
+    invocation id finds the dispatch already claimed, skips the Exa call and
+    returns a deduped response — no second budget debit, no second outbox row,
+    no second mana debit.
+    """
+
+    async def test_a_redelivered_search_is_served_but_charged_once(self) -> None:
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        connection.budget_rows = [_budget_window(spent_micros=0, policy=BudgetPolicy.BLOCK)]
+        # The first claim wins the key; the second loses it and is deduped.
+        connection.claim_statuses = ["INSERT 0 1", "INSERT 0 0"]
+        mana_client = StubManaClient()
+        adapter = _ScriptedAdapter(_grounded_result())
+        handler = _grounded_handler(connection, adapter, mana=ManaMeter(mana_client))
+
+        async with _serve_grounded(handler) as stub:
+            first = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-1"), metadata=_bearer()
+            )
+            second = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-1"), metadata=_bearer()
+            )
+
+        # Both searches were served — the redelivery is answered, not refused.
+        assert first.grounded_answer == "Paris is the capital."
+        assert second.grounded_answer == ""
+        # The Exa adapter was called only once — the redelivery skipped it.
+        assert len(adapter.calls) == 1
+        # But the learner was billed once: one claim, one outbox row, one debit.
+        assert connection.wrote_outbox_rows() == 1
+        assert connection.debited_budget() == 1
+        assert len(mana_client.debit_calls) == 1
+        assert mana_client.debit_calls == [
+            (_GCID, _GRPC_TENANT, "external_egress.search", "inv-grounded-1")
+        ]
+
+    async def test_a_redelivered_search_with_a_different_invocation_id_is_charged(
+        self,
+    ) -> None:
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        connection.budget_rows = [_budget_window(spent_micros=0, policy=BudgetPolicy.BLOCK)]
+        mana_client = StubManaClient()
+        adapter = _ScriptedAdapter(_grounded_result())
+        handler = _grounded_handler(connection, adapter, mana=ManaMeter(mana_client))
+
+        async with _serve_grounded(handler) as stub:
+            first = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-1"), metadata=_bearer()
+            )
+            second = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-2"), metadata=_bearer()
+            )
+
+        # Both searches were served and both were charged — different invocation
+        # ids are different dispatches.
+        assert first.grounded_answer == "Paris is the capital."
+        assert second.grounded_answer == "Paris is the capital."
+        assert len(adapter.calls) == 2
+        assert connection.wrote_outbox_rows() == 2
+        assert connection.debited_budget() == 2
+        assert len(mana_client.debit_calls) == 2
+
+    async def test_a_served_search_claims_the_dispatch_before_the_adapter(self) -> None:
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        connection.budget_rows = [_budget_window(spent_micros=0, policy=BudgetPolicy.BLOCK)]
+        mana_client = StubManaClient()
+        adapter = _ScriptedAdapter(_grounded_result())
+        handler = _grounded_handler(connection, adapter, mana=ManaMeter(mana_client))
+
+        async with _serve_grounded(handler) as stub:
+            await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-1"), metadata=_bearer()
+            )
+
+        # The dispatch was claimed exactly once, before the Exa call.
+        assert connection.claimed_debit() == 1

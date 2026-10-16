@@ -49,7 +49,7 @@ from structlog.testing import capture_logs
 from model_gateway.capabilities import Capability
 from model_gateway.config import Settings
 from model_gateway.config.routes import Operation, Route
-from model_gateway.domain import GroundedUsage, Usage
+from model_gateway.domain import GroundedFinishReason, GroundedSearchResult, GroundedUsage, Usage
 from model_gateway.governance import (
     BudgetManager,
     Database,
@@ -742,3 +742,120 @@ class TestCrashBetweenSettlementAndManaDebitBillsOnce:
         # second mana debit, so the learner is never charged twice for one dispatch.
         assert await _spent_micros(db, _TENANT) == _COST_MICROS
         assert len(await _outbox_rows(db, _TENANT)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 8. A redelivered grounded search does not double-charge
+# ---------------------------------------------------------------------------
+
+
+class TestGroundedSearchRetryDoesNotDoubleCharge:
+    """A redelivered grounded search is served, but settles nothing a second time.
+
+    The dispatch-claim mechanism protects the grounded search the same way it
+    protects an invoke: the first search with an invocation id claims the
+    dispatch, runs the Exa call and settles; a redelivery with the same
+    invocation id finds the dispatch already claimed, skips the Exa call and
+    returns a deduped response — no second budget debit, no second outbox row,
+    no second mana debit.
+    """
+
+    async def test_a_redelivered_grounded_search_is_served_but_charged_once(
+        self, postgres_db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = postgres_db
+        await _insert_egress_policy(db, _TENANT, enabled=True, ceiling=50)
+        await _insert_budget(db, _TENANT, budget_micros=1_000_000, spent_micros=0)
+        mana_client = _StubManaClient()
+        manager = _manager(db, mana=ManaMeter(mana_client))
+        adapter = _ScriptedAdapter(
+            GroundedSearchResult(
+                invocation_id="inv-grounded-e2e",
+                grounded_answer="Paris is the capital.",
+                web_search_queries=("What is the capital of France?",),
+                usage=GroundedUsage(grounding_units=1, cost_micros=10_000),
+                vendor="exa",
+                model_version="synthesis-model",
+                finish_reason=GroundedFinishReason.COMPLETE,
+                completed_at="2026-10-16T00:00:00+00:00",
+            )
+        )
+        monkeypatch.setattr(
+            "model_gateway.grpc.grounded_search.ExaGroundedSearch",
+            lambda _config: adapter,
+        )
+        service = InferenceService(_text_registry(), _CostedMockProvider(), governance=manager)
+
+        async with _serve(service, _text_registry(), manager) as stub:
+            first = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-e2e"), metadata=_bearer()
+            )
+            rows_after_first = await _outbox_rows(db, _TENANT)
+            spent_after_first = await _spent_micros(db, _TENANT)
+            second = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-e2e"), metadata=_bearer()
+            )
+
+        # Both searches were served — the redelivery is answered, not refused.
+        assert first.grounded_answer == "Paris is the capital."
+        assert second.grounded_answer == ""
+        # The Exa adapter was called only once — the redelivery skipped it.
+        assert len(adapter.calls) == 1
+        # But the learner was billed once: one outbox row, one budget debit.
+        assert len(rows_after_first) == 1
+        assert len(await _outbox_rows(db, _TENANT)) == 1
+        assert spent_after_first == 10_000
+        assert await _spent_micros(db, _TENANT) == 10_000
+        assert mana_client.debit_calls == [
+            (_GCID, _TENANT, "external_egress.search", "inv-grounded-e2e")
+        ]
+
+        # The dedupe is recorded on the winning claim row, which is the ledger's
+        # own proof that the key billed once and the redelivery was counted.
+        claim = await _claim_row(db, _GCID, "inv-grounded-e2e", "external_egress.search")
+        assert claim is not None
+        assert claim["dedupe_count"] == 1
+        assert claim["last_deduped_invocation_id"] == "inv-grounded-e2e"
+
+    async def test_a_grounded_search_with_a_different_invocation_id_is_charged(
+        self, postgres_db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = postgres_db
+        await _insert_egress_policy(db, _TENANT, enabled=True, ceiling=50)
+        await _insert_budget(db, _TENANT, budget_micros=1_000_000, spent_micros=0)
+        mana_client = _StubManaClient()
+        manager = _manager(db, mana=ManaMeter(mana_client))
+        adapter = _ScriptedAdapter(
+            GroundedSearchResult(
+                invocation_id="inv-grounded-e2e",
+                grounded_answer="Paris is the capital.",
+                web_search_queries=("What is the capital of France?",),
+                usage=GroundedUsage(grounding_units=1, cost_micros=10_000),
+                vendor="exa",
+                model_version="synthesis-model",
+                finish_reason=GroundedFinishReason.COMPLETE,
+                completed_at="2026-10-16T00:00:00+00:00",
+            )
+        )
+        monkeypatch.setattr(
+            "model_gateway.grpc.grounded_search.ExaGroundedSearch",
+            lambda _config: adapter,
+        )
+        service = InferenceService(_text_registry(), _CostedMockProvider(), governance=manager)
+
+        async with _serve(service, _text_registry(), manager) as stub:
+            first = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-1"), metadata=_bearer()
+            )
+            second = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-2"), metadata=_bearer()
+            )
+
+        # Both searches were served and both were charged — different invocation
+        # ids are different dispatches.
+        assert first.grounded_answer == "Paris is the capital."
+        assert second.grounded_answer == "Paris is the capital."
+        assert len(adapter.calls) == 2
+        assert len(await _outbox_rows(db, _TENANT)) == 2
+        assert await _spent_micros(db, _TENANT) == 20_000
+        assert len(mana_client.debit_calls) == 2
