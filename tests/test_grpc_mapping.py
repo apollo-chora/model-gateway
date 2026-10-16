@@ -39,6 +39,10 @@ import pytest
 
 from model_gateway.domain import (
     FinishReason,
+    GroundedCitation,
+    GroundedFinishReason,
+    GroundedSearchResult,
+    GroundedUsage,
     InvocationResponse,
     ResponseFormat,
     ResponseFormatMode,
@@ -526,3 +530,141 @@ def test_a_reserved_metadata_key_is_an_invalid_argument():
 
     with pytest.raises(InvalidArgumentError, match="metadata"):
         mapping.invocation_request_from_proto(request, identity=identity())
+
+
+# --------------------------------------------------------------------------- #
+# Grounded search: the request and response cross both ways
+# --------------------------------------------------------------------------- #
+
+
+def grounded_request(**overrides) -> pb.GroundedSearchRequest:
+    """A ``GroundedSearchRequest`` a caller could send."""
+    fields = {
+        "invocation_id": "inv-grounded-1",
+        "tenant_id": TENANT,
+        "gcid": "gcid-1",
+        "agent_id": "familiar_seeker",
+        "crew_kind": "familiar",
+        "directive": "What is the capital of France?",
+        "max_results": 5,
+        "action_code": "external_egress.search",
+        "traceparent": "00-abc-def-01",
+        "tracestate": "congo=t61rcWkgMzE",
+    }
+    fields.update(overrides)
+    return pb.GroundedSearchRequest(**fields)
+
+
+def grounded_result(**overrides) -> GroundedSearchResult:
+    """A ``GroundedSearchResult`` the adapter could have produced."""
+    fields = {
+        "invocation_id": "inv-grounded-1",
+        "citations": (
+            GroundedCitation(
+                uri="https://a.example/one",
+                title="Source One",
+                domain="a.example",
+                snippet="text from one",
+                confidence=0.9,
+            ),
+        ),
+        "grounded_answer": "Paris is the capital.",
+        "search_entry_point_html": (
+            '<ul><li><a href="https://a.example/one">Source One</a></li></ul>'
+        ),
+        "web_search_queries": ("What is the capital of France?",),
+        "usage": GroundedUsage(
+            input_tokens=10,
+            output_tokens=20,
+            total_tokens=30,
+            grounding_units=1,
+            cost_micros=10000,
+        ),
+        "vendor": "exa",
+        "model_version": "synthesis-model",
+        "finish_reason": GroundedFinishReason.COMPLETE,
+        "completed_at": "2026-10-16T00:00:00+00:00",
+    }
+    fields.update(overrides)
+    return GroundedSearchResult(**fields)
+
+
+def test_a_grounded_search_request_crosses_both_ways():
+    canonical = mapping.grounded_search_request_from_proto(grounded_request())
+
+    assert canonical.invocation_id == "inv-grounded-1"
+    assert canonical.tenant_id == TENANT
+    assert canonical.gcid == "gcid-1"
+    assert canonical.agent_id == "familiar_seeker"
+    assert canonical.crew_kind == "familiar"
+    assert canonical.directive == "What is the capital of France?"
+    assert canonical.max_results == 5
+    assert canonical.action_code == "external_egress.search"
+    assert canonical.traceparent == "00-abc-def-01"
+    assert canonical.tracestate == "congo=t61rcWkgMzE"
+
+
+def test_a_grounded_search_response_crosses_both_ways():
+    proto = mapping.grounded_search_response_to_proto(grounded_result())
+
+    assert proto.invocation_id == "inv-grounded-1"
+    assert [citation.uri for citation in proto.citations] == ["https://a.example/one"]
+    assert proto.citations[0].title == "Source One"
+    assert proto.citations[0].domain == "a.example"
+    assert proto.citations[0].snippet == "text from one"
+    assert proto.citations[0].confidence == pytest.approx(0.9)
+    assert proto.grounded_answer == "Paris is the capital."
+    assert proto.search_entry_point_html == (
+        '<ul><li><a href="https://a.example/one">Source One</a></li></ul>'
+    )
+    assert list(proto.web_search_queries) == ["What is the capital of France?"]
+    assert proto.usage.input_tokens == 10
+    assert proto.usage.output_tokens == 20
+    assert proto.usage.total_tokens == 30
+    assert proto.usage.grounding_units == 1
+    assert proto.usage.cost_micros == 10000
+    assert proto.vendor == "exa"
+    assert proto.model_version == "synthesis-model"
+    assert proto.finish_reason == pb.FINISH_REASON_STOP
+    assert proto.finish_detail == ""
+    assert proto.completed_at == "2026-10-16T00:00:00+00:00"
+
+
+def test_an_empty_citation_list_crosses_as_empty():
+    # The in-band anomaly: the search found nothing renderable, so the
+    # response carries no citations and the caller hedges. The mapping writes
+    # the empty list rather than dropping it or refusing it.
+    proto = mapping.grounded_search_response_to_proto(
+        grounded_result(
+            citations=(), grounded_answer="", finish_reason=GroundedFinishReason.UNSPECIFIED
+        )
+    )
+
+    assert len(proto.citations) == 0
+    assert proto.grounded_answer == ""
+    assert proto.finish_reason == pb.FINISH_REASON_UNSPECIFIED
+
+
+@pytest.mark.parametrize(
+    "reason, expected",
+    [
+        pytest.param(
+            GroundedFinishReason.UNSPECIFIED, pb.FINISH_REASON_UNSPECIFIED, id="unspecified"
+        ),
+        pytest.param(GroundedFinishReason.COMPLETE, pb.FINISH_REASON_STOP, id="complete"),
+    ],
+)
+def test_a_grounded_finish_reason_maps_onto_the_proto_enum(reason, expected):
+    proto = mapping.grounded_search_response_to_proto(grounded_result(finish_reason=reason))
+
+    assert proto.finish_reason == expected
+
+
+def test_an_unknown_grounded_finish_reason_is_refused():
+    result = grounded_result()
+    # A finish reason outside the canonical vocabulary is not a value the
+    # gateway could publish, so the mapping refuses it rather than guessing.
+    object.__setattr__(result, "finish_reason", "not-a-reason")
+
+    with pytest.raises(InvalidArgumentError, match="finish_reason"):
+        mapping.grounded_search_response_to_proto(result)

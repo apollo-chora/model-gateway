@@ -127,14 +127,13 @@ def request_fingerprint(request: InvocationRequest) -> RequestFingerprint:
       cannot change the answer. This holds while ``FORWARDABLE_METADATA_KEYS``
       stays empty; a metadata key that becomes semantically consumed changes this
       fingerprint with that contract, not before it.
+    * ``model`` — the operation is resolved from the transport, not from the
+      caller's model string, so the field cannot change the answer and two
+      requests differing only in it are the same request.
     * ``fallback_models`` — the caller's permitted fallbacks no longer choose
       anything: the operation is resolved from the transport and the configured
       route order applies, so the field cannot change the answer and two requests
       differing only in it are the same request.
-    * ``model`` — the caller's model string is semantically irrelevant: the
-      operation is resolved from the transport and the response is stamped with
-      the gateway's fixed public model ID, so the field cannot change the answer
-      and two requests differing only in it are the same request.
     """
     digest = sha256(
         orjson.dumps(fingerprint_payload(request), option=orjson.OPT_SORT_KEYS)

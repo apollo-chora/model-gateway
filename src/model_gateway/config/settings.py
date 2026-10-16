@@ -255,6 +255,11 @@ _FIELDS: tuple[_Field, ...] = (
         "",
         _parse_optional_text,
     ),
+    _Field("exa_api_key", "EXA_API_KEY", "", _parse_optional_text),
+    _Field("exa_search_endpoint", "EXA_SEARCH_ENDPOINT", "https://api.exa.ai", _parse_text),
+    _Field("exa_synthesis_model_id", "EXA_SYNTHESIS_MODEL_ID", "", _parse_optional_text),
+    _Field("exa_synthesis_endpoint", "EXA_SYNTHESIS_ENDPOINT", "", _parse_optional_text),
+    _Field("exa_synthesis_api_key", "EXA_SYNTHESIS_API_KEY", "", _parse_optional_text),
 )
 
 
@@ -288,6 +293,12 @@ class Settings:
 
     otel_enabled: bool
     otel_exporter_otlp_endpoint: str
+
+    exa_api_key: str
+    exa_search_endpoint: str
+    exa_synthesis_model_id: str
+    exa_synthesis_endpoint: str
+    exa_synthesis_api_key: str
 
     def __post_init__(self) -> None:
         for entry in _FIELDS:

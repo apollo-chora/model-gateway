@@ -25,8 +25,9 @@ package gateway.v1;
 // ModelGatewayService serves every inference operation the gateway exposes.
 //
 // Invoke and InvokeStream are the text operation, Embed the embeddings
-// operation and ListModels the model listing. The standard gRPC Health Checking
-// Protocol is served beside this service, on the same port.
+// operation, GroundedSearch the grounded web search and ListModels the model
+// listing. The standard gRPC Health Checking Protocol is served beside this
+// service, on the same port.
 service ModelGatewayService {
   // One request, one complete answer. Refused, rather than approximated, when
   // the canonical answer cannot serve the request.
@@ -37,6 +38,10 @@ service ModelGatewayService {
 
   // One request, one list of vectors.
   rpc Embed(EmbedRequest) returns (EmbedResponse);
+
+  // One request, one grounded answer with its citations. The gateway searches
+  // the web and synthesises an answer grounded only in the sources it found.
+  rpc GroundedSearch(GroundedSearchRequest) returns (GroundedSearchResponse);
 
   // The models this gateway exposes, with the capabilities each declares.
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
@@ -372,6 +377,76 @@ message EmbedResponse {
 message Embedding {
   int32 index = 1;
   repeated double embedding = 2;
+}
+
+// GroundedSearchRequest asks for one grounded web search: the gateway searches
+// the web for the directive and answers with citations.
+message GroundedSearchRequest {
+  // Caller-supplied invocation identifier, echoed on the response.
+  string invocation_id = 1;
+  // Caller-supplied tenant claim. Never a principal by itself.
+  string tenant_id = 2;
+  // Caller-supplied learner identifier the search is attributed to.
+  string gcid = 3;
+  // Caller-supplied agent or service label.
+  string agent_id = 4;
+  // Caller-supplied crew classification.
+  string crew_kind = 5;
+  // The learner's question the search answers.
+  string directive = 6;
+  // Citation cap. Zero means the gateway's own default.
+  int32 max_results = 7;
+  // The metered action this egress is priced under.
+  string action_code = 8;
+  // W3C trace context the egress span anchors to.
+  string traceparent = 9;
+  string tracestate = 10;
+}
+
+// GroundedSearchResponse is the grounded answer with the citations it rests on.
+message GroundedSearchResponse {
+  // The invocation identifier, echoed from the request.
+  string invocation_id = 1;
+  // The sources the answer is grounded in. Empty means the search found nothing
+  // renderable, and the caller must hedge rather than present web content as
+  // knowledge.
+  repeated GroundedCitation citations = 2;
+  // The synthesised answer, grounded only in the cited sources.
+  string grounded_answer = 3;
+  // An HTML list of citation links the caller may render.
+  string search_entry_point_html = 4;
+  // The search queries the gateway issued.
+  repeated string web_search_queries = 5;
+  // Token and cost accounting for the grounded call.
+  GroundedUsage usage = 6;
+  // The vendor family that served the search.
+  string vendor = 7;
+  // The synthesis model that produced the answer.
+  string model_version = 8;
+  // Why the call finished.
+  FinishReason finish_reason = 9;
+  // Human-readable detail on a non-happy finish.
+  string finish_detail = 10;
+  // When the gateway emitted this response, as an ISO 8601 timestamp.
+  string completed_at = 11;
+}
+
+// GroundedCitation is one renderable source the answer is grounded in.
+message GroundedCitation {
+  string uri = 1;
+  string title = 2;
+  string domain = 3;
+  string snippet = 4;
+  float confidence = 5;
+}
+
+// GroundedUsage counts the tokens and cost of one grounded search.
+message GroundedUsage {
+  int32 input_tokens = 1;
+  int32 output_tokens = 2;
+  int32 total_tokens = 3;
+  int32 grounding_units = 4;
+  int64 cost_micros = 5;
 }
 
 message ListModelsRequest {}
