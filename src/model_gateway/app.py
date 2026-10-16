@@ -43,7 +43,7 @@ from model_gateway.accounting import (
 )
 from model_gateway.app_logging import configure_logging
 from model_gateway.capabilities import Capability
-from model_gateway.config import ConfigurationError, Settings
+from model_gateway.config import ConfigurationError, GovernanceMode, Settings
 from model_gateway.config.routes import Operation
 from model_gateway.config.settings import UsageStorage
 from model_gateway.errors import FailedPreconditionError
@@ -253,6 +253,30 @@ class GovernanceWiring:
     mana_channel: grpc.aio.Channel | None = None
 
 
+def _ensure_governance_mode(settings: Settings) -> None:
+    """Refuse to start a governed deployment whose mana meter is not configured.
+
+    In the default ``chora`` mode the deployment is part of the chora platform:
+    a governance database without the identity service's address would run the
+    chain un-metered — every metered action silently unpriced — so the start
+    fails rather than let a governed deployment drift into an un-metered one.
+    ``standalone`` mode is the explicit opt-out for an operator who runs the
+    gateway apart from the platform's mana ledger, and allows a DSN with no
+    identity address. A deployment with no DSN at all is unaffected: there is
+    no chain to wire and nothing to meter.
+    """
+    if (
+        settings.governance_mode is GovernanceMode.CHORA
+        and settings.observability_dsn
+        and not settings.identity_grpc_addr
+    ):
+        raise ConfigurationError(
+            "CHORA_IDENTITY_GRPC_ADDR is required when CHORA_OBSERVABILITY_DSN is set — "
+            "governance requires mana metering; set CHORA_GOVERNANCE_MODE=standalone to "
+            "run the chain un-metered"
+        )
+
+
 def _governance(settings: Settings) -> GovernanceWiring | None:
     """The governance chain the deployment configured, or none when it did not.
 
@@ -262,8 +286,12 @@ def _governance(settings: Settings) -> GovernanceWiring | None:
     mana meter is wired when the deployment also names chora-identity's
     gRPC address: the channel is built here and closed with the process, so
     a deployment that configures no ``CHORA_IDENTITY_GRPC_ADDR`` runs the
-    chain un-metered, exactly as it runs without a budget window.
+    chain un-metered, exactly as it runs without a budget window. In the
+    default ``chora`` mode the identity address is required whenever the DSN
+    is set, so a governed deployment cannot silently run un-metered; only an
+    explicit ``CHORA_GOVERNANCE_MODE=standalone`` allows the pair to be split.
     """
+    _ensure_governance_mode(settings)
     if not settings.observability_dsn:
         return None
     db = Database(settings.observability_dsn)
@@ -349,8 +377,12 @@ def create_app(
     configures ``CHORA_IDENTITY_GRPC_ADDR``, the mana meter is wired too: a
     channel to chora-identity is built with the chain and closed with the
     process, so every metered action quotes and debits against the learner's
-    wallet. A deployment that configures no DSN gets no chain and no database,
-    and the invocation flow runs exactly as it did before governance existed.
+    wallet. In the default ``chora`` governance mode the identity address is
+    required whenever the DSN is set, so a governed deployment cannot silently
+    run un-metered; only an explicit ``CHORA_GOVERNANCE_MODE=standalone`` allows
+    the pair to be split. A deployment that configures no DSN gets no chain and
+    no database, and the invocation flow runs exactly as it did before
+    governance existed.
     """
     settings = settings or Settings.from_env()
     configure_logging(settings.log_level)

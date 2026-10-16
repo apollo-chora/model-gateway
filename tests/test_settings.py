@@ -5,7 +5,13 @@ import importlib
 
 import pytest
 
-from model_gateway.config import ConfigurationError, Environment, Settings, UsageStorage
+from model_gateway.config import (
+    ConfigurationError,
+    Environment,
+    GovernanceMode,
+    Settings,
+    UsageStorage,
+)
 
 BOOLEAN_VARIABLES = [
     "GATEWAY_AUTH_ENABLED",
@@ -734,6 +740,24 @@ class TestGovernanceSettings:
         addr = "chora-identity.chora.local:9090"
         assert Settings.from_env({"CHORA_IDENTITY_GRPC_ADDR": addr}).identity_grpc_addr == addr
 
+    def test_governance_mode_defaults_to_chora(self):
+        assert Settings.from_env({}).governance_mode is GovernanceMode.CHORA
+
+    def test_governance_mode_accepts_standalone(self):
+        settings = Settings.from_env({"CHORA_GOVERNANCE_MODE": "standalone"})
+        assert settings.governance_mode is GovernanceMode.STANDALONE
+
+    def test_governance_mode_accepts_an_uppercase_spelling(self):
+        settings = Settings.from_env({"CHORA_GOVERNANCE_MODE": "CHORA"})
+        assert settings.governance_mode is GovernanceMode.CHORA
+
+    def test_governance_mode_rejects_an_unknown_mode(self):
+        with pytest.raises(
+            ConfigurationError,
+            match="CHORA_GOVERNANCE_MODE must be one of 'chora', 'standalone', got 'hybrid'",
+        ):
+            Settings.from_env({"CHORA_GOVERNANCE_MODE": "hybrid"})
+
     def test_budget_required_defaults_to_false(self):
         assert Settings.from_env({}).llm_budget_required is False
 
@@ -761,5 +785,6 @@ class TestGovernanceSettings:
     def test_governance_defaults_survive_direct_construction_round_trip(self):
         assert _direct().observability_dsn == ""
         assert _direct().identity_grpc_addr == ""
+        assert _direct().governance_mode is GovernanceMode.CHORA
         assert _direct().llm_budget_required is False
         assert _direct().llm_budget_required_tenants == ()

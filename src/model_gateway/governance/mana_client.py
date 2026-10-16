@@ -14,7 +14,11 @@ pass ``units=0`` — the caller-priced form is the legacy ad-hoc path — and bo
 carry an idempotency key: the debit carries the caller's key so a retried
 charge collapses onto the ledger row the first attempt wrote, and the quote
 carries a fresh one, because the service requires a non-empty key even for a
-dry run and a dry run writes no ledger row for the key to dedup.
+dry run and a dry run writes no ledger row for the key to dedup. Both also
+carry the tenant the action is priced under: the service selects the subsidy
+slice a debit draws down by ``tenant_id``, so a learner holding allocations
+from several tenants is charged the one the call's tenant names — a request
+that dropped it would be priced and debited against the wrong wallet.
 
 **An unpriced action code is the service's ``INVALID_ARGUMENT``.** chora-identity
 maps an action its catalogue does not price onto that status rather than a
@@ -67,25 +71,33 @@ class GrpcManaClient:
         """Close the underlying channel with the process that built it."""
         await self._channel.close()
 
-    async def quote(self, gcid: str, action_code: str) -> ManaResult:
+    async def quote(self, gcid: str, tenant_id: str, action_code: str) -> ManaResult:
         """The dry-run affordability verdict for one action, without charging it.
 
         A fresh idempotency key names the quote: a dry run resolves the
         price and checks affordability but writes no ledger row, so the key
         records no dedup state and the next quote is an independent check.
+        ``tenant_id`` is carried so the wallet the service checks is the one
+        the caller's tenant feeds.
         """
-        return await self._deduct(gcid, action_code, dry_run=True, idem_key=uuid.uuid4().hex)
+        return await self._deduct(
+            gcid, tenant_id, action_code, dry_run=True, idem_key=uuid.uuid4().hex
+        )
 
-    async def debit(self, gcid: str, action_code: str, idem_key: str) -> ManaResult:
+    async def debit(
+        self, gcid: str, tenant_id: str, action_code: str, idem_key: str
+    ) -> ManaResult:
         """Charge one action against the learner's wallet, idempotently.
 
         ``idem_key`` is the caller's own key, so a retried debit collapses
-        onto the ledger row the first attempt wrote.
+        onto the ledger row the first attempt wrote. ``tenant_id`` is carried
+        so the subsidy slice the debit draws down is the one the caller's
+        tenant's allocations feed.
         """
-        return await self._deduct(gcid, action_code, dry_run=False, idem_key=idem_key)
+        return await self._deduct(gcid, tenant_id, action_code, dry_run=False, idem_key=idem_key)
 
     async def _deduct(
-        self, gcid: str, action_code: str, *, dry_run: bool, idem_key: str
+        self, gcid: str, tenant_id: str, action_code: str, *, dry_run: bool, idem_key: str
     ) -> ManaResult:
         """Run one ``DeductMana`` and read the service's own outcome.
 
@@ -99,6 +111,7 @@ class GrpcManaClient:
             action_code=action_code,
             units=0,
             idempotency_key=idem_key,
+            tenant_id=tenant_id,
             dry_run=dry_run,
         )
         try:

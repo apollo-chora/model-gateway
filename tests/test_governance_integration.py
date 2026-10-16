@@ -51,12 +51,13 @@ from model_gateway.governance import (
     Outbox,
     SuspensionChecker,
 )
+from model_gateway.governance.observability.v1 import token_usage_pb2
 from model_gateway.grpc import gateway_pb2 as pb
 from model_gateway.grpc import gateway_pb2_grpc
 from model_gateway.grpc.grounded_search import GroundedSearch
 from model_gateway.grpc.identity import Authenticator
 from model_gateway.inference import InferenceService
-from model_gateway.providers.exa import ExaConfig
+from model_gateway.providers.exa import ExaConfig, GroundedError
 from model_gateway.providers.mock import MockProvider, MockSpec
 from model_gateway.security.api_keys import ApiKeySet
 
@@ -106,15 +107,17 @@ class StubManaClient:
     ) -> None:
         self.quote_result = quote_result or ManaResult(success=True, balance_after_units=100)
         self.debit_result = debit_result or ManaResult(success=True, balance_after_units=90)
-        self.quote_calls: list[tuple[str, str]] = []
-        self.debit_calls: list[tuple[str, str, str]] = []
+        self.quote_calls: list[tuple[str, str, str]] = []
+        self.debit_calls: list[tuple[str, str, str, str]] = []
 
-    async def quote(self, gcid: str, action_code: str) -> ManaResult:
-        self.quote_calls.append((gcid, action_code))
+    async def quote(self, gcid: str, tenant_id: str, action_code: str) -> ManaResult:
+        self.quote_calls.append((gcid, tenant_id, action_code))
         return self.quote_result
 
-    async def debit(self, gcid: str, action_code: str, idem_key: str) -> ManaResult:
-        self.debit_calls.append((gcid, action_code, idem_key))
+    async def debit(
+        self, gcid: str, tenant_id: str, action_code: str, idem_key: str
+    ) -> ManaResult:
+        self.debit_calls.append((gcid, tenant_id, action_code, idem_key))
         return self.debit_result
 
 
@@ -466,7 +469,7 @@ class TestSettleInvoke:
 
         assert connection.wrote_outbox_rows() == 1
         assert connection.debited_budget() == 1
-        assert mana_client.debit_calls == [(_GCID, "companion_chat", "inv-1")]
+        assert mana_client.debit_calls == [(_GCID, _TENANT_ID, "companion_chat", "inv-1")]
 
     async def test_a_usage_that_already_landed_settles_nothing(self) -> None:
         connection = StubConnection()
@@ -1047,8 +1050,111 @@ class TestGroundedSearchSettlement:
             await stub.GroundedSearch(_grounded_request(), metadata=_bearer())
 
         # The debit is keyed by the invocation id, so a redelivered search
-        # collapses onto the ledger row the first settlement wrote.
-        assert mana_client.debit_calls == [("gcid-1", "external_egress.search", "inv-grounded-1")]
+        # collapses onto the ledger row the first settlement wrote, and it
+        # carries the tenant the egress is priced under.
+        assert mana_client.debit_calls == [
+            ("gcid-1", _GRPC_TENANT, "external_egress.search", "inv-grounded-1")
+        ]
+
+    async def test_a_served_search_records_the_model_that_produced_the_tokens(
+        self,
+    ) -> None:
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        adapter = _ScriptedAdapter(_grounded_result())
+        handler = _grounded_handler(connection, adapter)
+
+        async with _serve_grounded(handler) as stub:
+            await stub.GroundedSearch(_grounded_request(), metadata=_bearer())
+
+        # The outbox payload is the canonical TokenUsageRecorded protobuf the
+        # consumer unmarshals: the model the synthesis leg ran is recorded on
+        # it, not left blank.
+        insert = next(
+            call for call in connection.calls if "INSERT INTO outbox_events" in call[0]
+        )
+        event = token_usage_pb2.TokenUsageRecorded.FromString(insert[1][3])
+        assert event.model_id == "synthesis-model"
+        assert event.cost_micros == 10_000
+        assert event.tenant_id == _GRPC_TENANT
+
+    async def test_a_failed_search_settles_the_partial_spend_without_mana_or_egress(
+        self,
+    ) -> None:
+        """A synthesis failure after a billed search settles what it owed for.
+
+        The provider charged for the Exa search even though the synthesis
+        failed, so the budget is debited and the outbox row recorded under the
+        invocation id. What the failed call did not earn is withheld: no mana
+        debit (the call never completed) and no egress counter (no answer was
+        produced). The vendor's own error still reaches the caller.
+        """
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        mana_client = StubManaClient()
+        adapter = _ScriptedAdapter(
+            GroundedError(
+                "vendor_unavailable",
+                "the synthesis call failed",
+                usage=GroundedUsage(grounding_units=1, cost_micros=10_000),
+            )
+        )
+        handler = _grounded_handler(connection, adapter, mana=ManaMeter(mana_client))
+
+        async with _serve_grounded(handler) as stub:
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                await stub.GroundedSearch(_grounded_request(), metadata=_bearer())
+
+        # The vendor error is the caller's answer, unchanged.
+        assert error.value.code() == grpc.StatusCode.UNAVAILABLE
+        assert "vendor_unavailable" in error.value.details()
+        assert "partial_cost_micros" in error.value.details()
+        # The partial spend settled: the outbox row landed and the budget was
+        # debited — the atomic pair a served search writes.
+        assert connection.wrote_outbox_rows() == 1
+        assert connection.debited_budget() == 1
+        # But the failed call earned neither a mana debit nor an egress count.
+        assert mana_client.debit_calls == []
+        assert connection.recorded_egress() == 0
+
+    async def test_a_failed_search_without_partial_spend_settles_nothing(self) -> None:
+        """A grounded failure carrying no usage settles nothing at all.
+
+        A refusal at the egress gate or the budget decision happens before any
+        billable work, so there is no spend to account and the vendor's error is
+        the whole of the answer.
+        """
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        mana_client = StubManaClient()
+        adapter = _ScriptedAdapter(GroundedError("vendor_unavailable", "the search failed"))
+        handler = _grounded_handler(connection, adapter, mana=ManaMeter(mana_client))
+
+        async with _serve_grounded(handler) as stub:
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                await stub.GroundedSearch(_grounded_request(), metadata=_bearer())
+
+        assert error.value.code() == grpc.StatusCode.UNAVAILABLE
+        assert "partial_cost_micros" not in error.value.details()
+        assert connection.wrote_outbox_rows() == 0
+        assert connection.debited_budget() == 0
+        assert mana_client.debit_calls == []
+        assert connection.recorded_egress() == 0
 
     async def test_a_settlement_failure_never_fails_the_search(self) -> None:
         connection = StubConnection()

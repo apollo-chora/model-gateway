@@ -289,9 +289,10 @@ class GovernanceManager:
         # 4. Mana quote (fail-closed actions only). A definitive shortfall
         # refuses the call before any compute is spent; an unpriced action is
         # un-metered, and a meter that cannot be read fails open, so neither
-        # denies here.
+        # denies here. The tenant rides with the quote: the service resolves the
+        # wallet against that tenant's subsidy slices.
         if self._mana is not None and gcid and action_code and is_fail_closed(action_code):
-            quote = await self._mana.quote(gcid, action_code)
+            quote = await self._mana.quote(gcid, tenant_id, action_code)
             if not quote.affordable and not quote.unknown_action:
                 return GovernanceDecision(
                     allowed=False,
@@ -325,9 +326,10 @@ class GovernanceManager:
 
         The mana debit follows the commit and is best-effort: a charge that
         cannot be recorded is logged, never raised, because the call has
-        already been served. ``dispatch_key`` is carried onto the event
-        envelope so the redelivery proof can read which dispatch the usage
-        belonged to.
+        already been served. The debit carries the invocation's tenant, so the
+        subsidy slice it draws down is the one the call's tenant names.
+        ``dispatch_key`` is carried onto the event envelope so the redelivery
+        proof can read which dispatch the usage belonged to.
         """
         envelope = {**envelope, **({"dispatch_key": dispatch_key} if dispatch_key else {})}
         settled = await self._budget.debit_and_enqueue(
@@ -347,7 +349,7 @@ class GovernanceManager:
             return
         if self._mana is None or not gcid or not action_code:
             return
-        debit = await self._mana.debit(gcid, action_code, invocation_id)
+        debit = await self._mana.debit(gcid, tenant_id, action_code, invocation_id)
         if debit.result is not ManaDebitResult.OK:
             logger.warning(
                 "mana debit not recorded after a served call",
