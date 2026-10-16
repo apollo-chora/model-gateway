@@ -1,0 +1,297 @@
+// =============================================================================
+// Chora Mana Service (gRPC)
+// =============================================================================
+//
+// Source-of-truth: docs/architecture/adrs/adr-142-per-user-economy-mana.md
+//   + chora-contracts/openapi/learner-economy.yaml
+//   + memory project_chora_topology.md
+//
+// Inter-service gRPC contract for the per-user mana wallet (Identity
+// supporting domain, chora_identity database, Team 3 / Platform).
+// REST surface in chora-contracts/openapi/learner-economy.yaml is the
+// user-facing equivalent; gRPC is for internal service-to-service sync
+// calls (mTLS via the service mesh per CLAUDE.md §4 protocol strategy).
+//
+// Primary callers:
+//   - chora-model-broker-gateway  — pre-flight DeductMana from middleware
+//   - chora-consumption           — Companion action quoter
+//   - chora-tenancy               — CreditMana on TenantManaAllocation claim
+//   - chora-identity              — internal subscription / topup paths
+//
+// Idempotency: every mutation RPC requires idempotency_key. Identical keys
+// returning the same result; ledger entries are append-only and dedup on
+// (gcid, idempotency_key).
+//
+// Deployed in chora-local team-platform pool. mTLS via the service mesh;
+// SPIFFE identity in mesh; W3C trace context in gRPC metadata.
+// =============================================================================
+
+syntax = "proto3";
+
+package chora.services.identity.v1;
+
+option go_package = "github.com/apollo-chora/chora-contracts/gen/go/chora/services/identity/v1;identityv1";
+
+import "google/protobuf/timestamp.proto";
+
+// -----------------------------------------------------------------------------
+// Service
+// -----------------------------------------------------------------------------
+
+service ManaService {
+  // Deduct mana from a user's wallet for a Companion action. Spend order
+  // (per ADR-142): TenantManaAllocation FIFO first, then personal
+  // balance. May produce MULTIPLE ledger entries when both subsidy + own
+  // balance are touched. Returns FAILED_PRECONDITION (gRPC code 9; mapped
+  // to HTTP 402) when balance insufficient.
+  //
+  // Idempotent on (gcid, idempotency_key). Repeat calls return the same
+  // result without re-debiting.
+  rpc DeductMana(DeductManaRequest) returns (DeductManaResponse);
+
+  // Credit mana to a user's wallet. Reasons: subscription_grant, topup,
+  // promo, tenant_subsidy, refund, rollover, mint. Idempotent on
+  // (gcid, idempotency_key). Always appends a single mana_ledger row.
+  rpc CreditMana(CreditManaRequest) returns (CreditManaResponse);
+
+  // Read the user's current balance + subsidy breakdown. Cheap;
+  // intended for synchronous UI / pre-flight estimates.
+  rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Shared enums (mirror proto/events/identity/user_mana.proto wire form)
+// -----------------------------------------------------------------------------
+
+enum ManaSource {
+  MANA_SOURCE_UNSPECIFIED = 0;
+  MANA_SOURCE_SUBSCRIPTION_GRANT = 1;
+  MANA_SOURCE_TOPUP = 2;
+  MANA_SOURCE_PROMO = 3;
+  MANA_SOURCE_TENANT_SUBSIDY = 4;
+  MANA_SOURCE_REFUND = 5;
+  MANA_SOURCE_ROLLOVER = 6;
+  MANA_SOURCE_MINT = 7;
+}
+
+enum ManaReasonCode {
+  MANA_REASON_CODE_UNSPECIFIED = 0;
+  MANA_REASON_CODE_SUBSCRIPTION_GRANT = 1;
+  MANA_REASON_CODE_COMPANION_ACTION = 2;
+  MANA_REASON_CODE_REFUND = 3;
+  MANA_REASON_CODE_ACCOUNT_CLOSURE = 4;
+  MANA_REASON_CODE_PROMO = 5;
+  MANA_REASON_CODE_TENANT_SUBSIDY = 6;
+  MANA_REASON_CODE_TOPUP = 7;
+  MANA_REASON_CODE_ROLLOVER = 8;
+}
+
+// -----------------------------------------------------------------------------
+// Common message types
+// -----------------------------------------------------------------------------
+
+// LedgerEntry — projection of a single mana_ledger row.
+message LedgerEntry {
+  // UUIDv7 of the mana_ledger row.
+  string entry_id = 1;
+
+  string gcid = 2;
+
+  // 1=credit, 2=debit, 3=mint, 4=refund, 5=rollover (matches event proto).
+  int32 direction = 3;
+
+  // Magnitude (>= 1).
+  int64 units = 4;
+
+  ManaReasonCode reason = 5;
+
+  // Source pointers — at most one is set per row.
+  string source_subscription_id = 6;
+  string source_topup_id = 7;
+  string source_allocation_id = 8;
+
+  // Action code on debit rows (e.g., "companion_chat").
+  string action_code = 9;
+
+  // Balance snapshot AFTER applying this entry.
+  int64 balance_after_units = 10;
+
+  google.protobuf.Timestamp recorded_at = 11;
+}
+
+// SubsidySlice — per-source slice of the user's spendable balance.
+message SubsidySlice {
+  // Empty unless source = TENANT_SUBSIDY.
+  string tenant_id = 1;
+
+  // Spendable units in this slice.
+  int64 units = 2;
+
+  ManaSource source = 3;
+
+  // Optional expiry (e.g., subsidy allocation expires_at). Drained in
+  // ASC NULLS LAST order per ADR-142 FIFO.
+  google.protobuf.Timestamp expires_at = 4;
+
+  // Optional source allocation ID when source = TENANT_SUBSIDY.
+  string source_allocation_id = 5;
+}
+
+// -----------------------------------------------------------------------------
+// DeductMana RPC
+// -----------------------------------------------------------------------------
+
+message DeductManaRequest {
+  // GCID of the user whose wallet is debited. Required.
+  string gcid = 1;
+
+  // Stable action code (e.g., "companion_chat", "question_generation"),
+  // looked up against mana_action_pricing config table when units == 0.
+  // Required.
+  string action_code = 2;
+
+  // Quantity to debit. If 0, server resolves from action_code lookup.
+  // Otherwise the caller's quote is applied as-is.
+  int64 units = 3;
+
+  // Required idempotency key (UUIDv7 recommended). Repeat calls return
+  // the same result without re-debiting.
+  string idempotency_key = 4;
+
+  // Optional request_id for cross-system correlation (mirrors
+  // model-broker-gateway request_id; used by refund linkage).
+  string request_id = 5;
+
+  // Tenant context at time of action — used to bias subsidy-FIFO
+  // selection when the user holds allocations from multiple tenants.
+  string tenant_id = 6;
+
+  // OPTIONAL — dry-run pre-flight gate (WS-1 umbrella metering, ADR-142 §4).
+  // When true the server resolves cost + checks affordability but writes NO
+  // ledger row and mutates no wallet: success=true (affordable, no entries) or
+  // success=false + required_units + current_balance_units (shortfall). The
+  // chora-model-gateway metering seam uses this to hard-block a premium learner
+  // BEFORE spending LLM compute. Additive field per buf-breaking config.
+  bool dry_run = 7;
+
+  // OPTIONAL — LLM-tier selector for the configurable price-plan rules layer
+  // (ADR-178 §3 BACKLOG axis; CHO-1661). "" (default) = tier-agnostic, today's
+  // behaviour for every action. When the price plan flags an action
+  // `tier_aware`, a non-empty tier ('low'|'high') selects the tier-specific
+  // rule, falling back to the tier-agnostic rule when none exists. Resolution
+  // is unchanged when the action is not tier-aware (the tier is ignored).
+  // Additive field — a client that omits it gets today's exact price.
+  string tier = 8;
+
+  // OPTIONAL — forward-compatible resolution context for the price-plan rules
+  // layer (ADR-178 §A4). A small typed map (e.g. {"item_count":"7"}); never
+  // required to resolve a price. The per-item (× N) multiply stays caller-side
+  // (the resolver returns the per-unit cost + per_item flag), so this map is
+  // advisory passthrough for observability today and an extension seam later.
+  // Additive field — additive map keys never break the wire.
+  map<string, string> context = 9;
+}
+
+message DeductManaResponse {
+  // True if the debit succeeded (or was idempotently replayed).
+  bool success = 1;
+
+  // Set only when success = false. Provides upsell context for the
+  // caller's 402 response (matches OpenAPI InsufficientManaUpsell).
+  int64 required_units = 2;
+  int64 current_balance_units = 3;
+
+  // The mana_ledger rows produced by this debit. Length 1 for a pure
+  // personal-balance debit; length 2+ when subsidy slices were drained
+  // before falling through to personal balance.
+  repeated LedgerEntry entries = 4;
+
+  // Wallet balance AFTER applying the debit (sum across slices).
+  int64 balance_after_units = 5;
+
+  // OPTIONAL — resolved price-plan metadata (ADR-178 §2.1; CHO-1661). These
+  // describe the *action*, resolved from the rules layer, so the meter home
+  // can decide whether to wire a refund-on-failure path (refundable) or
+  // multiply the per-unit cost by an item count (per_item). All additive:
+  // a pre-rules-layer client simply ignores them, and they default to the
+  // zero value (false/"") when the legacy flat catalogue priced the action.
+
+  // True when the resolved action def is refundable — the caller MAY wire
+  // debit-then-refund-on-failure (advisory; the resolver never issues refunds).
+  bool refundable = 6;
+
+  // True when the resolved per-unit cost is multiplied by an item count
+  // (× N batch pricing). The multiply stays caller-side (units returned is the
+  // per-unit cost, NOT pre-multiplied).
+  bool per_item = 7;
+
+  // Where the price was resolved: 'tenant_override' | 'plan_default' |
+  // 'catalogue_fallback'. Audit/observability for which precedence rung won.
+  string price_source = 8;
+}
+
+// -----------------------------------------------------------------------------
+// CreditMana RPC
+// -----------------------------------------------------------------------------
+
+message CreditManaRequest {
+  // GCID being credited. Required.
+  string gcid = 1;
+
+  // Source classification (drives reason + source-pointer wiring).
+  // Required.
+  ManaSource source = 2;
+
+  // Quantity to credit (>= 1). Required.
+  int64 units = 3;
+
+  // Reason code for the ledger row. Required.
+  ManaReasonCode reason = 4;
+
+  // Required idempotency key.
+  string idempotency_key = 5;
+
+  // At most one of these is set, matching `source`.
+  string source_subscription_id = 6;     // when source = SUBSCRIPTION_GRANT
+  string source_topup_id = 7;            // when source = TOPUP
+  string source_allocation_id = 8;       // when source = TENANT_SUBSIDY
+
+  // Tenant context for tenant-subsidy credits (cross-link to
+  // chora_tenancy TenantManaAllocation). Empty for personal credits.
+  string tenant_id = 9;
+
+  // Optional human-readable note (e.g., admin reason for MINT).
+  string reason_text = 10;
+}
+
+message CreditManaResponse {
+  // The mana_ledger row created (or replayed).
+  LedgerEntry entry = 1;
+
+  // Wallet balance AFTER applying this credit.
+  int64 balance_after_units = 2;
+}
+
+// -----------------------------------------------------------------------------
+// GetBalance RPC
+// -----------------------------------------------------------------------------
+
+message GetBalanceRequest {
+  // GCID to query. Required.
+  string gcid = 1;
+}
+
+message GetBalanceResponse {
+  // Total spendable units (sum of slices).
+  int64 balance_units = 1;
+
+  // Lifetime totals for analytics.
+  int64 lifetime_earned = 2;
+  int64 lifetime_spent = 3;
+
+  // Per-source breakdown — listed in deterministic FIFO spend order.
+  repeated SubsidySlice subsidy_breakdown = 4;
+
+  // Last credit timestamp (helps caller render "last topped up at ...").
+  google.protobuf.Timestamp last_credited_at = 5;
+}

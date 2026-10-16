@@ -31,21 +31,26 @@ renderable citation is an in-band anomaly, not an error: the adapter returns it
 with empty citations and the unspecified finish reason, and the handler passes
 it through so the caller hedges rather than presenting web content as knowledge.
 
-**A wired governance chain gates the search before the egress.** When the
-deployment built the handler with a
+**A wired governance chain gates the search before the egress and settles it
+after.** When the deployment built the handler with a
 :class:`~model_gateway.governance.manager.GovernanceManager`, the search runs
 the same chain an invoke does — the egress gate, the budget decision and the
 mana quote for a fail-closed action — before the Exa call, and any refusal
-aborts with the status the reason token declares. A deployment that wired no
-governance manager gates nothing.
+aborts with the status the reason token declares. A search that is served then
+settles the same way an invoke does: the egress counter is incremented, the
+budget debit and the token-usage outbox record commit in one transaction, and
+the mana debit follows inside it. A deployment that wired no governance manager
+gates and settles nothing.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import grpc
 import structlog
 
-from model_gateway.domain import GroundedSearchRequest
+from model_gateway.domain import GroundedSearchRequest, GroundedSearchResult
 from model_gateway.errors import (
     FailedPreconditionError,
     GatewayError,
@@ -57,6 +62,7 @@ from model_gateway.errors import (
 from model_gateway.governance.budget import BudgetDecision, decide_strictest
 from model_gateway.governance.mana import is_fail_closed
 from model_gateway.governance.manager import GovernanceManager
+from model_gateway.governance.outbox import build_token_usage_payload, token_usage_envelope
 from model_gateway.grpc import gateway_pb2 as pb
 from model_gateway.grpc import mapping
 from model_gateway.grpc.errors import abort
@@ -120,6 +126,8 @@ adapter, so no part of such a request can influence the egress.
             if self._governance is not None:
                 await _authorize_grounded(self._governance, grounded_request)
             result = await self._adapter.search(grounded_request)
+            if self._governance is not None:
+                await _settle_grounded(self._governance, grounded_request, result)
             return mapping.grounded_search_response_to_proto(result)
         except GroundedError as error:
             # A grounded failure carries its own reason token, which the
@@ -177,6 +185,80 @@ async def _authorize_grounded(
                 f"required={quote.required} available={quote.available} "
                 f"action={request.action_code}",
             )
+
+
+async def _settle_grounded(
+    governance: GovernanceManager,
+    request: GroundedSearchRequest,
+    result: GroundedSearchResult,
+) -> None:
+    """Settle one served grounded search against the governance ledger, best-effort.
+
+    A search that produced an answer is a call the gateway owes for, so it
+    settles the way an invoke does: the egress counter is incremented first,
+    then the budget debit and the token-usage outbox record commit in one
+    transaction — with the mana debit following inside it. The usage id is the
+    invocation id, so a redelivered search settles nothing: the outbox insert
+    reports the row already exists and the learner is not charged twice.
+
+    Every step is best-effort: a failure is logged, never raised, because the
+    answer is already in the caller's hands and a ledger the operator
+    misconfigured is not a reason to withhold it — the same rule the invoke
+    settlement follows. The counter and the invoke settlement are settled
+    independently: a counter that cannot be recorded does not stop the budget
+    and the usage from being, and the reverse holds too.
+    """
+    try:
+        await governance.egress.record_egress(request.tenant_id)
+    except Exception as error:
+        logger.warning(
+            "grounded egress counter not recorded",
+            error_type=type(error).__name__,
+            invocation_id=request.invocation_id,
+        )
+    usage = result.usage
+    occurred_at = datetime.now(UTC)
+    usage_id = request.invocation_id
+    try:
+        await governance.settle_invoke(
+            tenant_id=request.tenant_id,
+            gcid=request.gcid,
+            action_code=request.action_code,
+            dispatch_key=None,
+            invocation_id=request.invocation_id,
+            usage_id=usage_id,
+            cost_micros=usage.cost_micros,
+            payload=build_token_usage_payload(
+                usage_id=usage_id,
+                tenant_id=request.tenant_id,
+                gcid=request.gcid,
+                # The grounded request names no model: the egress is priced
+                # under its action code, and the model the synthesis leg ran
+                # is the adapter's own configuration, not the caller's claim.
+                model_id="",
+                invocation_id=request.invocation_id,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cost_micros=usage.cost_micros,
+                action_code=request.action_code,
+                agent_role=request.agent_id,
+                occurred_at=occurred_at,
+            ),
+            envelope=token_usage_envelope(
+                usage_id=usage_id,
+                tenant_id=request.tenant_id,
+                gcid=request.gcid,
+                occurred_at=occurred_at,
+                traceparent=request.traceparent,
+                tracestate=request.tracestate,
+            ),
+        )
+    except Exception as error:
+        logger.error(
+            "grounded settlement failed",
+            error_type=type(error).__name__,
+            invocation_id=request.invocation_id,
+        )
 
 
 _GROUNDED_CATEGORIES: dict[str, type[GatewayError]] = {

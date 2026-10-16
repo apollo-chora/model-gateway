@@ -254,6 +254,12 @@ _FIELDS: tuple[_Field, ...] = (
         "",
         _parse_optional_text,
     ),
+    _Field(
+        "identity_grpc_addr",
+        "CHORA_IDENTITY_GRPC_ADDR",
+        "",
+        _parse_optional_text,
+    ),
     _Field("llm_budget_required", "CHORA_LLM_BUDGET_REQUIRED", "false", _parse_bool),
     _Field(
         "llm_budget_required_tenants",
@@ -307,9 +313,13 @@ class Settings:
     # Governance. The DSN is the Postgres database the governance mechanisms
     # (budget, outbox, idempotency) write to; it is required for governance to
     # function and empty otherwise, so a deployment that does not configure it
-    # runs without a database. The budget flags make budget enforcement
+    # runs without a database. The identity address is the chora-identity gRPC
+    # endpoint the mana meter calls; it is required for mana to be wired and
+    # empty otherwise, so a deployment that does not configure it runs the
+    # chain un-metered. The budget flags make budget enforcement
     # fail-closed: globally, or for the named tenants only.
     observability_dsn: str
+    identity_grpc_addr: str
     llm_budget_required: bool
     llm_budget_required_tenants: tuple[str, ...]
 

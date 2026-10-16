@@ -35,6 +35,7 @@ from model_gateway.governance.mana import (
     UnknownAction,
     is_fail_closed,
 )
+from model_gateway.governance.mana_client import GrpcManaClient
 from model_gateway.governance.manager import (
     COMPANION_SURFACES,
     FAIL_CLOSED_ACTIONS,
@@ -60,6 +61,7 @@ __all__ = [
     "FAIL_CLOSED_PREFIXES",
     "GovernanceDecision",
     "GovernanceManager",
+    "GrpcManaClient",
     "IdempotencyClaims",
     "ManaClient",
     "ManaDebit",

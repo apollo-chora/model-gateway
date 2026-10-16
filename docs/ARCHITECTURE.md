@@ -62,6 +62,21 @@ grpcio-tools emits the package-qualified form, which does not resolve inside
 `model_gateway/grpc/`, and regeneration silently breaks the package without the
 fixup.
 
+The identity service's ManaService stubs are regenerated the same way, from
+`proto/identity/v1/mana_service.proto` (source of truth: chora-contracts'
+`services/identity/v1/mana_service.proto`):
+
+```sh
+mkdir -p .gen
+uv run python -m grpc_tools.protoc -I proto --python_out=.gen --grpc_python_out=.gen proto/identity/v1/mana_service.proto
+mv .gen/identity/v1/mana_service_pb2.py src/model_gateway/governance/identity/v1/mana_service_pb2.py
+mv .gen/identity/v1/mana_service_pb2_grpc.py src/model_gateway/governance/identity/v1/mana_service_pb2_grpc.py
+rm -rf .gen
+```
+
+The same relative-import fixup applies (`from identity.v1 import mana_service_pb2`
+to `from . import mana_service_pb2`).
+
 The gRPC health protocol is served without authentication — it is the
 infrastructure protocol, and a prober has no credential to present. The HTTP
 health endpoints follow the deployment's configured auth policy.

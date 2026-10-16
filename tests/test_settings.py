@@ -727,6 +727,13 @@ class TestGovernanceSettings:
         dsn = "postgresql://user:pass@db.example.com:5432/chora_observability"
         assert Settings.from_env({"CHORA_OBSERVABILITY_DSN": dsn}).observability_dsn == dsn
 
+    def test_identity_grpc_addr_defaults_to_empty(self):
+        assert Settings.from_env({}).identity_grpc_addr == ""
+
+    def test_identity_grpc_addr_accepts_an_address(self):
+        addr = "chora-identity.chora.local:9090"
+        assert Settings.from_env({"CHORA_IDENTITY_GRPC_ADDR": addr}).identity_grpc_addr == addr
+
     def test_budget_required_defaults_to_false(self):
         assert Settings.from_env({}).llm_budget_required is False
 
@@ -753,5 +760,6 @@ class TestGovernanceSettings:
 
     def test_governance_defaults_survive_direct_construction_round_trip(self):
         assert _direct().observability_dsn == ""
+        assert _direct().identity_grpc_addr == ""
         assert _direct().llm_budget_required is False
         assert _direct().llm_budget_required_tenants == ()

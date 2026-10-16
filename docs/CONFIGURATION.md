@@ -174,6 +174,15 @@ the singleton block is unset; and the indexed route form (`TEXT_LLM_1_*`,
 | `OTEL_ENABLED` | `false` | Whether distributed tracing is configured. Boolean. With it off, no tracer provider is built and the tracing calls stay no-ops. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | *(empty)* | The base endpoint for the OTLP/HTTP exporter; the signal path is appended to it. Required when `OTEL_ENABLED=true` — tracing enabled with nowhere to send spans fails the start rather than quietly dropping every span. |
 
+## Governance
+
+| Variable | Default | Meaning and validation |
+| --- | --- | --- |
+| `CHORA_OBSERVABILITY_DSN` | *(empty)* | Postgres DSN for the governance mechanisms (budget admission/settlement, token-usage outbox, invocation idempotency, egress policy). Required for governance to function; leave empty to run without a database. Connect as the observability app role (NOBYPASSRLS) — row-level security keys on the tenant GUCs set inside each transaction. |
+| `CHORA_IDENTITY_GRPC_ADDR` | *(empty)* | gRPC address of chora-identity's `ManaService` (`host:port`). When set alongside `CHORA_OBSERVABILITY_DSN`, every metered action quotes affordability before fail-closed compute and debits the learner's mana wallet after a served call; leave empty to run the chain un-metered. The service mesh terminates the mTLS the identity contract declares, so the address is plaintext. |
+| `CHORA_LLM_BUDGET_REQUIRED` | `false` | Make budget enforcement fail-closed: a tenant with no active budget window is blocked instead of allowed through. Boolean. |
+| `CHORA_LLM_BUDGET_REQUIRED_TENANTS` | *(empty)* | Comma-separated tenant IDs the budget requirement applies to; an empty list with the flag on applies it to every tenant. |
+
 ## Test-only variables
 
 `GATEWAY_LIVE_TEXT_ENDPOINT`, `GATEWAY_LIVE_TEXT_MODEL_ID`,

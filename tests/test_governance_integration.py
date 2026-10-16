@@ -187,6 +187,11 @@ class StubConnection:
     def wrote_outbox_rows(self) -> int:
         return len([call for call in self.calls if "INSERT INTO outbox_events" in call[0]])
 
+    def recorded_egress(self) -> int:
+        return len(
+            [call for call in self.calls if "INSERT INTO grounded_search_daily_usage" in call[0]]
+        )
+
     def debited_budget(self) -> int:
         return len(
             [
@@ -955,3 +960,138 @@ class TestGroundedSearchGovernance:
 
         assert response.grounded_answer == "Paris is the capital."
         assert len(adapter.calls) == 1
+
+
+class _CountingConnection(StubConnection):
+    """A stub connection whose daily usage counter increments as egress is recorded.
+
+    The base stub plays one static row; the ceiling test needs the counter the
+    gate reads to move as the settlement records it, so a tenant that keeps
+    calling eventually reaches the ceiling the entitlement named.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entitlement_row = {"egress_enabled": True, "daily_call_ceiling": 2}
+        self._count = 0
+
+    async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
+        if "grounded_search_daily_usage" in query:
+            return {"call_count": self._count}
+        return await super().fetchrow(query, *args)
+
+    async def execute(self, query: str, *args: object) -> str:
+        if "grounded_search_daily_usage" in query and "INSERT" in query:
+            self._count += 1
+        return await super().execute(query, *args)
+
+
+class TestGroundedSearchSettlement:
+    """A served grounded search settles the way an invoke does.
+
+    The authorization half is tested above. What is under test here is the
+    other half the handler owes: the egress counter incremented, the budget
+    debited and the outbox row inserted in one transaction, and the mana
+    debit following under the invocation id as its idempotency key — every
+    step best-effort, so a settlement failure never fails the search.
+    """
+
+    async def test_a_served_search_increments_the_daily_counter(self) -> None:
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        adapter = _ScriptedAdapter(_grounded_result())
+        handler = _grounded_handler(connection, adapter)
+
+        async with _serve_grounded(handler) as stub:
+            response = await stub.GroundedSearch(_grounded_request(), metadata=_bearer())
+
+        assert response.grounded_answer == "Paris is the capital."
+        assert connection.recorded_egress() == 1
+
+    async def test_a_served_search_writes_one_outbox_row_and_debits_the_budget(self) -> None:
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        connection.budget_rows = [_budget_window(spent_micros=0, policy=BudgetPolicy.BLOCK)]
+        adapter = _ScriptedAdapter(_grounded_result())
+        handler = _grounded_handler(connection, adapter)
+
+        async with _serve_grounded(handler) as stub:
+            await stub.GroundedSearch(_grounded_request(), metadata=_bearer())
+
+        assert connection.wrote_outbox_rows() == 1
+        assert connection.debited_budget() == 1
+
+    async def test_a_served_search_debits_mana_under_the_invocation_id(self) -> None:
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        mana_client = StubManaClient()
+        adapter = _ScriptedAdapter(_grounded_result())
+        handler = _grounded_handler(connection, adapter, mana=ManaMeter(mana_client))
+
+        async with _serve_grounded(handler) as stub:
+            await stub.GroundedSearch(_grounded_request(), metadata=_bearer())
+
+        # The debit is keyed by the invocation id, so a redelivered search
+        # collapses onto the ledger row the first settlement wrote.
+        assert mana_client.debit_calls == [("gcid-1", "external_egress.search", "inv-grounded-1")]
+
+    async def test_a_settlement_failure_never_fails_the_search(self) -> None:
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        connection.fail_needles["INSERT INTO outbox_events"] = RuntimeError("connection lost")
+        adapter = _ScriptedAdapter(_grounded_result())
+        handler = _grounded_handler(connection, adapter)
+
+        async with _serve_grounded(handler) as stub:
+            response = await stub.GroundedSearch(_grounded_request(), metadata=_bearer())
+
+        # The answer is returned; the settlement failure was logged, not raised.
+        assert response.grounded_answer == "Paris is the capital."
+        assert len(adapter.calls) == 1
+
+    async def test_repeated_grounded_calls_eventually_hit_the_configured_ceiling(self) -> None:
+        connection = _CountingConnection()
+        connection.kill_switch_row = {"engaged": False}
+        adapter = _ScriptedAdapter(_grounded_result())
+        handler = _grounded_handler(connection, adapter)
+
+        async with _serve_grounded(handler) as stub:
+            first = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-1"), metadata=_bearer()
+            )
+            second = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-2"), metadata=_bearer()
+            )
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                await stub.GroundedSearch(
+                    _grounded_request(invocation_id="inv-grounded-3"), metadata=_bearer()
+                )
+
+        # The first two searches were served and settled; the third was
+        # refused at the gate once the counter reached the ceiling of two.
+        assert first.grounded_answer == "Paris is the capital."
+        assert second.grounded_answer == "Paris is the capital."
+        assert error.value.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
+        assert "daily_ceiling_exceeded" in error.value.details()
+        assert len(adapter.calls) == 2
+        assert connection.recorded_egress() == 2
