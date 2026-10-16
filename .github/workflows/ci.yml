@@ -21,11 +21,23 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      # The governance integration tests apply the chora-observability
+      # migrations; the fixture resolves them through this variable when the
+      # sibling checkout a developer workspace has is absent.
+      - name: Check out chora-observability migrations
+        uses: actions/checkout@v7
+        with:
+          repository: apollo-chora/chora-observability
+          ref: 81f5c10b4f5fd6d26082456293f219903af8278b
+          path: chora-observability
+
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
 
       - name: Set up Python
         run: uv python install 3.13
@@ -47,3 +59,5 @@ jobs:
 
       - name: Pytest
         run: uv run pytest -q
+        env:
+          CHORA_OBSERVABILITY_MIGRATIONS: chora-observability/migrations

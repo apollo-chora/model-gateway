@@ -42,6 +42,7 @@ rather than resolved by guessing.
 | `CHORA_ENVIRONMENT` | `development` | The deployment environment; selects the security policy. One of `development`, `test`, `production` (case-insensitive). `production` refuses to start unless `GATEWAY_AUTH_ENABLED` is `true` with at least one `GATEWAY_API_KEYS` entry. |
 | `CHORA_HTTP_PORT` | `8080` | The HTTP listener port. An integer from 1 to 65535. |
 | `CHORA_GRPC_PORT` | `9090` | The gRPC listener port, started and stopped with the HTTP one. An integer from 1 to 65535. The listener binds before startup completes, so a port that cannot be taken fails the start rather than producing a process that answers a probe on a port it is not serving. |
+| `CHORA_BIND_ADDRESS` | `0.0.0.0` | The address both listeners bind. An IP address or a resolvable host; an unusable value fails the start with a configuration error. The default exposes the service on every interface — set it to `127.0.0.1` only when the service must not be reachable from other containers or hosts. |
 | `LOG_LEVEL` | `info` | The structured log level. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (case-insensitive). |
 
 ## Authentication

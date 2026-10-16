@@ -11,6 +11,7 @@ run with.
 
 import math
 import os
+import socket
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -93,6 +94,17 @@ def _parse_bool(name: str, value: object) -> bool:
         return False
     expected = ", ".join(repr(option) for option in _BOOLEAN_VALUES)
     raise ConfigurationError(f"{name} must be a boolean, got {text!r}; expected one of {expected}")
+
+
+def _parse_bind_address(name: str, value: object) -> str:
+    text = _parse_text(name, value)
+    try:
+        socket.getaddrinfo(text, None)
+    except socket.gaierror as exc:
+        raise ConfigurationError(
+            f"{name} must be an IP address or a resolvable host, got {text!r}"
+        ) from exc
+    return text
 
 
 def _parse_port(name: str, value: object) -> int:
@@ -219,7 +231,7 @@ _FIELDS: tuple[_Field, ...] = (
     _Field("environment", "CHORA_ENVIRONMENT", "development", _parse_environment),
     _Field("http_port", "CHORA_HTTP_PORT", "8080", _parse_port),
     _Field("grpc_port", "CHORA_GRPC_PORT", "9090", _parse_port),
-    _Field("bind_address", "CHORA_BIND_ADDRESS", "0.0.0.0", _parse_text),  # nosec B104
+    _Field("bind_address", "CHORA_BIND_ADDRESS", "0.0.0.0", _parse_bind_address),  # nosec B104
     _Field("log_level", "LOG_LEVEL", "info", _parse_log_level),
     _Field("auth_enabled", "GATEWAY_AUTH_ENABLED", "false", _parse_bool),
     _Field("api_keys", "GATEWAY_API_KEYS", "", _parse_api_keys),
