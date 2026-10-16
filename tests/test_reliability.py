@@ -284,9 +284,7 @@ class TestBackoff:
         )
 
     def test_a_wait_that_fits_the_remaining_budget_is_returned(self):
-        assert backoff_seconds(1, 500, remaining=5.0, random_source=no_jitter) == pytest.approx(
-            0.5
-        )
+        assert backoff_seconds(1, 500, remaining=5.0, random_source=no_jitter) == pytest.approx(0.5)
 
     @pytest.mark.parametrize("remaining", [0.0, 0.5, 1.0])
     def test_a_wait_that_would_consume_the_budget_fails_the_deadline(self, remaining):

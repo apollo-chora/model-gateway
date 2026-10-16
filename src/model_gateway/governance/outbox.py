@@ -60,20 +60,21 @@ SOURCE_SERVICE = "chora-model-gateway"
 SCHEMA_VERSION = 1
 """The schema major version of the token-usage event payload."""
 
-INSERT_TOKEN_USAGE = """
-    INSERT INTO outbox_events (
-        id, tenant_id, gcid, agid, aggregate_type, aggregate_id,
-        event_type, topic, payload, envelope, occurred_at, status,
-        retry_count, idempotency_key
-    )
-    VALUES (
-        $1, $2, $3, '', 'token_usage', $1,
-        'chora.observability.token_usage.recorded.v1',
-        'chora.observability.token_usage.recorded.v1',
-        $4, $5::jsonb, now(), 'pending', 0, $1
-    )
-    ON CONFLICT (idempotency_key) DO NOTHING
-"""
+# The word "token" in this constant's name trips B105, but the value is a SQL
+# statement, not a credential. Bandit folds the implicit concatenation and
+# attributes the finding to the first literal, so the nosec sits there.
+INSERT_TOKEN_USAGE = (
+    "INSERT INTO outbox_events ("  # nosec B105
+    "id, tenant_id, gcid, agid, aggregate_type, aggregate_id, "
+    "event_type, topic, payload, envelope, occurred_at, status, "
+    "retry_count, idempotency_key"
+    ") VALUES ("
+    "$1, $2, $3, '', 'token_usage', $1, "
+    "'chora.observability.token_usage.recorded.v1', "
+    "'chora.observability.token_usage.recorded.v1', "
+    "$4, $5::jsonb, now(), 'pending', 0, $1"
+    ") ON CONFLICT (idempotency_key) DO NOTHING"
+)
 
 
 def validate_usage_event(

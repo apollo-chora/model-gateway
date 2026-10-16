@@ -514,9 +514,7 @@ class LiteLLMImageProvider:
             ) from error
         except Exception as exc:
             raise map_litellm_error(exc) from exc
-        return _from_litellm_image(
-            route, request, response, invocation_id=context.invocation_id
-        )
+        return _from_litellm_image(route, request, response, invocation_id=context.invocation_id)
 
     def _attempt_client(
         self, route: Route, budget: float | None
@@ -913,9 +911,7 @@ def from_litellm_image_usage(usage: object) -> Usage:
     return Usage(
         input_tokens=_established(input_tokens),
         output_tokens=_established(output_tokens),
-        total_tokens=(
-            total_tokens if "total_tokens" in estimated else _established(total_tokens)
-        ),
+        total_tokens=(total_tokens if "total_tokens" in estimated else _established(total_tokens)),
         cached_tokens=_established(_image_cached_tokens(usage)),
         estimated_fields=frozenset(estimated),
     )

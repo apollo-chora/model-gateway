@@ -1218,9 +1218,7 @@ async def test_a_stream_that_failed_after_output_is_recorded_as_failed():
 
     with pytest.raises(UnavailableError):
         await _drain(
-            service.invoke_stream(
-                _request(invocation_id="inv-stream-1"), namespace="cred-digest"
-            )
+            service.invoke_stream(_request(invocation_id="inv-stream-1"), namespace="cred-digest")
         )
 
     record = sink.records[0]

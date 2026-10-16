@@ -143,9 +143,7 @@ def test_only_the_composition_root_reaches_into_a_vendor_binding():
     provider is chosen, and the provider is chosen by configuration in one place.
     """
     importers = sorted(
-        path.name
-        for path in _core_modules()
-        if _imported_modules(_tree(path)) & VENDOR_BINDINGS
+        path.name for path in _core_modules() if _imported_modules(_tree(path)) & VENDOR_BINDINGS
     )
 
     assert importers == [COMPOSITION_ROOT]

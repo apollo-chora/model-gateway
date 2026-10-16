@@ -52,9 +52,7 @@ __all__ = [
 ]
 
 _EMBEDDING_KEYS = frozenset({"index", "values"})
-_REQUEST_KEYS = frozenset(
-    {"model", "input", "dimensions", "encoding_format", "user", "metadata"}
-)
+_REQUEST_KEYS = frozenset({"model", "input", "dimensions", "encoding_format", "user", "metadata"})
 _RESPONSE_KEYS = frozenset({"model", "upstream_model", "data", "usage", "invocation_id"})
 
 ENCODING_FORMATS: frozenset[str] = frozenset({"float", "base64"})
@@ -86,9 +84,7 @@ class Embedding:
     values: tuple[float, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "index", as_int("embedding 'index'", self.index, minimum=0)
-        )
+        object.__setattr__(self, "index", as_int("embedding 'index'", self.index, minimum=0))
         object.__setattr__(self, "values", _as_values("embedding 'values'", self.values))
 
     def to_dict(self) -> dict[str, JsonDocument]:
@@ -257,9 +253,7 @@ def as_embeddings(where: str, value: object) -> tuple[Embedding, ...]:
     items = as_sequence(where, value)
     for index, item in enumerate(items):
         if not isinstance(item, Embedding):
-            raise ValueError(
-                f"{where}[{index}] must be an Embedding, got {describe(item)}"
-            )
+            raise ValueError(f"{where}[{index}] must be an Embedding, got {describe(item)}")
     return items
 
 

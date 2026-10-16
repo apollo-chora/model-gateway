@@ -232,9 +232,7 @@ class TestTheRefusal:
         provider, entry = wire()
 
         with pytest.raises(FailedPreconditionError):
-            await provider.generate(
-                make_route(format=dialect), make_request(), make_context()
-            )
+            await provider.generate(make_route(format=dialect), make_request(), make_context())
 
         assert entry.calls == []
 
@@ -367,9 +365,7 @@ class TestTheGenericImagePath:
 
         entry = RecordingImageGeneration()
         monkeypatch.setattr(litellm, "aimage_generation", entry)
-        provider = LiteLLMImageProvider(
-            resolver=resolver, sync_inner_factory=sync_inner_factory
-        )
+        provider = LiteLLMImageProvider(resolver=resolver, sync_inner_factory=sync_inner_factory)
 
         await provider.generate(make_route(format=dialect), make_request(), make_context())
 
@@ -807,9 +803,7 @@ class TestTheBase64OnlyConfigurations:
         assert config.base64_only
 
     def test_a_measured_configuration_drops_the_parameter(self) -> None:
-        config = _ImageConfig(
-            configuration=GPTImageGenerationConfig(), supported=frozenset()
-        )
+        config = _ImageConfig(configuration=GPTImageGenerationConfig(), supported=frozenset())
         params: dict[str, object] = {}
 
         _forward_response_format(params, config, "b64_json")
@@ -825,9 +819,7 @@ class TestTheBase64OnlyConfigurations:
         what it accepts, models a dialect that has joined the set without being
         measured. The stated ``b64_json`` is refused rather than dropped.
         """
-        config = _ImageConfig(
-            configuration=DallE3ImageGenerationConfig(), supported=frozenset()
-        )
+        config = _ImageConfig(configuration=DallE3ImageGenerationConfig(), supported=frozenset())
         params: dict[str, object] = {}
 
         with pytest.raises(CapabilityError) as excinfo:
@@ -845,9 +837,7 @@ class TestTheBase64OnlyConfigurations:
 class TestTheResponseTranslation:
     """Every semantically relevant field is mapped or the answer is refused."""
 
-    async def test_the_happy_path_maps_every_field(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_the_happy_path_maps_every_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
         entry = RecordingImageGeneration(
             image_response(
                 image_payload(
@@ -1124,16 +1114,12 @@ class TestTheRequestTranslation:
 class TestTheErrorMapping:
     """Every failure the call raises is classified into the gateway taxonomy."""
 
-    async def test_an_unavailable_upstream_is_mapped(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_an_unavailable_upstream_is_mapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             litellm,
             "aimage_generation",
             _raising(
-                litellm.InternalServerError(
-                    message="boom", llm_provider="openai", model="dall-e-3"
-                )
+                litellm.InternalServerError(message="boom", llm_provider="openai", model="dall-e-3")
             ),
         )
         provider = LiteLLMImageProvider()

@@ -309,8 +309,7 @@ def _price_from_entry(model: object, value: object) -> ModelPrice:
     missing = _PRICE_ENTRY_KEYS - set(value)
     if missing:
         raise ConfigurationError(
-            f"{_PRICING_VARIABLE} entry {model!r} is missing "
-            f"{', '.join(sorted(missing))}"
+            f"{_PRICING_VARIABLE} entry {model!r} is missing {', '.join(sorted(missing))}"
         )
     try:
         return ModelPrice(currency=value["currency"], tokens=value["tokens"])

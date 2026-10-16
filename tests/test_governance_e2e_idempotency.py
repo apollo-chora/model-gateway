@@ -119,9 +119,7 @@ class _StubManaClient:
         self.quote_calls.append((gcid, tenant_id, action_code))
         return ManaResult(success=True, balance_after_units=100)
 
-    async def debit(
-        self, gcid: str, tenant_id: str, action_code: str, idem_key: str
-    ) -> ManaResult:
+    async def debit(self, gcid: str, tenant_id: str, action_code: str, idem_key: str) -> ManaResult:
         self.debit_calls.append((gcid, tenant_id, action_code, idem_key))
         return ManaResult(success=True, balance_after_units=90)
 
@@ -136,9 +134,7 @@ class _FailingManaClient(_StubManaClient):
     — and failed — rather than trusting the gateway's intent.
     """
 
-    async def debit(
-        self, gcid: str, tenant_id: str, action_code: str, idem_key: str
-    ) -> ManaResult:
+    async def debit(self, gcid: str, tenant_id: str, action_code: str, idem_key: str) -> ManaResult:
         self.debit_calls.append((gcid, tenant_id, action_code, idem_key))
         raise RuntimeError("the mana service is unreachable")
 

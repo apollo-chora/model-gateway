@@ -406,9 +406,7 @@ def create_app(
     # for it and gave it nowhere to send fails at startup rather than dropping
     # every span it produces.
     trace_provider = configure_tracing(settings)
-    tracer = (
-        trace_provider.get_tracer(SERVICE_NAME) if trace_provider is not None else None
-    )
+    tracer = trace_provider.get_tracer(SERVICE_NAME) if trace_provider is not None else None
 
     if service is None:
         _ensure_binding_can_run(registry)

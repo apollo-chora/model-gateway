@@ -142,8 +142,7 @@ class GroundedCitation:
             title=as_required_text(f"{where} 'title'", payload.get("title")),
             domain=as_text(f"{where} 'domain'", payload.get("domain")),
             snippet=as_text(f"{where} 'snippet'", payload.get("snippet")),
-            confidence=as_optional_float(f"{where} 'confidence'", payload.get("confidence"))
-            or 0.0,
+            confidence=as_optional_float(f"{where} 'confidence'", payload.get("confidence")) or 0.0,
         )
 
 
@@ -291,9 +290,7 @@ class GroundedSearchResult:
     completed_at: str = ""
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "citations", _citations("citations", self.citations)
-        )
+        object.__setattr__(self, "citations", _citations("citations", self.citations))
         object.__setattr__(
             self, "web_search_queries", as_text_tuple("web_search_queries", self.web_search_queries)
         )

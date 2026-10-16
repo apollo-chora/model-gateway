@@ -383,9 +383,7 @@ def _metrics_app(metrics: Metrics, provider) -> Application:
             "GATEWAY_API_KEYS": f"{_KEY}:tenant-a",
         }
     )
-    service = InferenceService(
-        ModelRegistry((_route(),)), provider, metrics=metrics
-    )
+    service = InferenceService(ModelRegistry((_route(),)), provider, metrics=metrics)
     app = Application(router=Router())
     register_error_handlers(app)
     register_metrics_route(app.router, metrics)

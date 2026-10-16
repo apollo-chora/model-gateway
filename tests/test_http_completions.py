@@ -193,7 +193,7 @@ async def post(client, body):
 
 def _sse_data_frames(body: str) -> list[str]:
     """Extract the ``data`` payloads from a Server-Sent Events body, in order."""
-    return [line[len("data: "):] for line in body.splitlines() if line.startswith("data: ")]
+    return [line[len("data: ") :] for line in body.splitlines() if line.startswith("data: ")]
 
 
 async def test_happy_path_returns_the_documented_response_shape(client):
@@ -420,9 +420,7 @@ async def test_an_idempotency_key_reaches_the_provider(client, provider):
 
 
 @pytest.mark.parametrize("overrides", [{}, {"idempotency_key": None}])
-async def test_a_request_without_an_idempotency_key_is_answered_not_applicable(
-    client, overrides
-):
+async def test_a_request_without_an_idempotency_key_is_answered_not_applicable(client, overrides):
     """No key means deduplication was never in play, and the answer says so."""
     response = await post(client, payload(**overrides))
 
@@ -430,9 +428,7 @@ async def test_a_request_without_an_idempotency_key_is_answered_not_applicable(
     assert (await response.json())["idempotency_status"] == "not_applicable"
 
 
-async def test_a_repeated_idempotency_key_is_answered_from_the_gateway_record(
-    client, provider
-):
+async def test_a_repeated_idempotency_key_is_answered_from_the_gateway_record(client, provider):
     """A repeat is answered from the record, so the provider is asked once."""
     first = await post(client, payload(idempotency_key="once-upon-a-time"))
     second = await post(client, payload(idempotency_key="once-upon-a-time"))
@@ -444,9 +440,7 @@ async def test_a_repeated_idempotency_key_is_answered_from_the_gateway_record(
 
 
 @pytest.mark.parametrize("key", [7, True, ["once-upon-a-time"], {"key": "once"}])
-async def test_a_non_string_idempotency_key_is_refused_naming_the_field(
-    client, provider, key
-):
+async def test_a_non_string_idempotency_key_is_refused_naming_the_field(client, provider, key):
     """The format defines the key as a string, so anything else is malformed input."""
     response = await post(client, payload(idempotency_key=key))
 
@@ -457,9 +451,7 @@ async def test_a_non_string_idempotency_key_is_refused_naming_the_field(
     assert provider.calls == []
 
 
-async def test_an_empty_idempotency_key_is_refused_rather_than_read_as_absent(
-    client, provider
-):
+async def test_an_empty_idempotency_key_is_refused_rather_than_read_as_absent(client, provider):
     """An empty string is no key at all, not a key that happens to be empty."""
     response = await post(client, payload(idempotency_key=""))
 
@@ -656,9 +648,7 @@ async def test_a_client_disconnect_stops_upstream_work():
     await app.start()
     try:
         client = TestClient(app)
-        response = await client.post(
-            "/v1/completions", content=JSONContent(payload(stream=True))
-        )
+        response = await client.post("/v1/completions", content=JSONContent(payload(stream=True)))
         assert response.status == 200
 
         stream_iter = response.stream().__aiter__()

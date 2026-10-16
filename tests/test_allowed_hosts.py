@@ -146,9 +146,7 @@ def test_a_listed_host_still_has_to_pass_the_address_screen():
 
 
 def test_a_listed_endpoint_resolves_and_an_unlisted_one_is_refused():
-    assert (
-        resolve_endpoint(ENDPOINT, allowed_hosts=frozenset({UPSTREAM})) == ENDPOINT
-    )
+    assert resolve_endpoint(ENDPOINT, allowed_hosts=frozenset({UPSTREAM})) == ENDPOINT
 
     with pytest.raises(UrlPolicyError):
         resolve_endpoint(ENDPOINT, allowed_hosts=frozenset({"other.example"}))

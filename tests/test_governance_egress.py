@@ -256,9 +256,7 @@ class TestAuthorize:
 
 
 class TestRecordEgress:
-    async def test_upserts_todays_counter(
-        self, gate: EgressGate, entitled: StubConnection
-    ) -> None:
+    async def test_upserts_todays_counter(self, gate: EgressGate, entitled: StubConnection) -> None:
         await gate.record_egress(_TENANT_ID)
 
         query, params = _main_call(entitled, "grounded_search_daily_usage")

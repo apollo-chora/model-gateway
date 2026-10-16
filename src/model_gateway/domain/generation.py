@@ -455,9 +455,7 @@ def as_usage(where: str, value: object) -> Usage:
 
 def _as_estimated_fields(where: str, value: object) -> frozenset[str]:
     """The names of the derived counts, refusing a name that is not a count."""
-    names = as_text_tuple(
-        where, tuple(value) if isinstance(value, set | frozenset) else value
-    )
+    names = as_text_tuple(where, tuple(value) if isinstance(value, set | frozenset) else value)
     unknown = sorted(set(names) - set(_USAGE_COUNTS))
     if unknown:
         supported = ", ".join(repr(name) for name in _USAGE_COUNTS)

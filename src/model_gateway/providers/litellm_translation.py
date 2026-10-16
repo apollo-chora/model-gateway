@@ -479,9 +479,7 @@ def _content(parts: tuple[ContentPart, ...]) -> str | list[dict[str, object]]:
 def _image_url(part: ImagePart) -> str:
     """The image as a URL LiteLLM accepts: a data URL for a payload, the remote URL otherwise."""
     if part.data is not None:
-        media_type = (
-            part.media_type if part.media_type is not None else "application/octet-stream"
-        )
+        media_type = part.media_type if part.media_type is not None else "application/octet-stream"
         return f"data:{media_type};base64,{part.data}"
     if part.url is None:
         raise CapabilityError(
@@ -538,9 +536,7 @@ def _tool_choice(choice: ToolChoice) -> str | dict[str, str]:
     return choice.mode.value
 
 
-def _add_generation_params(
-    params: dict[str, object], config: GenerationConfig
-) -> None:
+def _add_generation_params(params: dict[str, object], config: GenerationConfig) -> None:
     """Add the generation parameters that were set, leaving the rest to the provider.
 
     "Unset" and "zero" are different requests, so an unset parameter is omitted
@@ -654,6 +650,7 @@ def _refusal_text(message: LiteLLMMessage) -> str | None:
             )
         return source
     return None
+
 
 def _output_image(entry: Mapping[str, object]) -> ImagePart:
     """An upstream image entry as a canonical image part."""
@@ -778,9 +775,7 @@ def from_litellm_embedding_usage(usage: LiteLLMUsage | None) -> TokenUsage:
     return TokenUsage(
         input_tokens=_established(input_tokens),
         output_tokens=_established(output_tokens),
-        total_tokens=(
-            total_tokens if "total_tokens" in estimated else _established(total_tokens)
-        ),
+        total_tokens=(total_tokens if "total_tokens" in estimated else _established(total_tokens)),
         cached_tokens=_established(_cached_tokens(usage)),
         estimated_fields=frozenset(estimated),
     )
@@ -910,9 +905,7 @@ def _reject_extra_detail_fields(
         )
 
 
-def _is_library_synthetic_completion_details(
-    details: Any, completion_tokens: int | None
-) -> bool:
+def _is_library_synthetic_completion_details(details: Any, completion_tokens: int | None) -> bool:
     """Whether the completion details are exactly the shape the pinned library synthesises.
 
     The shape is measured, not assumed: driving the library's own
@@ -1118,8 +1111,7 @@ def _reject_unmappable_delta(delta: Delta) -> None:
     """
     if getattr(delta, "reasoning_content", None) is not None:
         raise InternalError(
-            "the upstream chunk carries reasoning content, which the canonical stream "
-            "cannot carry"
+            "the upstream chunk carries reasoning content, which the canonical stream cannot carry"
         )
     if getattr(delta, "thinking_blocks", None) is not None:
         raise InternalError(
@@ -1181,9 +1173,7 @@ def _delta_text(delta: Delta) -> str | None:
     return content or None
 
 
-def _tool_call_events(
-    delta: Delta, *, invocation_id: str, sequence: int
-) -> list[StreamEvent]:
+def _tool_call_events(delta: Delta, *, invocation_id: str, sequence: int) -> list[StreamEvent]:
     """One tool-call event per call fragment the delta carries, numbered from ``sequence``.
 
     A call fragment that says nothing about the call — the index alone — is a

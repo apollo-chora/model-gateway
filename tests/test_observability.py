@@ -193,9 +193,7 @@ class _EchoProvider:
 
 
 def _service(tracer, **overrides) -> InferenceService:
-    return InferenceService(
-        ModelRegistry((_route(),)), _EchoProvider(), tracer=tracer, **overrides
-    )
+    return InferenceService(ModelRegistry((_route(),)), _EchoProvider(), tracer=tracer, **overrides)
 
 
 async def test_an_invocation_leaves_one_span_named_for_the_operation():
@@ -422,7 +420,9 @@ class _StreamingEchoProvider:
             kind=StreamEventKind.CONTENT, sequence=0, invocation_id="inv-stream-1", text="hello"
         )
         yield StreamEvent(
-            kind=StreamEventKind.FINISH, sequence=1, invocation_id="inv-stream-1",
+            kind=StreamEventKind.FINISH,
+            sequence=1,
+            invocation_id="inv-stream-1",
             finish_reason=FinishReason.STOP,
         )
 

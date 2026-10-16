@@ -362,9 +362,7 @@ def test_a_tool_definitions_parameters_carry_a_large_integer_constraint_exactly(
                 parameters_json=orjson.dumps(
                     {
                         "type": "object",
-                        "properties": {
-                            "n": {"type": "integer", "maximum": 9007199254740993}
-                        },
+                        "properties": {"n": {"type": "integer", "maximum": 9007199254740993}},
                     }
                 ),
             ),
@@ -500,9 +498,7 @@ def test_an_empty_model_is_mapped_to_none():
 
 def test_an_unset_model_is_mapped_to_none():
     invocation = mapping.invocation_request_from_proto(
-        pb.InvokeRequest(
-            messages=(user_message(),), response_modality=pb.RESPONSE_MODALITY_TEXT
-        ),
+        pb.InvokeRequest(messages=(user_message(),), response_modality=pb.RESPONSE_MODALITY_TEXT),
         identity=identity(),
     )
 

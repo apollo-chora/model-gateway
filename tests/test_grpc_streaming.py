@@ -323,9 +323,7 @@ class TestTheAnswerStream:
         ]
 
     async def test_every_chunk_carries_the_invocation_it_belongs_to(self, serve):
-        provider = ScriptedStreamProvider(
-            [content_event("Recursion", 0), finish_event(sequence=1)]
-        )
+        provider = ScriptedStreamProvider([content_event("Recursion", 0), finish_event(sequence=1)])
         stub = await serve(provider)
 
         chunks = await collect(stub, invoke_request(), metadata=authorization())
@@ -396,9 +394,7 @@ class TestTheAnswerStream:
         provider = ScriptedStreamProvider(
             [
                 content_event("Let me check.", 0),
-                tool_call_event(
-                    ToolCallDelta(index=0, id="call-1", name="get_weather"), 1
-                ),
+                tool_call_event(ToolCallDelta(index=0, id="call-1", name="get_weather"), 1),
                 tool_call_event(ToolCallDelta(index=0, arguments_delta='{"city"'), 2),
                 finish_event(FinishReason.TOOL_CALLS, 3),
             ]
@@ -459,9 +455,7 @@ class TestTheAnswerStream:
         The claim is left in the request to prove it is honoured when it agrees
         with the credential; the mismatch is its own refusal below.
         """
-        provider = MockProvider(
-            stream=MockStreamSpec(chunks=("Recursion", " is a technique"))
-        )
+        provider = MockProvider(stream=MockStreamSpec(chunks=("Recursion", " is a technique")))
         stub = await serve(provider)
 
         chunks = await collect(stub, invoke_request(), metadata=authorization())
@@ -607,9 +601,7 @@ class TestARefusal:
         stub = await serve(provider)
 
         with pytest.raises(grpc.aio.AioRpcError) as error:
-            await collect(
-                stub, invoke_request(tenant_id=OTHER_TENANT), metadata=authorization()
-            )
+            await collect(stub, invoke_request(tenant_id=OTHER_TENANT), metadata=authorization())
 
         assert error.value.code() == grpc.StatusCode.PERMISSION_DENIED
         assert provider.stream_calls == []
@@ -639,9 +631,7 @@ class TestARefusal:
         stub = await serve(provider)
 
         with pytest.raises(grpc.aio.AioRpcError) as error:
-            await collect(
-                stub, invoke_request(), metadata=authorization("sk-gateway-wrong-key")
-            )
+            await collect(stub, invoke_request(), metadata=authorization("sk-gateway-wrong-key"))
 
         assert error.value.code() == grpc.StatusCode.UNAUTHENTICATED
         assert provider.stream_calls == []
@@ -713,9 +703,7 @@ class TestADisconnect:
         await wait_for(lambda: provider.streams_closed == 1)
 
         assert [chunk.sequence for chunk in received] == [0]
-        assert all(
-            chunk.WhichOneof("payload") not in ("finish", "error") for chunk in received
-        )
+        assert all(chunk.WhichOneof("payload") not in ("finish", "error") for chunk in received)
 
 
 class _CallerContext:
@@ -762,9 +750,7 @@ class TestTheCancellationSeam:
     """
 
     async def test_a_call_that_is_already_gone_is_answered_with_nothing(self):
-        provider = ScriptedStreamProvider(
-            [content_event("Recursion", 0), finish_event(sequence=1)]
-        )
+        provider = ScriptedStreamProvider([content_event("Recursion", 0), finish_event(sequence=1)])
 
         chunks = [
             chunk
@@ -802,9 +788,7 @@ class TestTheCancellationSeam:
 
     async def test_a_call_that_is_still_live_streams_to_its_finish(self):
         """The control case: an ordinary caller is not a disconnected one."""
-        provider = ScriptedStreamProvider(
-            [content_event("Recursion", 0), finish_event(sequence=1)]
-        )
+        provider = ScriptedStreamProvider([content_event("Recursion", 0), finish_event(sequence=1)])
 
         chunks = [
             chunk
@@ -886,9 +870,7 @@ async def test_two_credentials_record_under_two_namespaces(serve):
     )
 
     for key, tenant in ((API_KEY, TENANT), (OTHER_KEY, OTHER_TENANT)):
-        assert await collect(
-            stub, invoke_request(tenant_id=tenant), metadata=authorization(key)
-        )
+        assert await collect(stub, invoke_request(tenant_id=tenant), metadata=authorization(key))
 
     assert len(sink.records) == 2
     namespaces = [record.namespace for record in sink.records]

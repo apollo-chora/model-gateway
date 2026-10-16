@@ -114,9 +114,7 @@ class StubManaClient:
         self.quote_calls.append((gcid, tenant_id, action_code))
         return self.quote_result
 
-    async def debit(
-        self, gcid: str, tenant_id: str, action_code: str, idem_key: str
-    ) -> ManaResult:
+    async def debit(self, gcid: str, tenant_id: str, action_code: str, idem_key: str) -> ManaResult:
         self.debit_calls.append((gcid, tenant_id, action_code, idem_key))
         return self.debit_result
 
@@ -350,14 +348,10 @@ class TestAuthorizeInvoke:
 
     async def test_an_exhausted_budget_window_blocks(self) -> None:
         connection = StubConnection()
-        connection.budget_rows = [
-            _budget_window(spent_micros=2_000_000, policy=BudgetPolicy.BLOCK)
-        ]
+        connection.budget_rows = [_budget_window(spent_micros=2_000_000, policy=BudgetPolicy.BLOCK)]
         manager = _manager(connection)
 
-        decision = await manager.authorize_invoke(
-            _TENANT_ID, _GCID, None, None, "qgen", "inv-1"
-        )
+        decision = await manager.authorize_invoke(_TENANT_ID, _GCID, None, None, "qgen", "inv-1")
 
         assert not decision.allowed
         assert decision.reason == "budget_exhausted"
@@ -386,9 +380,7 @@ class TestAuthorizeInvoke:
         }
         manager = _manager(connection)
 
-        decision = await manager.authorize_invoke(
-            _TENANT_ID, _GCID, None, None, "qgen", "inv-1"
-        )
+        decision = await manager.authorize_invoke(_TENANT_ID, _GCID, None, None, "qgen", "inv-1")
 
         assert decision.allowed
         assert connection.read_containment() == 0
@@ -410,9 +402,7 @@ class TestAuthorizeInvoke:
         connection = StubConnection()
         mana = ManaMeter(
             StubManaClient(
-                quote_result=ManaResult(
-                    success=False, required_units=50, current_balance_units=20
-                )
+                quote_result=ManaResult(success=False, required_units=50, current_balance_units=20)
             )
         )
         manager = _manager(connection, mana=mana)
@@ -441,9 +431,7 @@ class TestAuthorizeInvoke:
     async def test_an_unpriced_fail_closed_action_is_un_metered_not_refused(self) -> None:
         connection = StubConnection()
         mana = ManaMeter(
-            StubManaClient(
-                quote_result=ManaResult(success=True, balance_after_units=100)
-            )
+            StubManaClient(quote_result=ManaResult(success=True, balance_after_units=100))
         )
         manager = _manager(connection, mana=mana)
 
@@ -569,16 +557,12 @@ class TestInvokeGovernance:
 
     async def test_an_overdrawn_call_is_refused_before_the_provider(self) -> None:
         connection = StubConnection()
-        connection.budget_rows = [
-            _budget_window(spent_micros=2_000_000, policy=BudgetPolicy.BLOCK)
-        ]
+        connection.budget_rows = [_budget_window(spent_micros=2_000_000, policy=BudgetPolicy.BLOCK)]
         provider = MockProvider()
         service = _service(provider, _manager(connection))
 
         with pytest.raises(FailedPreconditionError) as error:
-            await service.invoke(
-                _request(surface="qgen"), namespace="ns", tenant=_TENANT_ID
-            )
+            await service.invoke(_request(surface="qgen"), namespace="ns", tenant=_TENANT_ID)
 
         assert error.value.details["reason"] == "budget_exhausted"
         assert provider.calls == []
@@ -587,9 +571,7 @@ class TestInvokeGovernance:
         connection = StubConnection()
         mana = ManaMeter(
             StubManaClient(
-                quote_result=ManaResult(
-                    success=False, required_units=500, current_balance_units=10
-                )
+                quote_result=ManaResult(success=False, required_units=500, current_balance_units=10)
             )
         )
         provider = MockProvider()
@@ -624,9 +606,7 @@ class TestInvokeGovernance:
     async def test_a_served_call_reaches_the_provider_and_settles(self) -> None:
         connection = StubConnection()
         mana_client = StubManaClient()
-        provider = _CostedMockProvider(
-            MockSpec(usage=Usage(input_tokens=10, output_tokens=20))
-        )
+        provider = _CostedMockProvider(MockSpec(usage=Usage(input_tokens=10, output_tokens=20)))
         service = _service(provider, _manager(connection, mana=ManaMeter(mana_client)))
 
         response = await service.invoke(
@@ -685,9 +665,7 @@ class TestInvokeGovernance:
         provider = MockProvider()
         service = _service(provider, _manager(connection))
 
-        response = await service.invoke(
-            _request(surface="qgen"), namespace="ns", tenant=_TENANT_ID
-        )
+        response = await service.invoke(_request(surface="qgen"), namespace="ns", tenant=_TENANT_ID)
 
         # The provider was called and its answer returned; the settlement
         # failure was logged, not raised.
@@ -697,9 +675,7 @@ class TestInvokeGovernance:
     async def test_n_served_invocations_produce_n_outbox_rows_and_n_mana_debits(self) -> None:
         connection = StubConnection()
         mana_client = StubManaClient()
-        provider = _CostedMockProvider(
-            MockSpec(usage=Usage(input_tokens=5, output_tokens=5))
-        )
+        provider = _CostedMockProvider(MockSpec(usage=Usage(input_tokens=5, output_tokens=5)))
         service = _service(provider, _manager(connection, mana=ManaMeter(mana_client)))
 
         for index in range(5):
@@ -898,9 +874,7 @@ class TestGroundedSearchGovernance:
             "daily_call_ceiling": 50,
         }
         connection.usage_row = {"call_count": 0}
-        connection.budget_rows = [
-            _budget_window(spent_micros=2_000_000, policy=BudgetPolicy.BLOCK)
-        ]
+        connection.budget_rows = [_budget_window(spent_micros=2_000_000, policy=BudgetPolicy.BLOCK)]
         adapter = _ScriptedAdapter(_grounded_result())
         handler = _grounded_handler(connection, adapter)
 
@@ -922,9 +896,7 @@ class TestGroundedSearchGovernance:
         connection.usage_row = {"call_count": 0}
         mana = ManaMeter(
             StubManaClient(
-                quote_result=ManaResult(
-                    success=False, required_units=50, current_balance_units=20
-                )
+                quote_result=ManaResult(success=False, required_units=50, current_balance_units=20)
             )
         )
         adapter = _ScriptedAdapter(_grounded_result())
@@ -1087,9 +1059,7 @@ class TestGroundedSearchSettlement:
         # The outbox payload is the canonical TokenUsageRecorded protobuf the
         # consumer unmarshals: the model the synthesis leg ran is recorded on
         # it, not left blank.
-        insert = next(
-            call for call in connection.calls if "INSERT INTO outbox_events" in call[0]
-        )
+        insert = next(call for call in connection.calls if "INSERT INTO outbox_events" in call[0])
         event = token_usage_pb2.TokenUsageRecorded.FromString(insert[1][3])
         assert event.model_id == "synthesis-model"
         assert event.cost_micros == 10_000
@@ -1250,9 +1220,7 @@ class TestGroundedSearchSettlement:
         assert mana_client.debit_calls == [
             (_GCID, _GRPC_TENANT, "external_egress.search", response.invocation_id)
         ]
-        insert = next(
-            call for call in connection.calls if "INSERT INTO outbox_events" in call[0]
-        )
+        insert = next(call for call in connection.calls if "INSERT INTO outbox_events" in call[0])
         assert insert[1][0] == response.invocation_id
         event = token_usage_pb2.TokenUsageRecorded.FromString(insert[1][3])
         assert event.usage_id == response.invocation_id
@@ -1287,18 +1255,14 @@ class TestGroundedSearchSettlement:
 
         async with _serve_grounded(handler) as stub:
             with pytest.raises(grpc.aio.AioRpcError) as error:
-                await stub.GroundedSearch(
-                    _grounded_request(invocation_id=""), metadata=_bearer()
-                )
+                await stub.GroundedSearch(_grounded_request(invocation_id=""), metadata=_bearer())
 
         assert error.value.code() == grpc.StatusCode.UNAVAILABLE
         # The partial spend settled under a minted, non-empty key: one outbox
         # row and one budget debit, with the row's own usage id agreeing.
         assert connection.wrote_outbox_rows() == 1
         assert connection.debited_budget() == 1
-        insert = next(
-            call for call in connection.calls if "INSERT INTO outbox_events" in call[0]
-        )
+        insert = next(call for call in connection.calls if "INSERT INTO outbox_events" in call[0])
         assert insert[1][0]
         event = token_usage_pb2.TokenUsageRecorded.FromString(insert[1][3])
         assert event.usage_id == insert[1][0]

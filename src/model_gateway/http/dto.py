@@ -270,9 +270,7 @@ _UNSUPPORTED_FEATURES: Mapping[str, _Feature] = {
     "web_search_options": _Feature(
         "grounded_search", "an object or null", _nullable(_is_object), _is_default_of(None)
     ),
-    "functions": _Feature(
-        "legacy_functions", "an array or object", _is_array_or_object, _is_empty
-    ),
+    "functions": _Feature("legacy_functions", "an array or object", _is_array_or_object, _is_empty),
     "function_call": _Feature(
         "legacy_functions", "a string or null", _nullable(_is_text), _is_default_of(None)
     ),
@@ -696,12 +694,8 @@ def _reject_unsupported_parameters(body: Mapping[str, object]) -> None:
 
 def _as_messages(where: str, value: object) -> tuple[Message, ...]:
     if not isinstance(value, list):
-        raise InvalidArgumentError(
-            f"{where} must be an array of messages, got {_json_type(value)}"
-        )
-    return tuple(
-        _message_from(f"{where}[{index}]", item) for index, item in enumerate(value)
-    )
+        raise InvalidArgumentError(f"{where} must be an array of messages, got {_json_type(value)}")
+    return tuple(_message_from(f"{where}[{index}]", item) for index, item in enumerate(value))
 
 
 def _message_from(where: str, payload: object) -> Message:
@@ -739,9 +733,7 @@ def _content_from(where: str, value: object) -> tuple[TextPart | ImagePart, ...]
         raise InvalidArgumentError(
             f"{where} must be a string or an array of content parts, got {_json_type(value)}"
         )
-    return tuple(
-        _content_part_from(f"{where}[{index}]", item) for index, item in enumerate(value)
-    )
+    return tuple(_content_part_from(f"{where}[{index}]", item) for index, item in enumerate(value))
 
 
 def _content_part_from(where: str, payload: object) -> TextPart | ImagePart:
@@ -751,9 +743,7 @@ def _content_part_from(where: str, payload: object) -> TextPart | ImagePart:
         _reject_unknown_keys(where, body, _TEXT_PART_KEYS)
         text = body.get("text")
         if not isinstance(text, str):
-            raise InvalidArgumentError(
-                f"{where} 'text' must be a string, got {_json_type(text)}"
-            )
+            raise InvalidArgumentError(f"{where} 'text' must be a string, got {_json_type(text)}")
         return TextPart(text)
     if kind == "image_url":
         _reject_unknown_keys(where, body, _IMAGE_PART_KEYS)
@@ -785,9 +775,7 @@ def _image_part_from(where: str, value: object) -> ImagePart:
     malformed input rather than a missing feature.
     """
     if not isinstance(value, str) or not value:
-        raise InvalidArgumentError(
-            f"{where} must be a non-empty string, got {_json_type(value)}"
-        )
+        raise InvalidArgumentError(f"{where} must be a non-empty string, got {_json_type(value)}")
     if value.startswith(_DATA_URI_PREFIX):
         media_type, _, payload = value[len(_DATA_URI_PREFIX) :].partition(_BASE64_MARKER)
         if not payload:
@@ -818,9 +806,7 @@ def _as_tool_calls(where: str, value: object) -> tuple[ToolCall, ...]:
         raise InvalidArgumentError(
             f"{where} must be an array of tool calls, got {_json_type(value)}"
         )
-    return tuple(
-        _tool_call_from(f"{where}[{index}]", item) for index, item in enumerate(value)
-    )
+    return tuple(_tool_call_from(f"{where}[{index}]", item) for index, item in enumerate(value))
 
 
 def _tool_call_from(where: str, payload: object) -> ToolCall:
@@ -828,9 +814,7 @@ def _tool_call_from(where: str, payload: object) -> ToolCall:
     _reject_unknown_keys(where, body, _TOOL_CALL_KEYS)
     kind = body.get("type", "function")
     if kind != "function":
-        raise InvalidArgumentError(
-            f"{where} 'type' must be 'function', got {_json_type(kind)}"
-        )
+        raise InvalidArgumentError(f"{where} 'type' must be 'function', got {_json_type(kind)}")
     function = _as_object(f"{where} 'function'", body.get("function"))
     _reject_unknown_keys(f"{where} 'function'", function, _FUNCTION_CALL_KEYS)
     return ToolCall(
@@ -1016,9 +1000,7 @@ def _as_text(where: str, value: object) -> str:
 
 def _as_required_text(where: str, value: object) -> str:
     if not isinstance(value, str) or not value:
-        raise InvalidArgumentError(
-            f"{where} must be a non-empty string, got {_json_type(value)}"
-        )
+        raise InvalidArgumentError(f"{where} must be a non-empty string, got {_json_type(value)}")
     return value
 
 
@@ -1050,9 +1032,7 @@ def _as_object(where: str, value: object) -> Mapping[str, object]:
     return value
 
 
-def _reject_unknown_keys(
-    where: str, body: Mapping[str, object], supported: frozenset[str]
-) -> None:
+def _reject_unknown_keys(where: str, body: Mapping[str, object], supported: frozenset[str]) -> None:
     unknown = sorted(set(body) - supported)
     if unknown:
         names = ", ".join(repr(key) for key in sorted(supported))

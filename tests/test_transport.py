@@ -162,12 +162,15 @@ def test_the_sync_client_refuses_a_blocked_address_before_any_connection(local_s
     port, received = local_server
     inner = RecordingSyncTransport()
 
-    with build_sync_client(
-        budget=5.0,
-        resolver=resolver_for({"provider.example": ["127.0.0.1"]}),
-        allow_insecure_transport=True,
-        inner=inner,
-    ) as client, pytest.raises(UrlPolicyError) as raised:
+    with (
+        build_sync_client(
+            budget=5.0,
+            resolver=resolver_for({"provider.example": ["127.0.0.1"]}),
+            allow_insecure_transport=True,
+            inner=inner,
+        ) as client,
+        pytest.raises(UrlPolicyError) as raised,
+    ):
         client.get(f"http://provider.example:{port}/v1")
 
     assert "blocked address" in str(raised.value)
@@ -204,9 +207,7 @@ def test_a_literal_blocked_address_is_refused(address):
     host = f"[{address}]" if ":" in address else address
 
     with pytest.raises(UrlPolicyError) as raised:
-        pin_request(
-            httpx.Request("GET", f"https://{host}/v1"), resolver=unreachable_resolver
-        )
+        pin_request(httpx.Request("GET", f"https://{host}/v1"), resolver=unreachable_resolver)
 
     assert "blocked address" in str(raised.value)
 
@@ -233,9 +234,7 @@ def test_a_resolver_answer_that_is_not_an_address_is_refused():
 
 def test_plain_http_is_refused_unless_insecure_transport_is_enabled():
     with pytest.raises(UrlPolicyError) as raised:
-        pin_request(
-            httpx.Request("GET", "http://provider.example/v1"), resolver=public_resolver
-        )
+        pin_request(httpx.Request("GET", "http://provider.example/v1"), resolver=public_resolver)
 
     assert "insecure transport" in str(raised.value)
 
@@ -252,9 +251,7 @@ def test_plain_http_is_sent_when_insecure_transport_is_enabled():
 
 def test_an_unsupported_scheme_is_refused():
     with pytest.raises(UrlPolicyError) as raised:
-        pin_request(
-            httpx.Request("GET", "ftp://provider.example/v1"), resolver=public_resolver
-        )
+        pin_request(httpx.Request("GET", "ftp://provider.example/v1"), resolver=public_resolver)
 
     assert "https is required" in str(raised.value)
 
@@ -319,9 +316,7 @@ def test_the_original_hostname_is_used_for_tls():
 
 
 def test_a_request_without_a_host_header_gets_the_original_authority():
-    request = httpx.Request(
-        "GET", "https://provider.example:8443/v1", stream=httpx.ByteStream(b"")
-    )
+    request = httpx.Request("GET", "https://provider.example:8443/v1", stream=httpx.ByteStream(b""))
     assert "host" not in request.headers
 
     pinned = pin_request(request, resolver=public_resolver)
@@ -370,9 +365,7 @@ def test_the_request_body_and_headers_survive_the_pinning():
 
 def test_the_request_extensions_survive_the_pinning():
     pinned = pin_request(
-        httpx.Request(
-            "GET", "https://provider.example/v1", extensions={"timeout": {"read": 7.0}}
-        ),
+        httpx.Request("GET", "https://provider.example/v1", extensions={"timeout": {"read": 7.0}}),
         resolver=public_resolver,
     )
 
@@ -403,9 +396,7 @@ def test_a_hostname_the_system_cannot_resolve_is_reachable_through_the_resolver(
 
 
 def test_the_async_transport_is_an_httpx_transport():
-    assert isinstance(
-        PinnedAddressTransport(inner=RecordingTransport()), httpx.AsyncBaseTransport
-    )
+    assert isinstance(PinnedAddressTransport(inner=RecordingTransport()), httpx.AsyncBaseTransport)
 
 
 async def test_the_async_transport_delegates_the_pinned_request_to_the_inner_transport():
@@ -594,9 +585,7 @@ async def test_the_client_carries_the_attempt_timeout():
 
 
 def test_the_sync_client_does_not_follow_redirects():
-    client = build_sync_client(
-        budget=5.0, resolver=public_resolver, inner=RecordingSyncTransport()
-    )
+    client = build_sync_client(budget=5.0, resolver=public_resolver, inner=RecordingSyncTransport())
     try:
         assert client.follow_redirects is False
         assert client.trust_env is False
@@ -610,9 +599,7 @@ def test_a_redirect_surfaces_through_the_sync_client_and_is_not_resolved():
         httpx.Response(302, headers={"location": "https://other.example/v1/models"})
     )
 
-    with build_sync_client(
-        budget=5.0, resolver=recording_resolver(calls), inner=inner
-    ) as client:
+    with build_sync_client(budget=5.0, resolver=recording_resolver(calls), inner=inner) as client:
         response = client.post(
             "https://provider.example/v1/chat/completions", json={"prompt": "hello"}
         )
@@ -629,9 +616,7 @@ def test_the_sync_client_does_not_read_proxies_from_the_environment(monkeypatch)
     calls: list[str] = []
     inner = RecordingSyncTransport()
 
-    with build_sync_client(
-        budget=5.0, resolver=recording_resolver(calls), inner=inner
-    ) as client:
+    with build_sync_client(budget=5.0, resolver=recording_resolver(calls), inner=inner) as client:
         client.get("https://provider.example/v1")
 
     assert calls == ["provider.example"]
@@ -641,11 +626,14 @@ def test_the_sync_client_does_not_read_proxies_from_the_environment(monkeypatch)
 def test_the_sync_client_uses_the_pinned_transport():
     inner = RecordingSyncTransport()
 
-    with build_sync_client(
-        budget=5.0,
-        resolver=resolver_for({"metadata.internal": [METADATA_ADDRESS]}),
-        inner=inner,
-    ) as client, pytest.raises(UrlPolicyError):
+    with (
+        build_sync_client(
+            budget=5.0,
+            resolver=resolver_for({"metadata.internal": [METADATA_ADDRESS]}),
+            inner=inner,
+        ) as client,
+        pytest.raises(UrlPolicyError),
+    ):
         client.get("https://metadata.internal/v1")
 
     assert inner.requests == []

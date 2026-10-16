@@ -422,9 +422,7 @@ class TestToLitellmParams:
             ),
         ],
     )
-    def test_tool_choice_reaches_upstream(
-        self, choice: ToolChoice, expected: object
-    ) -> None:
+    def test_tool_choice_reaches_upstream(self, choice: ToolChoice, expected: object) -> None:
         request = make_request(
             tools=(ToolDefinition(name="get_weather", parameters={"type": "object"}),),
             tool_choice=choice,
@@ -901,9 +899,7 @@ class TestFromLitellmResponse:
         assert details is not None
         # The measured shape itself is pinned: exactly the placeholder pair.
         set_fields = {
-            name
-            for name in type(details).model_fields
-            if getattr(details, name, None) is not None
+            name for name in type(details).model_fields if getattr(details, name, None) is not None
         }
         assert set_fields == {"reasoning_tokens", "text_tokens"}
         assert details.reasoning_tokens == 0
@@ -1314,8 +1310,6 @@ class TestTheRecordedRefusal:
         payload["choices"][0]["message"]["content"] = None
         payload["choices"][0]["finish_reason"] = "content_filter"
 
-        answer = from_litellm_response(
-            make_route(), make_request(), response_from(payload)
-        )
+        answer = from_litellm_response(make_route(), make_request(), response_from(payload))
 
         assert answer.content == (RefusalPart(text="I can't help with that."),)

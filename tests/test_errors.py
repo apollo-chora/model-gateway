@@ -149,9 +149,7 @@ def _all_subclasses(cls):
     CATEGORY_TABLE,
     ids=CATEGORY_IDS,
 )
-def test_every_category_maps_to_its_transport_status(
-    error_class, http_status, grpc_code, reason
-):
+def test_every_category_maps_to_its_transport_status(error_class, http_status, grpc_code, reason):
     error = error_class("the request was rejected")
 
     assert error.http_status == http_status
@@ -160,8 +158,9 @@ def test_every_category_maps_to_its_transport_status(
     assert error.reason is reason
 
 
-@pytest.mark.parametrize(("error_class", "http_status", "grpc_code", "reason"), CATEGORY_TABLE,
-                         ids=CATEGORY_IDS)
+@pytest.mark.parametrize(
+    ("error_class", "http_status", "grpc_code", "reason"), CATEGORY_TABLE, ids=CATEGORY_IDS
+)
 def test_every_category_subclasses_the_base_error(error_class, http_status, grpc_code, reason):
     error = error_class("the request was rejected")
 
@@ -170,8 +169,9 @@ def test_every_category_subclasses_the_base_error(error_class, http_status, grpc
     assert issubclass(error_class, GatewayError)
 
 
-@pytest.mark.parametrize(("error_class", "http_status", "grpc_code", "reason"), CATEGORY_TABLE,
-                         ids=CATEGORY_IDS)
+@pytest.mark.parametrize(
+    ("error_class", "http_status", "grpc_code", "reason"), CATEGORY_TABLE, ids=CATEGORY_IDS
+)
 def test_every_category_can_be_raised_and_caught_as_a_gateway_error(
     error_class, http_status, grpc_code, reason
 ):
@@ -179,8 +179,9 @@ def test_every_category_can_be_raised_and_caught_as_a_gateway_error(
         raise error_class("the request was rejected")
 
 
-@pytest.mark.parametrize(("error_class", "http_status", "grpc_code", "reason"), CATEGORY_TABLE,
-                         ids=CATEGORY_IDS)
+@pytest.mark.parametrize(
+    ("error_class", "http_status", "grpc_code", "reason"), CATEGORY_TABLE, ids=CATEGORY_IDS
+)
 def test_every_category_has_a_distinct_reason(error_class, http_status, grpc_code, reason):
     reasons = [entry[3] for entry in CATEGORY_TABLE]
 
@@ -390,9 +391,7 @@ def test_payload_carries_reason_and_message_only():
 
 
 def test_payload_is_json_serialisable_plain_data():
-    payload = InternalError("boom", details={"stage": "routing"}).to_payload(
-        include_details=True
-    )
+    payload = InternalError("boom", details={"stage": "routing"}).to_payload(include_details=True)
 
     assert isinstance(payload["reason"], str)
     assert isinstance(payload["message"], str)
@@ -782,9 +781,7 @@ def test_only_a_capability_error_uses_the_unprocessable_content_status():
 
 
 def test_a_malformed_response_error_is_its_own_category():
-    error = MalformedResponseError(
-        "the upstream returned fewer vectors than the caller's inputs"
-    )
+    error = MalformedResponseError("the upstream returned fewer vectors than the caller's inputs")
 
     assert not isinstance(error, InternalError)
     assert not isinstance(error, UnavailableError)

@@ -665,12 +665,8 @@ class LiteLLMProvider:
         """
         ensure_supported_dialect(route.format)
         if route.format in _HTTP_HANDLER_DIALECTS:
-            return _http_handler_client(
-                budget, self._resolver, self._verify, self._inner_factory
-            )
-        return _openai_sdk_client(
-            route, budget, self._resolver, self._verify, self._inner_factory
-        )
+            return _http_handler_client(budget, self._resolver, self._verify, self._inner_factory)
+        return _openai_sdk_client(route, budget, self._resolver, self._verify, self._inner_factory)
 
 
 def _embedding_params(route: Route, request: EmbeddingRequest) -> dict[str, object]:
@@ -803,8 +799,7 @@ def _embedding_from(item: object) -> Embedding:
         return Embedding(index=index, values=tuple(values))
     except (TypeError, ValueError) as error:
         raise MalformedResponseError(
-            "the upstream returned an embedding record the canonical representation cannot "
-            "carry"
+            "the upstream returned an embedding record the canonical representation cannot carry"
         ) from error
 
 

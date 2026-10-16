@@ -270,9 +270,7 @@ class TestTheGenericHttpxPath:
 class TestTheAttemptsOwnTransport:
     """The transport is this attempt's, and it is closed when the attempt ends."""
 
-    @pytest.mark.parametrize(
-        "dialect", [OPENAI_SDK_DIALECT, *HTTP_HANDLER_DIALECTS]
-    )
+    @pytest.mark.parametrize("dialect", [OPENAI_SDK_DIALECT, *HTTP_HANDLER_DIALECTS])
     async def test_each_attempt_gets_its_own_transport_and_closes_it(
         self, wire, monkeypatch, dialect
     ) -> None:
@@ -343,9 +341,7 @@ class TestTheRefusal:
     """A dialect whose HTTP path is unverified is refused, not run."""
 
     def test_the_verified_dialects_are_the_three_the_binding_proves(self) -> None:
-        assert frozenset(
-            {OPENAI_SDK_DIALECT, *HTTP_HANDLER_DIALECTS}
-        ) == SUPPORTED_DIALECTS
+        assert frozenset({OPENAI_SDK_DIALECT, *HTTP_HANDLER_DIALECTS}) == SUPPORTED_DIALECTS
 
     @pytest.mark.parametrize("dialect", sorted(SUPPORTED_DIALECTS))
     def test_a_verified_dialect_is_returned_unchanged(self, dialect: str) -> None:

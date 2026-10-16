@@ -145,9 +145,7 @@ class FakeTextProvider:
         raise AssertionError("a text-only provider must never be handed an image request")
 
 
-def build(
-    routes: tuple[Route, ...], provider: object, **overrides: object
-) -> InferenceService:
+def build(routes: tuple[Route, ...], provider: object, **overrides: object) -> InferenceService:
     """An inference service over a registry built from ``routes``."""
     return InferenceService(ModelRegistry(routes), provider, **overrides)
 
@@ -256,9 +254,7 @@ class TestTheHappyPath:
     async def test_the_providers_own_invocation_identifier_is_discarded(self) -> None:
         """The gateway mints the identifier; a provider cannot rename the invocation."""
 
-        def answer(
-            route_: Route, request_: ImageRequest, context: AttemptContext
-        ) -> ImageResponse:
+        def answer(route_: Route, request_: ImageRequest, context: AttemptContext) -> ImageResponse:
             return ImageResponse(
                 model=PUBLIC_MODEL_IDS[route_.operation],
                 upstream_model=route_.model_id,
@@ -268,9 +264,7 @@ class TestTheHappyPath:
                 invocation_id="inv-from-the-upstream",
             )
 
-        response = await build((route(),), FakeImageProvider(answer)).generate(
-            request(n=1)
-        )
+        response = await build((route(),), FakeImageProvider(answer)).generate(request(n=1))
 
         assert response.invocation_id != "inv-from-the-upstream"
 
@@ -406,9 +400,7 @@ class TestTheReliabilityLoop:
         assert context.timeout == pytest.approx(30.0, abs=0.1)
 
     async def test_a_retryable_failure_is_retried_on_the_same_route(self) -> None:
-        provider = FakeImageProvider(
-            UnavailableError("the upstream is unavailable"), response_for
-        )
+        provider = FakeImageProvider(UnavailableError("the upstream is unavailable"), response_for)
 
         response = await build((route(),), provider, retry_count=1).generate(request())
 
@@ -427,9 +419,7 @@ class TestTheReliabilityLoop:
         assert len(provider.calls) == 2
 
     async def test_a_fallback_route_serves_when_the_primary_cannot(self) -> None:
-        provider = FakeImageProvider(
-            UnavailableError("the upstream is unavailable"), response_for
-        )
+        provider = FakeImageProvider(UnavailableError("the upstream is unavailable"), response_for)
         routes = (route(), route(model_id="fallback", index=1))
 
         response = await build(routes, provider).generate(request())
@@ -441,9 +431,7 @@ class TestTheReliabilityLoop:
         ]
 
     async def test_a_fallback_without_the_capability_is_skipped(self) -> None:
-        provider = FakeImageProvider(
-            UnavailableError("the upstream is unavailable"), response_for
-        )
+        provider = FakeImageProvider(UnavailableError("the upstream is unavailable"), response_for)
         routes = (
             route(),
             route(model_id="chat-only", index=1, capabilities=frozenset({Capability.CHAT})),
@@ -468,9 +456,7 @@ class TestTheReliabilityLoop:
 
     async def test_a_gateway_defect_terminates_where_it_happened(self) -> None:
         """An internal error is the gateway's own defect: no route can fix it."""
-        provider = FakeImageProvider(
-            InternalError("the gateway could not read its own answer")
-        )
+        provider = FakeImageProvider(InternalError("the gateway could not read its own answer"))
         routes = (route(), route(model_id="fallback", index=1))
 
         with pytest.raises(InternalError):
@@ -562,9 +548,7 @@ class TestConcurrency:
         limiter = _RecordingLimiter()
         provider = FakeImageProvider(response_for)
 
-        await build((route(),), provider, attempt_timeout=7.0, limiter=limiter).generate(
-            request()
-        )
+        await build((route(),), provider, attempt_timeout=7.0, limiter=limiter).generate(request())
 
         assert limiter.timeouts[0] == pytest.approx(7.0, abs=0.1)
 
@@ -580,9 +564,7 @@ class TestConcurrency:
                 )
                 yield
 
-        inference = build(
-            (route(),), FakeImageProvider(response_for), limiter=_FullLimiter()
-        )
+        inference = build((route(),), FakeImageProvider(response_for), limiter=_FullLimiter())
 
         with pytest.raises(DeadlineExceededError):
             await inference.generate(request())

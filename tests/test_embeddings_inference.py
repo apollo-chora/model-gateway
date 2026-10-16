@@ -77,8 +77,7 @@ def vectors(*values: tuple[float, ...], indices: list[int] | None = None) -> tup
     """A tuple of embeddings, positioned by ``indices`` or in the order given."""
     positions = indices if indices is not None else list(range(len(values)))
     return tuple(
-        Embedding(index=index, values=value)
-        for index, value in zip(positions, values, strict=True)
+        Embedding(index=index, values=value) for index, value in zip(positions, values, strict=True)
     )
 
 
@@ -93,11 +92,7 @@ def response_for(
     return EmbeddingResponse(
         model=PUBLIC_MODEL_IDS[route_.operation],
         upstream_model=route_.model_id,
-        data=(
-            data
-            if data is not None
-            else vectors(*[VECTOR for _ in request_.input])
-        ),
+        data=(data if data is not None else vectors(*[VECTOR for _ in request_.input])),
         usage=Usage(input_tokens=10, total_tokens=10),
         invocation_id=context.invocation_id or "inv-from-the-provider",
     )
@@ -140,9 +135,7 @@ class FakeTextProvider:
         raise AssertionError("a text-only provider must never be handed an embeddings request")
 
 
-def build(
-    routes: tuple[Route, ...], provider: object, **overrides: object
-) -> InferenceService:
+def build(routes: tuple[Route, ...], provider: object, **overrides: object) -> InferenceService:
     """An inference service over a registry built from ``routes``."""
     return InferenceService(ModelRegistry(routes), provider, **overrides)
 
@@ -212,8 +205,9 @@ class TestTheModelAndTheCapability:
         assert provider.calls == []
 
     async def test_a_provider_satisfies_the_embedding_protocol_structurally(self) -> None:
-        assert isinstance(FakeEmbeddingProvider(lambda route_, request_, context: None),
-                          EmbeddingProvider)
+        assert isinstance(
+            FakeEmbeddingProvider(lambda route_, request_, context: None), EmbeddingProvider
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -389,9 +383,9 @@ class TestDimensionality:
         provider = FakeEmbeddingProvider(response_for)
 
         with pytest.raises(MalformedResponseError):
-            await build(
-                (route(dimensions=3, supports_dimensions_param=True),), provider
-            ).embed(request(dimensions=4))
+            await build((route(dimensions=3, supports_dimensions_param=True),), provider).embed(
+                request(dimensions=4)
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -500,9 +494,7 @@ class TestFallbacksAndTheDimensionContract:
             route(model_id="fallback", index=1, supports_dimensions_param=True, dimensions=4),
         )
 
-        response = await build(routes, provider).embed(
-            request(input=("only one",), dimensions=4)
-        )
+        response = await build(routes, provider).embed(request(input=("only one",), dimensions=4))
 
         assert response.upstream_model == "fallback"
         assert len(response.data[0].values) == 4
@@ -660,9 +652,7 @@ class TestTheReliabilityLoop:
         a defect in the gateway's own code is neither retried on the route nor
         walked to the next.
         """
-        provider = FakeEmbeddingProvider(
-            InternalError("the gateway could not read its own answer")
-        )
+        provider = FakeEmbeddingProvider(InternalError("the gateway could not read its own answer"))
         routes = (route(), route(model_id="fallback", index=1))
 
         with pytest.raises(InternalError):

@@ -97,7 +97,5 @@ class IdempotencyClaims:
             )
             if rows_affected(status) == 1:
                 return True
-            await connection.execute(
-                _RECORD_DEDUPE, gcid, dispatch_key, action, invocation_id
-            )
+            await connection.execute(_RECORD_DEDUPE, gcid, dispatch_key, action, invocation_id)
             return False

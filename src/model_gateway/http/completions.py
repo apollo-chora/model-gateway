@@ -664,9 +664,7 @@ def _chunk_from_event(
         chunk["choices"] = []
         chunk["usage"] = _usage_payload(event.usage)
     elif event.kind is StreamEventKind.FINISH:
-        chunk["choices"] = [
-            {"index": 0, "text": "", "finish_reason": _finish_reason_chunk(event)}
-        ]
+        chunk["choices"] = [{"index": 0, "text": "", "finish_reason": _finish_reason_chunk(event)}]
     elif event.kind is StreamEventKind.ERROR:
         chunk["choices"] = []
         chunk["error"] = {"reason": event.error_reason, "message": event.error_message}
@@ -686,9 +684,7 @@ def _tool_call_error_fields() -> dict[str, str]:
     }
 
 
-def _tool_call_error_event(
-    *, completion_id: str, created: int, model: str
-) -> TextServerSentEvent:
+def _tool_call_error_event(*, completion_id: str, created: int, model: str) -> TextServerSentEvent:
     """The terminal error event that ends a stream carrying a tool call.
 
     A tool call has no place in the legacy chunk shape, exactly as it has none

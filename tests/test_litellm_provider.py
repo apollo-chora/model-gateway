@@ -269,9 +269,7 @@ def content_chunk(text: str) -> ModelResponseStream:
 
 def finish_chunk(finish_reason: str) -> ModelResponseStream:
     """A chunk carrying a finish reason."""
-    return ModelResponseStream(
-        choices=[StreamingChoices(index=0, finish_reason=finish_reason)]
-    )
+    return ModelResponseStream(choices=[StreamingChoices(index=0, finish_reason=finish_reason)])
 
 
 def usage_chunk(
@@ -371,9 +369,7 @@ class TestTheCall:
         assert call["api_base"] == ENDPOINT
         assert call["api_key"] == SECRET_KEY
         assert call["extra_headers"] == {}
-        assert call["messages"] == [
-            {"role": "user", "content": "What is the weather in Paris?"}
-        ]
+        assert call["messages"] == [{"role": "user", "content": "What is the weather in Paris?"}]
         assert call["num_retries"] == 0
         assert call["timeout"] == 30.0
 
@@ -663,9 +659,7 @@ class TestTheStream:
         ]
         assert events[-1].finish_reason is FinishReason.TOOL_CALLS
 
-    async def test_a_chunk_carrying_nothing_reportable_produces_no_event(
-        self, wire_stream
-    ) -> None:
+    async def test_a_chunk_carrying_nothing_reportable_produces_no_event(self, wire_stream) -> None:
         """A keep-alive chunk produces no event, and the counter does not advance."""
         role_only = ModelResponseStream(
             choices=[StreamingChoices(index=0, delta=Delta(role="assistant"))]
@@ -820,9 +814,7 @@ class TestTheStream:
             ),
         ],
     )
-    async def test_no_path_emits_more_than_one_terminal_event(
-        self, wire_stream, outcome
-    ) -> None:
+    async def test_no_path_emits_more_than_one_terminal_event(self, wire_stream, outcome) -> None:
         """The whole point of the buffering: a terminal event is terminal in fact.
 
         Every path is drained — completion, trailing usage, an upstream that
@@ -1231,9 +1223,7 @@ class TestFailures:
         with pytest.raises(asyncio.CancelledError):
             await provider.complete(make_route(), make_request(), make_context())
 
-    async def test_the_client_is_closed_when_the_call_is_cancelled(
-        self, wire, monkeypatch
-    ) -> None:
+    async def test_the_client_is_closed_when_the_call_is_cancelled(self, wire, monkeypatch) -> None:
         closed = recording_aclose(monkeypatch)
         provider, completion = wire(asyncio.CancelledError())
 

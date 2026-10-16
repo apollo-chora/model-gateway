@@ -942,15 +942,9 @@ async def test_two_credentials_sharing_a_key_are_two_independent_operations(prov
     try:
         shared = request(idempotency_key="shared-key")
 
-        first = await stub_a.Invoke(
-            shared, metadata=(("authorization", f"Bearer {API_KEY}"),)
-        )
-        second = await stub_b.Invoke(
-            shared, metadata=(("authorization", f"Bearer {SECOND_KEY}"),)
-        )
-        repeat = await stub_a.Invoke(
-            shared, metadata=(("authorization", f"Bearer {API_KEY}"),)
-        )
+        first = await stub_a.Invoke(shared, metadata=(("authorization", f"Bearer {API_KEY}"),))
+        second = await stub_b.Invoke(shared, metadata=(("authorization", f"Bearer {SECOND_KEY}"),))
+        repeat = await stub_a.Invoke(shared, metadata=(("authorization", f"Bearer {API_KEY}"),))
     finally:
         await channel_a.close()
         await channel_b.close()

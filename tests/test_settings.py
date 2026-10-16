@@ -93,8 +93,7 @@ INVALID_STATES = [
     ),
     pytest.param(
         {"log_level": "POTATO"},
-        "LOG_LEVEL must be one of 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL', "
-        "got 'POTATO'",
+        "LOG_LEVEL must be one of 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL', got 'POTATO'",
         id="log-level-unknown",
     ),
     pytest.param({"log_level": ""}, "LOG_LEVEL must not be empty", id="log-level-empty"),
@@ -313,8 +312,7 @@ def test_log_level_rejects_an_unknown_level(value):
         Settings.from_env({"LOG_LEVEL": value})
 
     assert str(error.value) == (
-        "LOG_LEVEL must be one of 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL', "
-        f"got {value!r}"
+        f"LOG_LEVEL must be one of 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL', got {value!r}"
     )
 
 
@@ -392,9 +390,7 @@ def test_production_requires_authentication():
 
 def test_production_requires_authentication_even_when_it_is_disabled_explicitly():
     with pytest.raises(ConfigurationError, match="CHORA_ENVIRONMENT is production"):
-        Settings.from_env(
-            {"CHORA_ENVIRONMENT": "production", "GATEWAY_AUTH_ENABLED": "false"}
-        )
+        Settings.from_env({"CHORA_ENVIRONMENT": "production", "GATEWAY_AUTH_ENABLED": "false"})
 
 
 def test_the_production_invariant_is_enforced_on_direct_construction():
@@ -436,9 +432,7 @@ def test_port_variables_reject_out_of_range_ports(name, value):
     with pytest.raises(ConfigurationError) as error:
         Settings.from_env({name: value})
 
-    assert str(error.value) == (
-        f"{name} must be a port number between 1 and 65535, got {value!r}"
-    )
+    assert str(error.value) == (f"{name} must be a port number between 1 and 65535, got {value!r}")
 
 
 @pytest.mark.parametrize("name", list(PORT_VARIABLES))
@@ -447,9 +441,7 @@ def test_port_variables_reject_malformed_values(name, value):
     with pytest.raises(ConfigurationError) as error:
         Settings.from_env({name: value})
 
-    assert str(error.value) == (
-        f"{name} must be a port number between 1 and 65535, got {value!r}"
-    )
+    assert str(error.value) == (f"{name} must be a port number between 1 and 65535, got {value!r}")
 
 
 @pytest.mark.parametrize("value", ["true", "TRUE", "True", "1", "yes", "on", " true "])
@@ -769,18 +761,14 @@ class TestGovernanceSettings:
             {"CHORA_LLM_BUDGET_REQUIRED_TENANTS": " 123e4567-e89b-42d3-a456-426614174000 ,"}
         )
 
-        assert settings.llm_budget_required_tenants == (
-            "123e4567-e89b-42d3-a456-426614174000",
-        )
+        assert settings.llm_budget_required_tenants == ("123e4567-e89b-42d3-a456-426614174000",)
 
     def test_budget_required_tenants_ignore_blank_entries(self):
         settings = Settings.from_env(
             {"CHORA_LLM_BUDGET_REQUIRED_TENANTS": ",, 123e4567-e89b-42d3-a456-426614174000 ,, "}
         )
 
-        assert settings.llm_budget_required_tenants == (
-            "123e4567-e89b-42d3-a456-426614174000",
-        )
+        assert settings.llm_budget_required_tenants == ("123e4567-e89b-42d3-a456-426614174000",)
 
     def test_governance_defaults_survive_direct_construction_round_trip(self):
         assert _direct().observability_dsn == ""

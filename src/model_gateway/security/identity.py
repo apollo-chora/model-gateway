@@ -114,9 +114,7 @@ class Identity:
                     "credential is not a state the gateway can represent"
                 )
         elif (
-            self.tenant is not None
-            or self.credential_id is not None
-            or self.key_label is not None
+            self.tenant is not None or self.credential_id is not None or self.key_label is not None
         ):
             raise ValueError(
                 "an anonymous identity carries no tenant, no credential identifier and no "
