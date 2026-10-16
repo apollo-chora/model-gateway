@@ -337,6 +337,8 @@ def _build_citations(
             continue
         seen.add(source.url)
         text = source.text[:PER_SOURCE_CHARS]
+        if not text:
+            continue
         remaining = MAX_EVIDENCE_CHARS - total
         if remaining <= 0:
             break
@@ -351,8 +353,7 @@ def _build_citations(
                 confidence=source.score,
             )
         )
-        if text:
-            evidence.append(f"Source: {source.title} ({source.url})\n{text}")
+        evidence.append(f"Source: {source.title} ({source.url})\n{text}")
         if max_results > 0 and len(citations) >= max_results:
             break
     return tuple(citations), evidence

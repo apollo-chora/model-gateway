@@ -304,6 +304,39 @@ async def test_a_result_without_a_url_or_a_title_is_not_a_citation(monkeypatch):
     assert [citation.uri for citation in result.citations] == ["https://c.example/three"]
 
 
+async def test_citations_with_url_and_title_but_no_text_are_excluded(monkeypatch):
+    """A source with a URL and title but no text is not a citation.
+
+    A citation is the promise that the answer rests on that source's retrieved
+    text; with no text there is nothing to rest on. When the search returns a
+    mix of sources — some with text, some without — the ones with text become
+    citations and the rest are skipped, so every citation and every evidence
+    segment has text behind it.
+    """
+    _, completion = wire(
+        monkeypatch,
+        FakeSearchResponse(
+            [
+                FakeResult("https://a.example/one", "Source One", "text from one"),
+                FakeResult("https://b.example/two", "Source Two", ""),
+                FakeResult("https://c.example/three", "Source Three", "text from three"),
+            ]
+        ),
+        FakeCompletionResponse("answer"),
+    )
+
+    result = await ExaGroundedSearch(config()).search(request())
+
+    assert [citation.uri for citation in result.citations] == [
+        "https://a.example/one",
+        "https://c.example/three",
+    ]
+    evidence = completion.calls[0]["messages"][1]["content"]
+    assert "text from one" in evidence
+    assert "text from three" in evidence
+    assert "Source Two" not in evidence
+
+
 async def test_a_url_is_cited_once(monkeypatch):
     wire(
         monkeypatch,
