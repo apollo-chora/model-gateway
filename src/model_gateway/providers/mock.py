@@ -41,6 +41,7 @@ from model_gateway.domain import (
 )
 from model_gateway.errors import GatewayError
 from model_gateway.providers.base import AttemptContext
+from model_gateway.registry import PUBLIC_MODEL_IDS
 
 __all__ = ["MockEmbedSpec", "MockProvider", "MockSpec", "MockStreamSpec"]
 
@@ -220,7 +221,7 @@ class MockProvider:
         if spec.error is not None:
             raise spec.error
         return EmbeddingResponse(
-            model=request.model,
+            model=PUBLIC_MODEL_IDS[route.operation],
             upstream_model=route.model_id,
             data=tuple(
                 Embedding(
@@ -239,7 +240,7 @@ def _response(route: Route, request: InvocationRequest, spec: MockSpec) -> Invoc
     raw = _raw_finish_reason(spec)
     text = spec.text if spec.text is not None else _echo(request)
     return InvocationResponse(
-        model=request.model,
+        model=PUBLIC_MODEL_IDS[route.operation],
         upstream_model=route.model_id,
         invocation_id=request.invocation_id,
         content=(TextPart(text=text), *spec.tool_calls),

@@ -115,6 +115,7 @@ from blacksheep.contents import ServerSentEvent, TextServerSentEvent
 from blacksheep.server.responses import json
 from blacksheep.server.routing import Router
 
+from model_gateway.config.routes import Operation
 from model_gateway.domain import (
     FinishReason,
     GenerationConfig,
@@ -127,10 +128,11 @@ from model_gateway.domain import (
     TextPart,
     Usage,
 )
-from model_gateway.domain.serialization import as_required_text, describe
+from model_gateway.domain.serialization import as_optional_text, as_required_text, describe
 from model_gateway.errors import CapabilityError, ErrorReason, GatewayError, InvalidArgumentError
 from model_gateway.http.auth import get_identity
 from model_gateway.http.chat import _gateway_sse_response
+from model_gateway.registry import PUBLIC_MODEL_IDS
 from model_gateway.security.identity import caller_namespace, caller_tenant
 
 if TYPE_CHECKING:
@@ -332,7 +334,7 @@ class CompletionRequest:
         _reject_unsupported_parameters(body)
         try:
             invocation = InvocationRequest(
-                model=as_required_text(f"{where} 'model'", body.get("model")),
+                model=as_optional_text(f"{where} 'model'", body.get("model")),
                 messages=(_user_message(f"{where} 'prompt'", body.get("prompt")),),
                 generation_config=_generation_config(body),
                 idempotency_key=_as_idempotency_key(
@@ -549,7 +551,7 @@ async def _stream_completion(
         return json(error.to_payload(), status=error.http_status)
 
     created = int(time.time())
-    model = invocation.model
+    model = PUBLIC_MODEL_IDS[Operation.TEXT]
 
     if first_event is not None and first_event.kind is StreamEventKind.TOOL_CALL:
         # A leading tool call is a capability gap discovered before anything was

@@ -39,8 +39,7 @@ from model_gateway.errors import (
 )
 from model_gateway.inference import InferenceService
 from model_gateway.providers.base import AttemptContext
-from model_gateway.providers.mock import MockProvider
-from model_gateway.registry import ModelRegistry
+from model_gateway.registry import PUBLIC_MODEL_IDS, ModelRegistry
 from model_gateway.reliability import ConcurrencyLimiter
 
 
@@ -169,7 +168,7 @@ class NonStreamingProvider:
     async def complete(self, route, request, context):
         self.calls.append((route, request, context))
         return InvocationResponse(
-            model=request.model,
+            model=PUBLIC_MODEL_IDS[route.operation],
             upstream_model=route.model_id,
             invocation_id=request.invocation_id,
             content=(TextPart(text="hello"),),
@@ -309,27 +308,31 @@ class TestTheHappyPath:
         assert context.attempt_number == 1
         assert context.timeout == pytest.approx(12.5, abs=0.5)
 
-    async def test_an_unknown_model_is_refused_before_any_event(self):
-        inference = service((route(),), ScriptedStreamProvider([]))
-
-        with pytest.raises(ModelNotFoundError) as error:
-            await collect(inference.invoke_stream(request(model="no-such-model")))
-
-        assert error.value.reason is ErrorReason.MODEL_NOT_FOUND
-
-    async def test_an_unknown_model_is_refused_before_the_streaming_capability_is_checked(self):
-        """The model is resolved first, so a missing model is not a streaming refusal.
-
-        The request names a resource that does not exist, and whether the bound
-        provider could stream some other model has no bearing on that answer.
-        """
-        provider = MockProvider()  # not a streaming provider
+    async def test_an_unknown_model_is_ignored_and_the_stream_is_served(self):
+        provider = ScriptedStreamProvider([[content_event("sunny", 0)]])
         inference = service((route(),), provider)
 
-        with pytest.raises(ModelNotFoundError) as error:
+        events = await collect(inference.invoke_stream(request(model="no-such-model")))
+
+        assert [event.kind for event in events] == [StreamEventKind.CONTENT]
+        assert len(provider.calls) == 1
+        assert provider.calls[0][1].model == "no-such-model"
+
+    async def test_the_operations_routes_are_resolved_before_the_streaming_capability_is_asked(
+        self,
+    ):
+        """An unconfigured operation is refused as that, whether or not the provider can stream.
+
+        The request addresses an operation this deployment does not serve, and
+        whether the bound provider could stream has no bearing on that answer.
+        """
+        provider = ScriptedStreamProvider([[content_event("sunny", 0)]])
+        inference = service((), provider)
+
+        with pytest.raises(ModelNotFoundError):
             await collect(inference.invoke_stream(request(model="no-such-model")))
 
-        assert error.value.reason is ErrorReason.MODEL_NOT_FOUND
+        assert provider.calls == []
 
     async def test_a_capability_gap_is_refused_before_any_event(self):
         """A request the primary route cannot serve is refused before any event."""

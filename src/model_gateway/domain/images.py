@@ -183,9 +183,12 @@ class GeneratedImage:
 class ImageRequest:
     """One canonical image generation invocation.
 
-    ``model`` is the public model ID, never an upstream model name, for the same
-    reason as an invocation request: the route resolver decides which upstream
-    serves it and a caller-supplied name must not reach an unconfigured endpoint.
+    ``model`` is the public model ID the caller named, or ``None`` when it named
+    none. It is never an upstream model name, and it is not what selects the
+    routes: the operation is resolved from the transport the call arrived on,
+    and the routes configured for the image operation serve it. A stated model
+    is carried for the caller's own correlation and is ignored for routing, so
+    a caller-supplied model name cannot reach an unconfigured endpoint.
 
     ``prompt`` is what the image is generated from and must carry something: an
     image request with nothing to generate from has no canonical representation.
@@ -204,15 +207,15 @@ class ImageRequest:
     object, never forwarded to the model or the provider.
     """
 
-    model: str
     prompt: str
     size: str | None = None
     response_format: str | None = None
     n: int | None = None
     metadata: Mapping[str, object] | None = None
+    model: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "model", as_required_text("model", self.model))
+        object.__setattr__(self, "model", as_optional_text("model", self.model))
         object.__setattr__(self, "prompt", as_required_text("prompt", self.prompt))
         object.__setattr__(self, "size", _as_size("size", self.size))
         object.__setattr__(
@@ -240,7 +243,7 @@ class ImageRequest:
         reject_unknown_keys(where, payload, _REQUEST_KEYS)
 
         return cls(
-            model=as_required_text(f"{where} 'model'", payload.get("model")),
+            model=as_optional_text(f"{where} 'model'", payload.get("model")),
             prompt=as_required_text(f"{where} 'prompt'", payload.get("prompt")),
             size=_as_size(f"{where} 'size'", payload.get("size")),
             response_format=_as_response_format(
@@ -255,9 +258,10 @@ class ImageRequest:
 class ImageResponse:
     """The canonical result of one image generation invocation.
 
-    ``model`` is the public model ID the caller asked for and ``upstream_model``
-    the route's own model ID, reported separately because a fallback may have
-    served it. ``created`` is when the gateway assembled the
+    ``model`` is the public model ID of the image operation, stated by the
+    gateway rather than by the caller, and ``upstream_model`` the route's own
+    model ID, reported separately because a fallback may have served it.
+    ``created`` is when the gateway assembled the
     answer and is non-negative, because a negative timestamp is not a time any
     answer was produced at.
 

@@ -90,10 +90,10 @@ async def test_the_mock_returns_a_well_formed_response():
     assert response.idempotency_status.value == "not_applicable"
 
 
-async def test_the_mock_echoes_the_public_model_id():
+async def test_the_mock_stamps_the_operations_public_model_id():
     response = await MockProvider().complete(route(), request(model="embedding-default"), context())
 
-    assert response.model == "embedding-default"
+    assert response.model == "text-default"
 
 
 async def test_the_mock_echoes_the_upstream_model_id_from_the_route():
@@ -166,9 +166,18 @@ async def test_the_mock_answers_a_different_request_differently():
     provider = MockProvider()
 
     first = await provider.complete(route(), request(), context())
-    second = await provider.complete(route(), request(model="image-default"), context())
+    second = await provider.complete(
+        route(),
+        request(
+            messages=(
+                Message(role=Role.USER, content=(TextPart(text="What is the weather in Rome?"),)),
+            )
+        ),
+        context(),
+    )
 
-    assert first.model != second.model
+    assert first.text == "What is the weather in Paris?"
+    assert second.text == "What is the weather in Rome?"
 
 
 # ---------------------------------------------------------------------------

@@ -133,7 +133,7 @@ def image_generation_request_from_payload(payload: object) -> ImageRequest:
         body = as_object(where, payload)
         reject_unknown_keys(where, body, _GENERATION_REQUEST_KEYS)
         return ImageRequest(
-            model=as_required_text(f"{where} 'model'", body.get("model")),
+            model=as_optional_text(f"{where} 'model'", body.get("model")),
             prompt=as_required_text(f"{where} 'prompt'", body.get("prompt")),
             size=as_optional_text(f"{where} 'size'", body.get("size")),
             response_format=as_optional_text(

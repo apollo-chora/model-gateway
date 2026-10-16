@@ -731,12 +731,12 @@ async def test_an_image_answer_is_refused(client):
     assert body["reason"] == "unsupported_capability"
 
 
-async def test_an_unknown_model_is_a_model_not_found_error(client, provider):
+async def test_an_unknown_model_is_ignored_and_the_request_is_served(client, provider):
     response = await post(client, payload(model="no-such-model"))
 
-    assert response.status == 404
-    assert (await response.json())["reason"] == "model_not_found"
-    assert provider.calls == []
+    assert response.status == 200
+    assert len(provider.calls) == 1
+    assert provider.calls[0][1].model == "no-such-model"
 
 
 UNSUPPORTED_PARAMETERS = [
@@ -1197,12 +1197,12 @@ async def test_a_body_without_input_is_refused(client, provider):
     assert provider.calls == []
 
 
-async def test_a_body_without_a_model_is_refused(client, provider):
+async def test_a_body_without_a_model_is_served(client, provider):
     status, body = await call(provider, {"input": "hi"})
 
-    assert status == 400
-    assert body["reason"] == "invalid_request"
-    assert provider.calls == []
+    assert status == 200
+    assert len(provider.calls) == 1
+    assert provider.calls[0][1].model is None
 
 
 async def test_an_empty_input_array_is_refused(client, provider):

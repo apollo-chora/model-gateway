@@ -398,7 +398,7 @@ class ChatRequest:
         _reject_unsupported_parameters(body)
         try:
             invocation = InvocationRequest(
-                model=_as_required_text(f"{where} 'model'", body.get("model")),
+                model=_as_optional_text(f"{where} 'model'", body.get("model")),
                 messages=_as_messages(f"{where} 'messages'", body.get("messages")),
                 actor_id=_as_optional_text(f"{where} 'user'", body.get("user")),
                 tenant_id=_as_optional_text(f"{where} 'tenant_id'", body.get("tenant_id")),

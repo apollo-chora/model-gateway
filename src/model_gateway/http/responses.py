@@ -458,7 +458,7 @@ class ResponsesRequest:
         _reject_unsupported_parameters(body)
         try:
             invocation = InvocationRequest(
-                model=as_required_text(f"{where} 'model'", body.get("model")),
+                model=as_optional_text(f"{where} 'model'", body.get("model")),
                 messages=_as_messages(f"{where} 'input'", body.get("input")),
                 system_instruction=as_optional_text(
                     f"{where} 'instructions'", body.get("instructions")

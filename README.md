@@ -17,7 +17,8 @@ application ──▶ model-gateway ──▶ provider A
 
 Inference is performed by [LiteLLM], pinned and isolated behind one binding that
 owns upstream protocol translation and nothing else. The gateway core owns
-everything that is policy: resolving a public model ID to a route, authenticating
+everything that is policy: resolving the operation a request arrived on to its
+routes, authenticating
 the caller and isolating tenants, enforcing the capabilities a route declared,
 validating the request and bounding its size, the deadline and cancellation, the
 retry and fallback walk, idempotency, usage and cost accounting, the public error

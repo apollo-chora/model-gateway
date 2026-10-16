@@ -5,8 +5,8 @@
 // against gateway.v1 keeps working against any later version of this service.
 //
 // The shape is deliberately the canonical model, not a provider dialect: the
-// gateway resolves the public model, applies policy, and returns the canonical
-// answer. A provider's own field names never appear here.
+// gateway resolves the operation the transport names, applies policy, and
+// returns the canonical answer. A provider's own field names never appear here.
 //
 // That fidelity rule decides each field's type, and it draws one line. A field
 // the canonical model types - a scalar, an enum, a structured object the gateway
@@ -57,8 +57,10 @@ message InvokeRequest {
   string actor_id = 3;
   // Caller-supplied agent or service label.
   string agent_id = 4;
-  // Public model ID, resolved before anything is attempted.
-  string model = 5;
+  // The operation is the transport's — the Invoke method — so this field is
+  // optional: a caller that states no model is served by the operation's own
+  // routes, and a stated model is not used to reach an unconfigured endpoint.
+  optional string model = 5;
   // The conversation, in order.
   repeated Message messages = 6;
   // The invocation-level instruction. Not interchangeable with a system message.
@@ -345,7 +347,9 @@ message ErrorEvent {
 
 // EmbedRequest asks for one vector per input.
 message EmbedRequest {
-  string model = 1;
+  // Optional, as InvokeRequest.model is: the Embed method fixes the operation,
+  // and a stated model is not used to reach an unconfigured endpoint.
+  optional string model = 1;
   repeated string input = 2;
   optional int32 dimensions = 3;
   // "float" or "base64". The gateway answers floats only.
@@ -391,4 +395,5 @@ enum Operation {
   OPERATION_TEXT = 1;
   OPERATION_IMAGE = 2;
   OPERATION_EMBEDDINGS = 3;
+  OPERATION_GROUNDED_SEARCH = 4;
 }

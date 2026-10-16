@@ -334,12 +334,12 @@ async def test_a_claimed_tenant_that_disagrees_is_refused(stub, provider):
     assert provider.calls == []
 
 
-async def test_an_unknown_model_is_refused_and_the_provider_is_never_called(stub, provider):
-    with pytest.raises(grpc.aio.AioRpcError) as raised:
-        await stub.Invoke(request(model="no-such-model"), metadata=bearer())
+async def test_an_unknown_model_is_ignored_and_the_provider_is_called(stub, provider):
+    response = await stub.Invoke(request(model="no-such-model"), metadata=bearer())
 
-    assert raised.value.code() is grpc.StatusCode.NOT_FOUND
-    assert provider.calls == []
+    assert response.model == PUBLIC_MODEL
+    assert len(provider.calls) == 1
+    assert provider.calls[0][1].model == "no-such-model"
 
 
 async def test_a_provider_failure_keeps_its_own_status():

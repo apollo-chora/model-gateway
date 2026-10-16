@@ -248,12 +248,16 @@ async def test_an_array_prompt_is_refused_rather_than_narrowed(client, provider)
     assert provider.calls == []
 
 
-async def test_an_unknown_model_is_a_model_not_found_error(client, provider):
+async def test_an_unknown_model_is_ignored_and_the_request_is_served(client, provider):
     response = await post(client, payload(model="no-such-model"))
 
-    assert response.status == 404
-    assert (await response.json())["reason"] == "model_not_found"
-    assert provider.calls == []
+    assert response.status == 200
+    body = await response.json()
+    assert body["model"] == "text-default"
+    assert len(provider.calls) == 1
+    route, request = provider.calls[0]
+    assert route.operation is Operation.TEXT
+    assert request.model == "no-such-model"
 
 
 async def test_a_tool_call_answer_is_refused(client):
@@ -523,8 +527,8 @@ async def test_a_streaming_request_with_a_provider_that_cannot_stream_is_refused
     assert provider.calls == []
 
 
-async def test_a_streaming_request_with_an_unknown_model_is_refused_before_the_stream_starts():
-    """A pre-stream refusal is an ordinary error response, not an SSE stream."""
+async def test_a_streaming_request_with_an_unknown_model_still_starts_the_stream():
+    """An unknown model is ignored, so the stream is served like any other."""
     provider = FakeStreamingProvider()
     app = build_app(provider)
     await app.start()
@@ -533,9 +537,8 @@ async def test_a_streaming_request_with_an_unknown_model_is_refused_before_the_s
     finally:
         await app.stop()
 
-    assert response.status == 404
-    assert (await response.json())["reason"] == "model_not_found"
-    assert provider.calls == []
+    assert response.status == 200
+    assert len(provider.calls) == 1
 
 
 async def test_a_mid_stream_failure_ends_the_stream_without_done():
@@ -723,12 +726,13 @@ async def test_a_body_that_is_not_an_object_is_refused(client):
     assert (await response.json())["reason"] == "invalid_request"
 
 
-async def test_a_body_without_a_model_is_refused(client, provider):
+async def test_a_body_without_a_model_is_served(client, provider):
     response = await post(client, {"prompt": "Once upon a time"})
 
-    assert response.status == 400
-    assert (await response.json())["reason"] == "invalid_request"
-    assert provider.calls == []
+    assert response.status == 200
+    assert len(provider.calls) == 1
+    _, request = provider.calls[0]
+    assert request.model is None
 
 
 async def test_a_body_without_a_prompt_is_refused(client, provider):

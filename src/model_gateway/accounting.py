@@ -58,6 +58,7 @@ from model_gateway.domain import InvocationRequest, Usage
 from model_gateway.domain.embeddings import EmbeddingRequest
 from model_gateway.domain.images import ImageRequest
 from model_gateway.domain.serialization import as_int
+from model_gateway.registry import PUBLIC_MODEL_IDS
 
 logger = structlog.get_logger(__name__)
 
@@ -641,8 +642,9 @@ class AccountingRecorder:
         """
         _require_matching_operation(request, route)
         usage = outcome.usage
+        public_model = PUBLIC_MODEL_IDS[route.operation]
         cost, currency = (
-            self._pricing.estimate(usage, request.model)
+            self._pricing.estimate(usage, public_model)
             if self._pricing is not None
             else (None, None)
         )
@@ -651,7 +653,7 @@ class AccountingRecorder:
             timestamp=datetime.now(UTC),
             namespace=namespace,
             tenant=request.tenant_id if isinstance(request, InvocationRequest) else None,
-            public_model=request.model,
+            public_model=public_model,
             route_model_id=route.model_id,
             operation=route.operation,
             capabilities=frozenset(capability.value for capability in route.capabilities),

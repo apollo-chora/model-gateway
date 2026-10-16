@@ -646,17 +646,17 @@ class TestARefusal:
         assert error.value.code() == grpc.StatusCode.UNAUTHENTICATED
         assert provider.stream_calls == []
 
-    async def test_an_unknown_model_is_refused_and_reaches_no_provider(self, serve):
+    async def test_an_unknown_model_is_ignored_and_reaches_the_provider(self, serve):
         provider = ScriptedStreamProvider([content_event("Recursion", 0)])
         stub = await serve(provider)
 
-        with pytest.raises(grpc.aio.AioRpcError) as error:
-            await collect(
-                stub, invoke_request(model="no-such-model"), metadata=authorization()
-            )
+        chunks = await collect(
+            stub, invoke_request(model="no-such-model"), metadata=authorization()
+        )
 
-        assert error.value.code() == grpc.StatusCode.NOT_FOUND
-        assert provider.stream_calls == []
+        assert chunks[0].content_delta == "Recursion"
+        assert len(provider.stream_calls) == 1
+        assert provider.stream_calls[0][1].model == "no-such-model"
 
     async def test_a_body_tenant_never_reaches_the_provider(self, serve):
         """A request field cannot create a tenant: an anonymous call has none.

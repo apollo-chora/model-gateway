@@ -38,7 +38,7 @@ from model_gateway.errors import (
 )
 from model_gateway.inference import InferenceService
 from model_gateway.providers.base import AttemptContext, EmbeddingProvider
-from model_gateway.registry import ModelRegistry
+from model_gateway.registry import PUBLIC_MODEL_IDS, ModelRegistry
 from model_gateway.reliability import ConcurrencyLimiter
 
 VECTOR = (0.12, -0.34, 0.56)
@@ -91,7 +91,7 @@ def response_for(
 ) -> EmbeddingResponse:
     """The canonical answer a provider would build for this attempt."""
     return EmbeddingResponse(
-        model=request_.model,
+        model=PUBLIC_MODEL_IDS[route_.operation],
         upstream_model=route_.model_id,
         data=(
             data
@@ -155,23 +155,25 @@ def build(
 class TestTheModelAndTheCapability:
     """What is refused before a provider is called, and in which order."""
 
-    async def test_an_unknown_model_is_a_model_not_found_error(self) -> None:
+    async def test_an_unknown_model_is_ignored_and_the_operation_serves_it(self) -> None:
+        provider = FakeEmbeddingProvider(response_for)
+
+        result = await build((route(),), provider).embed(request(model="no-such-model"))
+
+        assert result.model == PUBLIC_MODEL
+        assert len(provider.calls) == 1
+        assert provider.calls[0][1].model == "no-such-model"
+
+    async def test_the_operations_routes_are_resolved_before_the_providers_capability_is_asked(
+        self,
+    ) -> None:
+        """An unconfigured operation is refused as that, whatever the provider can do."""
         provider = FakeEmbeddingProvider(lambda route_, request_, context: None)
 
-        with pytest.raises(ModelNotFoundError) as error:
-            await build((route(),), provider).embed(request(model="no-such-model"))
-
-        assert error.value.reason is ErrorReason.MODEL_NOT_FOUND
-        assert provider.calls == []
-
-    async def test_the_model_is_resolved_before_the_providers_capability_is_asked(self) -> None:
-        """An unknown model is refused as that, whatever the bound provider can do."""
-        provider = FakeTextProvider()
-
         with pytest.raises(ModelNotFoundError):
-            await build((route(),), provider).embed(request(model="no-such-model"))
+            await build((), provider).embed(request(model="no-such-model"))
 
-        assert provider.calls == 0
+        assert provider.calls == []
 
     async def test_a_provider_that_cannot_embed_is_refused(self) -> None:
         """The gateway does not answer an embeddings request with a fabricated vector."""

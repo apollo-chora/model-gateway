@@ -65,6 +65,7 @@ from blacksheep.scribe import write_sse
 from blacksheep.server.responses import json
 from blacksheep.server.routing import Router
 
+from model_gateway.config.routes import Operation
 from model_gateway.domain import (
     FinishReason,
     InvocationRequest,
@@ -76,6 +77,7 @@ from model_gateway.domain.streaming import ToolCallDelta
 from model_gateway.errors import GatewayError, InvalidArgumentError
 from model_gateway.http.auth import get_identity
 from model_gateway.http.dto import ChatCompletion, ChatRequest
+from model_gateway.registry import PUBLIC_MODEL_IDS
 from model_gateway.security.authorization import reconcile_identity
 from model_gateway.security.identity import caller_namespace, caller_tenant
 
@@ -202,7 +204,7 @@ async def _stream_chat_completion(
         return json(error.to_payload(), status=error.http_status)
 
     created = int(time.time())
-    model = invocation.model
+    model = PUBLIC_MODEL_IDS[Operation.TEXT]
 
     def sse_event(event: StreamEvent) -> TextServerSentEvent:
         return TextServerSentEvent(

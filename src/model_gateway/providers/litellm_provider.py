@@ -192,6 +192,7 @@ from model_gateway.providers.litellm_translation import (
     to_litellm_params,
     to_litellm_stream_params,
 )
+from model_gateway.registry import PUBLIC_MODEL_IDS
 from model_gateway.security.transport import (
     attempt_timeout,
     build_async_client,
@@ -755,7 +756,7 @@ def _from_litellm_embedding(
             "identifier before the call"
         )
     return EmbeddingResponse(
-        model=request.model,
+        model=PUBLIC_MODEL_IDS[route.operation],
         upstream_model=route.model_id,
         data=tuple(_embedding_from(item) for item in _embedding_records(response)),
         usage=from_litellm_embedding_usage(getattr(response, "usage", None)),

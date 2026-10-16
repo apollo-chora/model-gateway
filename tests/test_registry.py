@@ -506,6 +506,89 @@ def test_routes_for_raises_for_an_unconfigured_operation_and_returns_no_route():
 
 
 # ---------------------------------------------------------------------------
+# The routes behind one operation, resolved without a model ID
+# ---------------------------------------------------------------------------
+
+
+def test_routes_for_operation_returns_the_primary_route_first():
+    routes = parse_routes(
+        {**block(), **routes_json(entry(), entry(model_id="fallback-2"))},
+        resolver=public_resolver,
+    )
+    models = ModelRegistry(routes)
+
+    assert [
+        (route.index, route.model_id) for route in models.routes_for_operation(Operation.TEXT)
+    ] == [
+        (0, "primary-model"),
+        (1, "fallback-model"),
+        (2, "fallback-2"),
+    ]
+
+
+def test_routes_for_operation_returns_the_same_routes_as_routes_for():
+    models = registry(
+        {
+            **block(),
+            "EMBEDDINGS_ENDPOINT": "https://primary.example/v1",
+            "EMBEDDINGS_MODEL_ID": "primary-model",
+            "EMBEDDINGS_FORMAT": "openai",
+        }
+    )
+
+    assert models.routes_for_operation(Operation.TEXT) == models.routes_for("text-default")
+    assert models.routes_for_operation(Operation.EMBEDDINGS) == models.routes_for(
+        "embedding-default"
+    )
+
+
+def test_routes_for_operation_never_returns_a_route_of_another_operation():
+    models = registry(
+        {
+            **block(),
+            "EMBEDDINGS_ENDPOINT": "https://primary.example/v1",
+            "EMBEDDINGS_MODEL_ID": "primary-model",
+            "EMBEDDINGS_FORMAT": "openai",
+        }
+    )
+
+    assert [route.operation for route in models.routes_for_operation(Operation.TEXT)] == [
+        Operation.TEXT
+    ]
+    assert [
+        route.operation for route in models.routes_for_operation(Operation.EMBEDDINGS)
+    ] == [Operation.EMBEDDINGS]
+
+
+def test_routes_for_operation_raises_for_an_unconfigured_operation():
+    models = registry(block())
+
+    with pytest.raises(ModelNotFoundError) as error:
+        models.routes_for_operation(Operation.IMAGE)
+
+    assert "image-default" in error.value.message
+
+
+def test_routes_for_operation_raises_model_not_found_for_grounded_search():
+    """An operation the contract reserves but publishes no model ID for is a model-not-found.
+
+    The inference layer resolves the operation from the transport and looks its
+    routes up by operation. Grounded search is in the contract's vocabulary — the
+    proto enum reserves it — but the gateway exposes no public model ID for it, so
+    the lookup must fail with the gateway's own model-not-found error. A KeyError
+    here would be an implementation accident escaping as a 500: the operation is
+    a known member of the enum, it simply resolves to nothing.
+    """
+    models = registry(block())
+
+    with pytest.raises(ModelNotFoundError) as error:
+        models.routes_for_operation(Operation.GROUNDED_SEARCH)
+
+    assert error.value.reason is ErrorReason.MODEL_NOT_FOUND
+    assert "grounded-search" in error.value.message
+
+
+# ---------------------------------------------------------------------------
 # The model info itself
 # ---------------------------------------------------------------------------
 

@@ -181,11 +181,13 @@ class IdempotencyStatus(StrEnum):
 class InvocationRequest:
     """One canonical inference invocation.
 
-    ``model`` is the public model ID, never an upstream model name: callers name
-    one of the gateway's fixed logical models and the route resolver decides
-    which upstream serves it. Caller-supplied model names must
-    not be able to reach an unconfigured endpoint, so the canonical request
-    carries the public ID and nothing else.
+    ``model`` is the public model ID the caller named, or ``None`` when it named
+    none. It is never an upstream model name, and it is not what selects the
+    routes: the operation is resolved from the transport the call arrived on —
+    the HTTP endpoint or the gRPC method — and the routes configured for that
+    operation serve it. A stated model is carried for the caller's own
+    correlation and is ignored for routing, so a caller-supplied model name
+    cannot reach an unconfigured upstream endpoint.
 
     ``system_instruction`` is the invocation-level instruction.
     A ``Role.SYSTEM`` message inside ``messages`` is the conversation-level
@@ -217,7 +219,6 @@ class InvocationRequest:
       unvalidated.
     """
 
-    model: str
     messages: tuple[Message, ...]
     invocation_id: str | None = None
     tenant_id: str | None = None
@@ -231,9 +232,10 @@ class InvocationRequest:
     fallback_models: tuple[str, ...] = ()
     idempotency_key: str | None = None
     metadata: Mapping[str, JsonValue] = field(default_factory=FrozenJsonObject)
+    model: str | None = None
 
     def __post_init__(self) -> None:
-        model = as_required_text("model", self.model)
+        model = as_optional_text("model", self.model)
         messages = as_messages("messages", self.messages)
         if not messages:
             raise ValueError(
@@ -305,7 +307,7 @@ class InvocationRequest:
         reject_unknown_keys(where, payload, _REQUEST_KEYS)
 
         return cls(
-            model=as_required_text(f"{where} 'model'", payload.get("model")),
+            model=as_optional_text(f"{where} 'model'", payload.get("model")),
             messages=tuple(
                 Message.from_dict(item)
                 for item in as_sequence(f"{where} 'messages'", payload.get("messages"))
@@ -348,13 +350,16 @@ class InvocationRequest:
 class InvocationResponse:
     """The canonical result of one invocation.
 
-    ``model`` is the public model ID the caller asked for, and ``upstream_model``
-    is the route's own model ID — the one that actually served the request. The
-    two are reported separately because a fallback may have served it, and a
-    caller that cannot tell which upstream answered cannot reconcile its own
-    accounting. ``upstream_model`` is the route's
-    configured model ID, not the provider-prefixed ``<format>/<model_id>`` string
-    the binding builds, because the provider format is a binding detail.
+    ``model`` is the public model ID of the operation that served the invocation —
+    the registry's fixed ID for the text operation, stated by the gateway rather
+    than by the caller, because the operation is resolved from the transport and
+    a model ID the caller may state is carried for correlation and ignored for
+    routing — and ``upstream_model`` is the route's own model ID, the one that
+    actually served the request. The two are reported separately because a
+    fallback may have served it, and a caller that cannot tell which upstream
+    answered cannot reconcile its own accounting. ``upstream_model`` is the
+    route's configured model ID, not the provider-prefixed ``<format>/<model_id>``
+    string the binding builds, because the provider format is a binding detail.
 
     ``content`` is the model's answer as an ordered sequence of output items, and
     it is the only place the answer is stored. Text, images, refusals and tool

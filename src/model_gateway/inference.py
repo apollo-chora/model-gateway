@@ -3,11 +3,15 @@
 The service owns policy; the provider owns translation. That split is the
 boundary, and this module is the policy side of it:
 
-* **Routing.** The public model ID in the request is resolved to the routes
-  configured for its operation by the registry. An unknown ID is a
+* **Routing.** The operation is resolved from the transport the call arrived
+  on — the HTTP endpoint or the gRPC method — and the registry's
+  :meth:`~model_gateway.registry.ModelRegistry.routes_for_operation` resolves
+  it to that operation's configured routes. A model ID the caller may state is
+  carried for the caller's own correlation and is ignored for routing, so a
+  caller-supplied model name cannot reach an unconfigured upstream endpoint;
+  an operation with no configured route is a
   :class:`~model_gateway.errors.ModelNotFoundError` raised here, before any
-  provider is called, so a caller-supplied model name cannot reach an
-    unconfigured upstream endpoint.
+  provider is called.
 * **Capability enforcement.** The request is validated against the primary
   route's capability contract before anything is selected. The registry
     advertises the primary route's capabilities as the public model's own, so
@@ -26,10 +30,10 @@ boundary, and this module is the policy side of it:
   a provider never reads a deadline out of configuration it does not own, and the
   core never wraps the call in a timeout the provider cannot see.
 * **Normalisation.** The provider's answer comes back as upstream data and is
-  re-normalised at this boundary: the public model that was asked for, the
-  upstream model that actually served it and the invocation's own reliability
-  facts are the gateway's to state, because the gateway chose the route and made
-    the attempts.
+  re-normalised at this boundary: the public model of the operation that
+  served it, the upstream model that actually served it and the invocation's
+  own reliability facts are the gateway's to state, because the gateway chose
+  the route and made the attempts.
 * **Reliability.** One invocation has one deadline, one retry loop and one
     attempt count, and the loop is built from the
   primitives of :mod:`model_gateway.reliability`. :func:`_select_routes_for` decides
@@ -72,9 +76,10 @@ as one rather than answered from the wrong answer; the gateway-minted invocation
 identifier is not part of the fingerprint, so a retry carrying a freshly minted
 one is still the same request. Only a completed answer is recorded, so a retry
 after a transient failure is allowed to retry and the gateway claims no
-exactly-once upstream execution. The record is consulted after the model is
-resolved and before any provider is called, so an unknown model is still a
-model-not-found error even when the key has a cached record. Streaming is
+exactly-once upstream execution. The record is consulted after the operation's
+routes are resolved and before any provider is called, so an operation with no
+configured route is still a model-not-found error even when the key has a
+cached record. Streaming is
 deliberately excluded: a replayed stream would present an answer that was never
 produced token by token in this call as a stream, which the gateway does not do.
 
@@ -89,8 +94,8 @@ at the attempt in flight, releases the concurrency slot that attempt held, and
 makes no further attempt.
 
 **Embeddings are served under the same policy.** :meth:`InferenceService.embed`
-is the embeddings operation's entry point, and it is the same walk: the public
-model is resolved to the routes configured for embeddings, the primary route's
+is the embeddings operation's entry point, and it is the same walk: the
+operation's routes are resolved from the transport, the primary route's
 capability contract is enforced, one deadline covers the invocation, and every
 attempt is made inside a concurrency slot whose wait is bounded by what is left
 of that deadline. The differences are the capability the route must declare
@@ -116,8 +121,8 @@ The embeddings path makes the same claim and no stronger one: it does not offer
 exactly-once upstream execution either.
 
 **Images are served under the same policy.** :meth:`InferenceService.generate`
-is the image operation's entry point, and it is the same walk: the public model
-is resolved to the routes configured for the image operation, the provider's
+is the image operation's entry point, and it is the same walk: the operation's
+routes are resolved from the transport, the provider's
 capability is asked before anything is attempted, the primary route's
 capability contract is enforced — which for this operation means the
 ``generation`` capability, and only that — and one deadline covers the
@@ -163,7 +168,7 @@ from model_gateway.accounting import (
     InvocationOutcome,
 )
 from model_gateway.capabilities import Capability
-from model_gateway.config.routes import Route
+from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import (
     IdempotencyStatus,
     ImagePart,
@@ -203,7 +208,7 @@ from model_gateway.providers.base import (
     TextProvider,
     _is_usable_budget,
 )
-from model_gateway.registry import ModelRegistry
+from model_gateway.registry import PUBLIC_MODEL_IDS, ModelRegistry
 from model_gateway.reliability import (
     ConcurrencyLimiter,
     Deadline,
@@ -798,13 +803,17 @@ class InferenceService:
         namespace: str | None = None,
         tenant: str | None = None,
     ) -> InvocationResponse:
-        """Invoke the public model named by ``request.model``.
+        """Invoke the text operation's routes for one canonical invocation.
 
-        Resolves the ID to its configured routes, validates the request against
-        the primary route's capability contract — the contract the registry
-        advertises for the model — then serves the invocation under one deadline
-        and one retry loop. Raises
-        :class:`~model_gateway.errors.ModelNotFoundError` for an unknown ID and
+        The operation is this method's, so the routes configured for
+        :attr:`~model_gateway.config.routes.Operation.TEXT` serve the request
+        whatever ``request.model`` states — a stated model is carried for the
+        caller's own correlation and is ignored for routing. The request is
+        validated against the primary route's capability contract — the
+        contract the registry advertises for the public model — then served
+        under one deadline and one retry loop. Raises
+        :class:`~model_gateway.errors.ModelNotFoundError` when the text
+        operation has no configured routes and
         :class:`~model_gateway.errors.CapabilityError` when the primary route
         cannot honour the request; otherwise raises the failure of the last
         attempt that was made, a
@@ -842,13 +851,13 @@ class InferenceService:
         claim so a later caller may retry, and gives every waiter that failure
         rather than starting another provider attempt inside the same request. The
         gateway therefore claims no exactly-once upstream execution. The claim
-        is consulted after the model is resolved and before any provider is
-        called, so an unknown model is a
+        is consulted after the operation's routes are resolved and before any
+        provider is called, so an operation with no configured route is a
         :class:`~model_gateway.errors.ModelNotFoundError` even when the key has
         a cached record. A request without a key is unaffected by all of this:
         it is never recorded and reports ``NOT_APPLICABLE``.
         """
-        routes = self._registry.routes_for(request.model)
+        routes = self._registry.routes_for_operation(Operation.TEXT)
         # One deadline is anchored here, before admission, so the wait for a
         # tenant slot draws from the same budget the walk then spends rather
         # than from a full timeout of its own followed by a fresh one.
@@ -1037,22 +1046,25 @@ class InferenceService:
         namespace: str | None = None,
         tenant: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Invoke the public model named by ``request.model``, streaming the answer.
+        """Invoke the text operation's routes for one canonical invocation, streaming.
 
         The streaming counterpart of :meth:`invoke`, under the same policy: the
-        ID is resolved to its configured routes, the request is validated against
+        operation is this method's, so the routes configured for
+        :attr:`~model_gateway.config.routes.Operation.TEXT` serve the request
+        whatever ``request.model`` states, the request is validated against
         the primary route's capability contract, and the invocation runs under
         one deadline and one retry loop. The
         difference is what a failure may do once the answer has begun.
 
-        **The public model is resolved before streaming eligibility is asked.**
-        A request naming a model the gateway does not expose is a
+        **The operation's routes are resolved before streaming eligibility is
+        asked.** An operation with no configured route is a
         :class:`~model_gateway.errors.ModelNotFoundError`, and it is refused as
-        that whatever the bound provider can do: the request addresses a resource
-        that does not exist, so whether some other model could have been streamed
-        has no bearing on the answer. Asking the provider's capability first would
-        report a streaming refusal for a model that is not even configured, which
-        is a less accurate answer to a question the request already answered.
+        that whatever the bound provider can do: the request addresses an
+        operation that is not served, so whether some other operation could have
+        been streamed has no bearing on the answer. Asking the provider's
+        capability first would report a streaming refusal for an operation that
+        is not even configured, which is a less accurate answer to a question
+        the request already answered.
 
         **No fallback after the first output.** Before the first event reaches
         the caller, a retryable or fallback-eligible failure may still move to
@@ -1067,8 +1079,9 @@ class InferenceService:
         message, rather than stopping silently or mislabelling the failure as a
         finish.
 
-        Raises :class:`~model_gateway.errors.ModelNotFoundError` for an unknown
-        ID, :class:`~model_gateway.errors.CapabilityError` when the primary route
+        Raises :class:`~model_gateway.errors.ModelNotFoundError` when the
+        text operation has no configured routes,
+        :class:`~model_gateway.errors.CapabilityError` when the primary route
         cannot honour the request or the provider cannot stream, and otherwise
         the failure of the last attempt — surfaced the same way :meth:`invoke`
         surfaces it, except that a failure after the first output is reported
@@ -1119,7 +1132,7 @@ class InferenceService:
         produced, so the refusal reaches the caller as an ordinary error response
         rather than as a stream that failed.
         """
-        routes = self._registry.routes_for(request.model)
+        routes = self._registry.routes_for_operation(Operation.TEXT)
         # Admission comes first, before the streaming capability is asked: the
         # caller's own limit is a fact about the caller and is the first thing to
         # say, and a caller over its rate should learn that rather than a fact
@@ -1156,21 +1169,24 @@ class InferenceService:
         namespace: str | None = None,
         tenant: str | None = None,
     ) -> EmbeddingResponse:
-        """Embed the texts named by ``request`` through the public model's routes.
+        """Embed the texts named by ``request`` through the embeddings operation's routes.
 
         The embeddings counterpart of :meth:`invoke`, under the same policy: the
-        public model ID is resolved to the routes configured for the embeddings
-        operation, the request is validated against the primary route's
+        operation is this method's, so the routes configured for
+        :attr:`~model_gateway.config.routes.Operation.EMBEDDINGS` serve the request
+        whatever ``request.model`` states — a stated model is carried for the
+        caller's own correlation and is ignored for routing. The request is
+        validated against the primary route's
         capability contract — which for this operation means the ``embeddings``
         capability, and only that — and the invocation runs under one deadline
         and one retry loop.
 
-        **The model is resolved before the provider's capability is asked.** A
-        request naming a model the gateway does not expose is a
+        **The operation's routes are resolved before the provider's capability
+        is asked.** An embeddings operation with no configured route is a
         :class:`~model_gateway.errors.ModelNotFoundError`, and it is refused as
-        that whatever the bound provider can do: the request addresses a
-        resource that does not exist, so whether some other operation could have
-        been served has no bearing on the answer.
+        that whatever the bound provider can do: the request addresses an
+        operation this deployment does not serve, so whether the provider could
+        embed has no bearing on the answer.
 
         **A provider that cannot embed is refused, never improvised.** The
         gateway does not answer an embeddings request with a vector it invented
@@ -1211,14 +1227,15 @@ class InferenceService:
         that upstream's answer, so the invocation falls back to another eligible
         route rather than retrying the route that answered wrongly.
 
-        The response states the public model that was asked for, the upstream
-        model that actually served it, and the invocation identifier the gateway
-        minted for this call. It carries no attempt count or fallback flag: the
-        canonical embeddings response has no field for them, and the gateway does
-        not publish a number the caller's contract does not define.
+        The response states the public model of the embeddings operation, the
+        upstream model that actually served it, and the invocation identifier the
+        gateway minted for this call. It carries no attempt count or fallback
+        flag: the canonical embeddings response has no field for them, and the
+        gateway does not publish a number the caller's contract does not define.
 
-        Raises :class:`~model_gateway.errors.ModelNotFoundError` for an unknown
-        ID, :class:`~model_gateway.errors.CapabilityError` when the primary route
+        Raises :class:`~model_gateway.errors.ModelNotFoundError` when the
+        embeddings operation has no configured routes,
+        :class:`~model_gateway.errors.CapabilityError` when the primary route
         cannot serve embeddings, does not accept a stated caller dimension, or
         the provider cannot embed, and otherwise the failure of the last
         attempt — surfaced exactly as :meth:`invoke` surfaces it, including the
@@ -1242,7 +1259,7 @@ class InferenceService:
         request does not carry and the authenticated caller
         does.
         """
-        routes = self._registry.routes_for(request.model)
+        routes = self._registry.routes_for_operation(Operation.EMBEDDINGS)
         # Admission comes first, before the provider's capability and the request's
         # own constraints are asked: the caller's limit is a fact about the caller
         # and is the first thing to say, and a caller over its rate should learn
@@ -1258,7 +1275,7 @@ class InferenceService:
         _reject_unhonourable_encoding(request)
         plan = _select_routes_for(
             routes,
-            request.model,
+            Operation.EMBEDDINGS,
             (Capability.EMBEDDINGS,),
             caller_dimension=request.dimensions is not None,
         )
@@ -1280,7 +1297,7 @@ class InferenceService:
                 )
 
             result, route, state = await self._walk(
-                request.model, plan, serve, deadline=deadline
+                Operation.EMBEDDINGS, plan, serve, deadline=deadline
             )
             self._record(request, _outcome_of(result), route, state, namespace or "", started)
             return result
@@ -1294,21 +1311,24 @@ class InferenceService:
         namespace: str | None = None,
         tenant: str | None = None,
     ) -> ImageResponse:
-        """Generate the images the prompt names through the public model's routes.
+        """Generate the images the prompt names through the image operation's routes.
 
         The image operation's counterpart of :meth:`invoke`, under the same
-        policy: the public model ID is resolved to the routes configured for
-        the image operation, the request is validated against the primary
+        policy: the operation is this method's, so the routes configured for
+        :attr:`~model_gateway.config.routes.Operation.IMAGE` serve the request
+        whatever ``request.model`` states — a stated model is carried for the
+        caller's own correlation and is ignored for routing. The request is
+        validated against the primary
         route's capability contract — which for this operation means the
         ``generation`` capability, and only that — and the invocation runs
         under one deadline and one retry loop.
 
-        **The model is resolved before the provider's capability is asked.** A
-        request naming a model the gateway does not expose is a
+        **The operation's routes are resolved before the provider's capability
+        is asked.** An image operation with no configured route is a
         :class:`~model_gateway.errors.ModelNotFoundError`, and it is refused
-        as that whatever the bound provider can do: the request addresses a
-        resource that does not exist, so whether some other operation could
-        have been served has no bearing on the answer.
+        as that whatever the bound provider can do: the request addresses an
+        operation this deployment does not serve, so whether the provider could
+        generate has no bearing on the answer.
 
         **A provider that cannot generate images is refused, never
         improvised.** The gateway does not answer an image request with an
@@ -1327,15 +1347,16 @@ class InferenceService:
         in that upstream's answer, so the invocation walks to another eligible
         route rather than retrying the route that answered wrongly.
 
-        The response states the public model that was asked for, the upstream
-        model that actually served it, and the invocation identifier the
+        The response states the public model of the image operation, the
+        upstream model that actually served it, and the invocation identifier the
         gateway minted for this call. It carries no attempt count or fallback
         flag: the canonical image response has no field for them, and the
         gateway does not publish a number the caller's contract does not
         define.
 
-        Raises :class:`~model_gateway.errors.ModelNotFoundError` for an
-        unknown ID, :class:`~model_gateway.errors.CapabilityError` when the
+        Raises :class:`~model_gateway.errors.ModelNotFoundError` when the
+        image operation has no configured routes,
+        :class:`~model_gateway.errors.CapabilityError` when the
         primary route cannot serve image generation or the provider cannot
         generate, and otherwise the failure of the last attempt — surfaced
         exactly as :meth:`invoke` surfaces it, including the retry and fallback
@@ -1358,13 +1379,13 @@ class InferenceService:
         ``namespace`` is the trusted principal the invocation acted under, which
         the image request does not carry and the authenticated caller does.
         """
-        routes = self._registry.routes_for(request.model)
+        routes = self._registry.routes_for_operation(Operation.IMAGE)
         # Admission comes first, before the provider's capability and the route's
         # are asked, for the reason :meth:`embed` gives.
         deadline = Deadline.after(self._attempt_timeout)
         self._admit(namespace or "", tenant)
         _require_image_provider(self._provider)
-        plan = _select_routes_for(routes, request.model, (Capability.GENERATION,))
+        plan = _select_routes_for(routes, Operation.IMAGE, (Capability.GENERATION,))
         started = time.monotonic()
 
         async with self._tenant_slot(namespace or "", tenant, deadline):
@@ -1382,7 +1403,7 @@ class InferenceService:
                 )
 
             result, route, state = await self._walk(
-                request.model, plan, serve, deadline=deadline
+                Operation.IMAGE, plan, serve, deadline=deadline
             )
             self._record(request, _outcome_of(result), route, state, namespace or "", started)
             return result
@@ -1406,7 +1427,7 @@ class InferenceService:
         ``fallback_used`` come from rather than being assumed.
         """
         result, answered_by, state = await self._walk(
-            request.model,
+            Operation.TEXT,
             _select_routes(routes, request),
             self._text_serve(request),
             deadline=deadline,
@@ -1415,7 +1436,7 @@ class InferenceService:
 
     async def _walk(
         self,
-        model: str,
+        operation: Operation,
         plan: _RoutePlan,
         serve: _Serve[_Result],
         *,
@@ -1431,8 +1452,8 @@ class InferenceService:
         which is a rule about output the caller has already seen rather than a
         different reliability policy.
 
-        ``model`` is the public model ID the request named, carried so a refusal
-        can name the resource it was about without the request itself; ``plan``
+        ``operation`` is the operation being served, carried so a refusal can
+        name the public model it was about without the request itself; ``plan``
         is which routes may serve it; ``serve`` performs one attempt on one route
         and returns the finished result, the place each operation's own answer
         shape is handled.
@@ -1494,7 +1515,7 @@ class InferenceService:
         for position, route in enumerate((plan.primary, *plan.fallbacks)):
             for retry in range(self._retry_count + 1):
                 if _budget_is_spent(deadline.budget_for(self._attempt_timeout)):
-                    raise _deadline_exceeded(model, state) from failure
+                    raise _deadline_exceeded(operation, state) from failure
                 state = state.with_attempt(on_fallback=position > 0)
                 try:
                     result, answered_by = await serve(route, state, deadline)
@@ -1516,7 +1537,7 @@ class InferenceService:
                 return result, answered_by, state
 
         if failure is None:
-            raise _deadline_exceeded(model, state)
+            raise _deadline_exceeded(operation, state)
         raise failure
 
     def _text_serve(
@@ -1567,7 +1588,7 @@ class InferenceService:
         instead.
         """
         async with self._attempt_context(
-            request.model, request.invocation_id, state, deadline
+            Operation.TEXT, request.invocation_id, state, deadline
         ) as context:
             return await self._provider.complete(route, request, context)
 
@@ -1597,7 +1618,7 @@ class InferenceService:
         response must state.
         """
         async with self._attempt_context(
-            request.model, invocation_id, state, deadline
+            Operation.EMBEDDINGS, invocation_id, state, deadline
         ) as context:
             return await self._provider.embed(route, request, context)
 
@@ -1627,14 +1648,14 @@ class InferenceService:
         canonical response must state.
         """
         async with self._attempt_context(
-            request.model, invocation_id, state, deadline
+            Operation.IMAGE, invocation_id, state, deadline
         ) as context:
             return await self._provider.generate(route, request, context)
 
     @asynccontextmanager
     async def _attempt_context(
         self,
-        model: str,
+        operation: Operation,
         invocation_id: str | None,
         state: InvocationState,
         deadline: Deadline,
@@ -1662,15 +1683,15 @@ class InferenceService:
         and a :class:`~model_gateway.errors.DeadlineExceededError` is raised
         instead.
 
-        ``model`` is the public model ID the invocation named, carried so the
-        refusal can name the resource it was about; ``invocation_id`` is the
+        ``operation`` is the operation this attempt serves, carried so the
+        refusal can name the public model it was about; ``invocation_id`` is the
         gateway's own identifier for the invocation, which a text request carries
         and an embeddings request does not.
         """
         async with self._limiter.slot(deadline.remaining()):
             budget = deadline.budget_for(self._attempt_timeout)
             if _budget_is_spent(budget):
-                raise _deadline_exceeded(model, state)
+                raise _deadline_exceeded(operation, state)
             context = AttemptContext(
                 invocation_id=invocation_id,
                 attempt_number=state.attempt_count,
@@ -1767,7 +1788,7 @@ class InferenceService:
         for position, route in enumerate((plan.primary, *plan.fallbacks)):
             for retry in range(self._retry_count + 1):
                 if _budget_is_spent(deadline.budget_for(self._attempt_timeout)):
-                    raise _deadline_exceeded(request, state) from failure
+                    raise _deadline_exceeded(Operation.TEXT, state) from failure
                 state = state.with_attempt(on_fallback=position > 0)
                 attempt_events = self._stream_attempt(route, request, state, deadline)
                 try:
@@ -1825,7 +1846,7 @@ class InferenceService:
                 return
 
         if failure is None:
-            raise _deadline_exceeded(request, state)
+            raise _deadline_exceeded(Operation.TEXT, state)
         raise failure
 
     async def _stream_attempt(
@@ -1853,7 +1874,7 @@ class InferenceService:
         async with self._limiter.slot(deadline.remaining()):
             budget = deadline.budget_for(self._attempt_timeout)
             if _budget_is_spent(budget):
-                raise _deadline_exceeded(request, state)
+                raise _deadline_exceeded(Operation.TEXT, state)
             context = AttemptContext(
                 invocation_id=request.invocation_id,
                 attempt_number=state.attempt_count,
@@ -1947,13 +1968,15 @@ async def _back_off(attempt: int, base_ms: float, deadline: Deadline) -> bool:
     return True
 
 
-def _deadline_exceeded(model: str, state: InvocationState) -> DeadlineExceededError:
+def _deadline_exceeded(operation: Operation, state: InvocationState) -> DeadlineExceededError:
     """The refusal for an invocation whose budget is gone.
 
     The message and the details are built from gateway vocabulary and name only
-    the public model and the number of gateway attempts made, so no upstream
-    endpoint, model or credential can travel through them.
+    the public model of the operation being served and the number of gateway
+    attempts made, so no upstream endpoint, model or credential can travel
+    through them.
     """
+    model = PUBLIC_MODEL_IDS[operation]
     return DeadlineExceededError(
         f"the invocation deadline for model {model!r} expired before a provider "
         f"could serve it",
@@ -2032,12 +2055,12 @@ def _select_routes(routes: tuple[Route, ...], request: InvocationRequest) -> _Ro
     Raises :class:`~model_gateway.errors.CapabilityError` when the primary route
     cannot serve the request.
     """
-    return _select_routes_for(routes, request.model, _required_capabilities(request))
+    return _select_routes_for(routes, Operation.TEXT, _required_capabilities(request))
 
 
 def _select_routes_for(
     routes: tuple[Route, ...],
-    model: str,
+    operation: Operation,
     required: tuple[Capability, ...],
     *,
     caller_dimension: bool = False,
@@ -2047,8 +2070,8 @@ def _select_routes_for(
     ``required`` is the capability set the operation asks of the route that
     serves it: the text operation's own list for a chat invocation
     (:func:`_required_capabilities`), and the single ``embeddings`` capability
-    for an embeddings one. ``model`` is the public model ID the request named,
-    carried so a refusal names the resource it was about. ``caller_dimension``
+    for an embeddings one. ``operation`` is the operation being served, carried
+    so a refusal names the public model it was about. ``caller_dimension``
     is whether an embeddings request states a caller dimension, which only a
     route that accepts the ``dimensions`` parameter can honour unchanged.
 
@@ -2081,11 +2104,11 @@ def _select_routes_for(
     this order when the routes before them cannot serve the invocation.
     """
     if not routes:
-        raise _no_eligible_route(model, None)
+        raise _no_eligible_route(operation, None)
     primary = routes[0]
     missing = _first_missing_capability(primary, required)
     if missing is not None:
-        raise _no_eligible_route(model, missing)
+        raise _no_eligible_route(operation, missing)
     return _RoutePlan(
         primary=primary,
         fallbacks=tuple(
@@ -2127,8 +2150,8 @@ def _first_missing_capability(
     return None
 
 
-def _no_eligible_route(model: str, missing: Capability | None) -> CapabilityError:
-    """The refusal for a request the advertised model cannot serve.
+def _no_eligible_route(operation: Operation, missing: Capability | None) -> CapabilityError:
+    """The refusal for a request the operation's advertised model cannot serve.
 
     ``missing`` is the first capability the primary route lacks for this request,
     which is the capability the public model does not advertise. It is ``None``
@@ -2139,6 +2162,7 @@ def _no_eligible_route(model: str, missing: Capability | None) -> CapabilityErro
     public contract is the primary route's, and a fallback may preserve it but
     never expand it.
     """
+    model = PUBLIC_MODEL_IDS[operation]
     if missing is None:
         return CapabilityError(
             f"no route is configured for {model!r}, so this invocation cannot be served"
@@ -2225,11 +2249,17 @@ def _normalise(
     """Stamp the gateway's own facts onto a provider's answer.
 
     A provider's response is upstream data, never forwarded unchanged. The
-    gateway chose the route, so it states which public model was
-    asked for and which upstream model answered; and the gateway made the
+    gateway chose the route, so it states which public model the operation
+    resolves to and which upstream model answered; and the gateway made the
     attempts, so ``attempt_count`` and ``fallback_used`` are read from ``state``
     rather than assumed. A provider cannot report how many times the gateway
     called, and neither may this function invent the number.
+
+    The public model stated is the operation's own —
+    :data:`~model_gateway.registry.PUBLIC_MODEL_IDS` resolved through the route —
+    never a value the provider echoed and never a model ID the caller supplied:
+    the operation was resolved from the transport, so the answer reports the
+    public model of the operation that served it.
 
     ``invocation_id`` is always the gateway's own, never the provider's. The
     gateway mints the identifier before the call, and the response field is the
@@ -2243,7 +2273,7 @@ def _normalise(
     """
     return replace(
         response,
-        model=request.model,
+        model=PUBLIC_MODEL_IDS[route.operation],
         upstream_model=route.model_id,
         invocation_id=request.invocation_id,
         attempt_count=state.attempt_count,
@@ -2300,9 +2330,10 @@ def _reject_unsupported_dimension(request: EmbeddingRequest, primary: Route) -> 
     if request.dimensions is None or primary.supports_dimensions_param:
         return
     raise CapabilityError(
-        f"model {request.model!r} does not accept a 'dimensions' parameter: its primary route "
-        f"does not declare supports_dimensions_param, so the request is refused rather than "
-        f"forwarded against the route's configuration or silently dropped",
+        f"model {PUBLIC_MODEL_IDS[primary.operation]!r} does not accept a 'dimensions' "
+        f"parameter: its primary route does not declare supports_dimensions_param, so the "
+        f"request is refused rather than forwarded against the route's configuration or "
+        f"silently dropped",
         details={"capability": "dimensions", "parameter": "dimensions"},
     )
 
@@ -2339,8 +2370,8 @@ def _normalise_images(
 
     A provider's image answer is upstream data, never forwarded unchanged
     , and the two facts a provider cannot state are the
-    gateway's own: which public model was asked for and which upstream model
-    answered, and which invocation this answer belongs to.
+    gateway's own: which public model the operation resolves to and which
+    upstream model answered, and which invocation this answer belongs to.
 
     The answer is checked against the request before anything is stamped: a
     caller that stated ``n`` asked for exactly that many images, and an
@@ -2360,7 +2391,7 @@ def _normalise_images(
     _check_image_count(request, response)
     return replace(
         response,
-        model=request.model,
+        model=PUBLIC_MODEL_IDS[route.operation],
         upstream_model=route.model_id,
         invocation_id=invocation_id,
     )
@@ -2398,8 +2429,8 @@ def _normalise_embeddings(
 
     A provider's embeddings answer is upstream data, never forwarded unchanged
     , and the two facts a provider cannot state are the gateway's
-    own: which public model was asked for and which upstream model answered, and
-    which invocation this answer belongs to.
+    own: which public model the operation resolves to and which upstream model
+    answered, and which invocation this answer belongs to.
 
     The vectors are placed at the positions the upstream reported, so ``data`` is
     in the caller's input order whatever order the upstream used, and each
@@ -2445,7 +2476,7 @@ def _normalise_embeddings(
     )
     return replace(
         response,
-        model=request.model,
+        model=PUBLIC_MODEL_IDS[route.operation],
         upstream_model=route.model_id,
         invocation_id=invocation_id,
         data=_ordered_vectors(request.input, response.data, expected=expected_dimensions),
