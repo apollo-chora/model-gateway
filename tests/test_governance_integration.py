@@ -207,6 +207,18 @@ class StubConnection:
     def claimed_debit(self) -> int:
         return len([call for call in self.calls if "INSERT INTO invoke_debit_claims" in call[0]])
 
+    def egress_reads(self) -> int:
+        return len([call for call in self.calls if "platform_egress_killswitch" in call[0]])
+
+    def budget_window_reads(self) -> int:
+        return len(
+            [
+                call
+                for call in self.calls
+                if "per_tenant_llm_budget" in call[0] and "SELECT" in call[0]
+            ]
+        )
+
     def read_containment(self) -> int:
         return len([call for call in self.calls if "companion_suspension" in call[0]])
 
@@ -1395,3 +1407,129 @@ class TestGroundedSearchDispatchClaim:
 
         # The dispatch was claimed exactly once, before the Exa call.
         assert connection.claimed_debit() == 1
+
+    async def test_the_claim_is_recorded_before_the_exa_call_begins(self) -> None:
+        """The adapter sees the claim in the ledger at the moment it is invoked.
+
+        The ordering is the whole of the dedup contract: the claim must be
+        durable before the Exa call starts, so a crash after the call cannot
+        leave an unbilled search and a redelivery cannot be charged twice. The
+        adapter asserts it from its own call record rather than the test
+        asserting it after the fact.
+        """
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        connection.budget_rows = [_budget_window(spent_micros=0, policy=BudgetPolicy.BLOCK)]
+
+        class _ClaimCheckingAdapter:
+            """An adapter that asserts the dispatch was claimed before it ran."""
+
+            def __init__(self, outcome: object, connection: StubConnection) -> None:
+                self._outcome = outcome
+                self._connection = connection
+                self.calls: list[object] = []
+
+            async def search(self, grounded_request) -> GroundedSearchResult:
+                assert self._connection.claimed_debit() == 1
+                self.calls.append(grounded_request)
+                return self._outcome
+
+        adapter = _ClaimCheckingAdapter(_grounded_result(), connection)
+        handler = _grounded_handler(connection, adapter)
+
+        async with _serve_grounded(handler) as stub:
+            response = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-1"), metadata=_bearer()
+            )
+
+        assert response.grounded_answer == "Paris is the capital."
+        assert len(adapter.calls) == 1
+
+    async def test_a_redelivered_search_skips_the_egress_gate(self) -> None:
+        """A redelivery is deduped before the egress gate, not refused by it.
+
+        The operator engages the kill switch between the two deliveries, so the
+        gate the first call passed would now refuse the second. The redelivery
+        is still answered with the deduped response — the claim short-circuits
+        the gates — and the kill switch is not read a second time.
+        """
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        connection.budget_rows = [_budget_window(spent_micros=0, policy=BudgetPolicy.BLOCK)]
+        # The first claim wins the key; the second loses it and is deduped.
+        connection.claim_statuses = ["INSERT 0 1", "INSERT 0 0"]
+        adapter = _ScriptedAdapter(_grounded_result())
+        handler = _grounded_handler(connection, adapter)
+
+        async with _serve_grounded(handler) as stub:
+            first = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-1"), metadata=_bearer()
+            )
+            reads_after_first = connection.egress_reads()
+            connection.kill_switch_row = {"engaged": True}
+            second = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-1"), metadata=_bearer()
+            )
+
+        # The redelivery is answered with the deduped response, not refused by
+        # the gate that would now deny it, and the Exa call was skipped.
+        assert first.grounded_answer == "Paris is the capital."
+        assert second.grounded_answer == ""
+        assert len(adapter.calls) == 1
+        # The gate was read once, by the first call only: the redelivery's
+        # dedup happened before any egress read.
+        assert reads_after_first == 1
+        assert connection.egress_reads() == 1
+
+    async def test_a_redelivered_search_skips_the_budget_decision(self) -> None:
+        """A redelivery is deduped before the budget decision, not refused by it.
+
+        The tenant's window is exhausted between the two deliveries, so the
+        budget decision the first call passed would now refuse the second. The
+        redelivery is still answered with the deduped response, and the budget
+        is not read a second time.
+        """
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        connection.budget_rows = [_budget_window(spent_micros=0, policy=BudgetPolicy.BLOCK)]
+        # The first claim wins the key; the second loses it and is deduped.
+        connection.claim_statuses = ["INSERT 0 1", "INSERT 0 0"]
+        adapter = _ScriptedAdapter(_grounded_result())
+        handler = _grounded_handler(connection, adapter)
+
+        async with _serve_grounded(handler) as stub:
+            first = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-1"), metadata=_bearer()
+            )
+            reads_after_first = connection.budget_window_reads()
+            connection.budget_rows = [
+                _budget_window(spent_micros=2_000_000, policy=BudgetPolicy.BLOCK)
+            ]
+            second = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-1"), metadata=_bearer()
+            )
+
+        # The redelivery is answered with the deduped response, not refused with
+        # the budget_exhausted the exhausted window would declare.
+        assert first.grounded_answer == "Paris is the capital."
+        assert second.grounded_answer == ""
+        assert len(adapter.calls) == 1
+        # The budget was read once, by the first call only: the redelivery's
+        # dedup happened before any budget read.
+        assert reads_after_first == 1
+        assert connection.budget_window_reads() == 1

@@ -859,3 +859,63 @@ class TestGroundedSearchRetryDoesNotDoubleCharge:
         assert len(await _outbox_rows(db, _TENANT)) == 2
         assert await _spent_micros(db, _TENANT) == 20_000
         assert len(mana_client.debit_calls) == 2
+
+    async def test_a_redelivered_search_after_the_kill_switch_engages_is_deduped_not_refused(
+        self, postgres_db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A redelivery after the egress gate closes is deduped, not refused.
+
+        The first search runs with the egress entitlement in place and settles.
+        The operator then engages the platform kill switch, so the gate the
+        first call passed would now refuse every tenant's search. A redelivery
+        with the same invocation id is still answered with the deduped response
+        — the claim short-circuits the gates — and settles nothing a second
+        time.
+        """
+        db = postgres_db
+        await _insert_egress_policy(db, _TENANT, enabled=True, ceiling=50)
+        await _insert_budget(db, _TENANT, budget_micros=1_000_000, spent_micros=0)
+        mana_client = _StubManaClient()
+        manager = _manager(db, mana=ManaMeter(mana_client))
+        adapter = _ScriptedAdapter(
+            GroundedSearchResult(
+                invocation_id="inv-grounded-e2e",
+                grounded_answer="Paris is the capital.",
+                web_search_queries=("What is the capital of France?",),
+                usage=GroundedUsage(grounding_units=1, cost_micros=10_000),
+                vendor="exa",
+                model_version="synthesis-model",
+                finish_reason=GroundedFinishReason.COMPLETE,
+                completed_at="2026-10-16T00:00:00+00:00",
+            )
+        )
+        monkeypatch.setattr(
+            "model_gateway.grpc.grounded_search.ExaGroundedSearch",
+            lambda _config: adapter,
+        )
+        service = InferenceService(_text_registry(), _CostedMockProvider(), governance=manager)
+
+        async with _serve(service, _text_registry(), manager) as stub:
+            first = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-e2e"), metadata=_bearer()
+            )
+            # The kill switch table carries no RLS, so the update runs bare.
+            await db.execute(
+                "UPDATE platform_egress_killswitch SET engaged = TRUE WHERE singleton = TRUE"
+            )
+            second = await stub.GroundedSearch(
+                _grounded_request(invocation_id="inv-grounded-e2e"), metadata=_bearer()
+            )
+
+        # The redelivery is answered with the deduped response, not refused with
+        # the kill_switch_engaged the engaged switch would declare.
+        assert first.grounded_answer == "Paris is the capital."
+        assert second.grounded_answer == ""
+        assert len(adapter.calls) == 1
+        # And nothing was settled a second time: one outbox row, one budget
+        # debit, one mana debit — all from the first delivery.
+        assert len(await _outbox_rows(db, _TENANT)) == 1
+        assert await _spent_micros(db, _TENANT) == 10_000
+        assert mana_client.debit_calls == [
+            (_GCID, _TENANT, "external_egress.search", "inv-grounded-e2e")
+        ]
