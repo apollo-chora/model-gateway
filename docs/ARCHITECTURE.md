@@ -111,6 +111,18 @@ replace github.com/apollo-chora/model-gateway => ../model-gateway
 The `replace` is what makes a local checkout work before the module is
 tagged and published.
 
+### Releasing the Go module
+
+The Go module lives at this repository's root, so its release lifecycle is
+the Python repository's tag lifecycle. There is no separate Go versioning
+yet: a caller pins a tag of this repository, or uses a local `replace`.
+
+That is enough for the migration, where every caller is in the same
+workspace. If Go consumers outside this workspace need independently
+versioned releases, the contract should move to a repository of its own —
+at that point the `M` mapping in `buf.gen.yaml` and the `go_package` option
+become the thing to reconcile.
+
 The gRPC health protocol is served without authentication — it is the
 infrastructure protocol, and a prober has no credential to present. The HTTP
 health endpoints follow the deployment's configured auth policy.
