@@ -53,6 +53,8 @@ src = ["src"]
 exclude = [
     "src/model_gateway/grpc/gateway_pb2.py",
     "src/model_gateway/grpc/gateway_pb2_grpc.py",
+    "src/model_gateway/governance/identity/v1/mana_service_pb2.py",
+    "src/model_gateway/governance/identity/v1/mana_service_pb2_grpc.py",
     "src/model_gateway/governance/observability/v1/token_usage_pb2.py",
 ]
 

@@ -269,9 +269,12 @@ class GovernanceManager:
                 )
 
         # 3. Budget decision. Every active window is read under one lock and
-        # the strictest decision across them is the one honoured, so two
-        # concurrent invocations of one tenant cannot both read the same
-        # ``spent`` and both decide there is room.
+        # the strictest decision across them is the one honoured. The lock
+        # serializes the reads within one authorization window, not the spend:
+        # settlement runs after the provider call, outside the lock, so two
+        # concurrent invocations of one tenant may both be authorized before
+        # either settles — a bounded overshoot the budget absorbs rather than
+        # a violation it prevents, the Go implementation's own behaviour.
         if tenant_id:
             async with self._budget.active_budgets(tenant_id) as windows:
                 decision = decide_strictest(windows)

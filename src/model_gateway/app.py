@@ -27,6 +27,7 @@ touching routing, policy or the public contract.
 
 from dataclasses import dataclass
 
+import grpc
 import orjson
 import structlog
 from blacksheep import Application
@@ -51,7 +52,9 @@ from model_gateway.governance import (
     Database,
     EgressGate,
     GovernanceManager,
+    GrpcManaClient,
     IdempotencyClaims,
+    ManaMeter,
     Outbox,
     SuspensionChecker,
 )
@@ -239,11 +242,15 @@ class GovernanceWiring:
 
     The database travels with the chain because the process owns both
     lifecycles: the pool opens at startup and closes at shutdown, and the
-    chain is what every invocation asks for a decision.
+    chain is what every invocation asks for a decision. The mana channel
+    travels with them for the same reason: it is opened with the chain and
+    closed with the process, so an unclosed channel does not keep the event
+    loop from exiting cleanly.
     """
 
     db: Database
     manager: GovernanceManager
+    mana_channel: grpc.aio.Channel | None = None
 
 
 def _governance(settings: Settings) -> GovernanceWiring | None:
@@ -252,12 +259,22 @@ def _governance(settings: Settings) -> GovernanceWiring | None:
     Governance is opt-in at the settings layer: a deployment that configures
     no ``CHORA_OBSERVABILITY_DSN`` gets no database and no chain, and the
     invocation flow runs exactly as it did before governance existed. The
-    mana meter is not wired here — there is no mana client for it yet — so
-    the chain runs un-metered, exactly as it runs without a budget window.
+    mana meter is wired when the deployment also names chora-identity's
+    gRPC address: the channel is built here and closed with the process, so
+    a deployment that configures no ``CHORA_IDENTITY_GRPC_ADDR`` runs the
+    chain un-metered, exactly as it runs without a budget window.
     """
     if not settings.observability_dsn:
         return None
     db = Database(settings.observability_dsn)
+    channel: grpc.aio.Channel | None = None
+    mana: ManaMeter | None = None
+    if settings.identity_grpc_addr:
+        # The mesh terminates the service-to-service mTLS the identity
+        # contract declares, so the channel itself is plaintext: the gateway
+        # connects to its sidecar, and the sidecar holds the identity.
+        channel = grpc.aio.insecure_channel(settings.identity_grpc_addr)
+        mana = ManaMeter(GrpcManaClient(channel))
     return GovernanceWiring(
         db,
         GovernanceManager(
@@ -267,7 +284,9 @@ def _governance(settings: Settings) -> GovernanceWiring | None:
             IdempotencyClaims(db),
             SuspensionChecker(db),
             EgressGate(db),
+            mana=mana,
         ),
+        mana_channel=channel,
     )
 
 
@@ -326,9 +345,12 @@ def create_app(
     ``CHORA_OBSERVABILITY_DSN``: the factory builds the chain — budget, outbox,
     idempotency, containment and egress over that database — passes it to the
     inference service it builds and to the gRPC listener's grounded search, and
-    opens and closes the database with the process. A deployment that
-    configures no DSN gets no chain and no database, and the invocation flow
-    runs exactly as it did before governance existed.
+    opens and closes the database with the process. When the deployment also
+    configures ``CHORA_IDENTITY_GRPC_ADDR``, the mana meter is wired too: a
+    channel to chora-identity is built with the chain and closed with the
+    process, so every metered action quotes and debits against the learner's
+    wallet. A deployment that configures no DSN gets no chain and no database,
+    and the invocation flow runs exactly as it did before governance existed.
     """
     settings = settings or Settings.from_env()
     configure_logging(settings.log_level)
@@ -453,6 +475,11 @@ def create_app(
             await grpc_server.stop()
         if db is not None:
             await db.close()
+        if wiring is not None and wiring.mana_channel is not None:
+            # The mana channel opened with the chain, so it closes with the
+            # process: an unclosed channel keeps the event loop from exiting
+            # cleanly, the same reason the database pool does.
+            await wiring.mana_channel.close()
         if trace_provider is not None:
             # A batch processor holds spans until it exports them, so a process that
             # stops without this loses its last batch — which is the one covering
