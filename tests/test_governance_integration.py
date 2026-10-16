@@ -1201,3 +1201,96 @@ class TestGroundedSearchSettlement:
         assert "daily_ceiling_exceeded" in error.value.details()
         assert len(adapter.calls) == 2
         assert connection.recorded_egress() == 2
+
+    async def test_an_omitted_invocation_id_is_minted_and_settled_under(self) -> None:
+        """A caller that omits the invocation id still settles under one.
+
+        The contract does not require ``invocation_id``, so a caller may omit
+        it; the handler mints one, and that single value is what the response,
+        the budget debit, the outbox row and the mana idempotency key all carry
+        — rather than a blank key the outbox would refuse.
+        """
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        connection.budget_rows = [_budget_window(spent_micros=0, policy=BudgetPolicy.BLOCK)]
+        mana_client = StubManaClient()
+        adapter = _ScriptedAdapter(_grounded_result())
+        handler = _grounded_handler(connection, adapter, mana=ManaMeter(mana_client))
+
+        async with _serve_grounded(handler) as stub:
+            response = await stub.GroundedSearch(
+                _grounded_request(invocation_id=""), metadata=_bearer()
+            )
+
+        # The gateway minted one: the response carries a non-empty id, and the
+        # adapter was handed that same one on the canonical request.
+        assert response.invocation_id
+        assert adapter.calls[0].invocation_id == response.invocation_id
+        # The minted id is the key the settlement is written under: one budget
+        # debit, one outbox row and one mana debit, all sharing it.
+        assert connection.debited_budget() == 1
+        assert connection.wrote_outbox_rows() == 1
+        assert mana_client.debit_calls == [
+            ("gcid-1", _GRPC_TENANT, "external_egress.search", response.invocation_id)
+        ]
+        insert = next(
+            call for call in connection.calls if "INSERT INTO outbox_events" in call[0]
+        )
+        assert insert[1][0] == response.invocation_id
+        event = token_usage_pb2.TokenUsageRecorded.FromString(insert[1][3])
+        assert event.usage_id == response.invocation_id
+        assert event.invocation_id == response.invocation_id
+
+    async def test_an_omitted_invocation_id_is_minted_for_a_partial_settlement(self) -> None:
+        """A synthesis failure after a billed search settles under a minted id.
+
+        The partial settlement is keyed by the invocation id too, so a caller
+        that omitted it must still produce one: the outbox row and the budget
+        debit land under the minted id rather than being refused for a blank
+        key, and the failed call still earns neither a mana debit nor an egress
+        count.
+        """
+        connection = StubConnection()
+        connection.kill_switch_row = {"engaged": False}
+        connection.entitlement_row = {
+            "egress_enabled": True,
+            "daily_call_ceiling": 50,
+        }
+        connection.usage_row = {"call_count": 0}
+        connection.budget_rows = [_budget_window(spent_micros=0, policy=BudgetPolicy.BLOCK)]
+        mana_client = StubManaClient()
+        adapter = _ScriptedAdapter(
+            GroundedError(
+                "vendor_unavailable",
+                "the synthesis call failed",
+                usage=GroundedUsage(grounding_units=1, cost_micros=10_000),
+            )
+        )
+        handler = _grounded_handler(connection, adapter, mana=ManaMeter(mana_client))
+
+        async with _serve_grounded(handler) as stub:
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                await stub.GroundedSearch(
+                    _grounded_request(invocation_id=""), metadata=_bearer()
+                )
+
+        assert error.value.code() == grpc.StatusCode.UNAVAILABLE
+        # The partial spend settled under a minted, non-empty key: one outbox
+        # row and one budget debit, with the row's own usage id agreeing.
+        assert connection.wrote_outbox_rows() == 1
+        assert connection.debited_budget() == 1
+        insert = next(
+            call for call in connection.calls if "INSERT INTO outbox_events" in call[0]
+        )
+        assert insert[1][0]
+        event = token_usage_pb2.TokenUsageRecorded.FromString(insert[1][3])
+        assert event.usage_id == insert[1][0]
+        assert event.invocation_id == insert[1][0]
+        # The failed call earned neither a mana debit nor an egress count.
+        assert mana_client.debit_calls == []
+        assert connection.recorded_egress() == 0

@@ -18,6 +18,15 @@ tenant to attribute the egress to, so a request that states none is refused as
 an invalid argument after the reconciliation, and one that states a tenant its
 credential is not bound to is refused as a permission denial.
 
+**The invocation identifier is resolved once, then carried everywhere.** A
+caller may omit ``invocation_id`` — the contract does not require it — and the
+handler mints one with :func:`uuid.uuid4` rather than leaving it blank, because
+the settlement the search owes is keyed by that identifier: the outbox insert
+is the idempotency guard, and a blank key would collapse every event onto one
+row. The resolved value is the one the canonical request, the adapter result,
+the budget debit, the outbox row, the mana idempotency key and the response all
+carry, so a redelivery of one search settles nothing.
+
 **A failure is aborted, never raised.** A failure the adapter raises carries a
 stable reason token, and this handler maps the token onto the gRPC status the
 governance chain declares for it — the same mapping the Go adapter's
@@ -48,6 +57,8 @@ governance manager gates and settles nothing.
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import grpc
@@ -115,23 +126,34 @@ class GroundedSearch:
         """Answer one grounded search, or abort the call with the gateway's own status.
 
         The order is the rule: the identity is established first, the claimed
-        tenant is reconciled against it second, the request's required fields are
-        validated third, and only then is the canonical search built and handed to
-        the adapter. A request that fails authentication, states a tenant its
-credential is not bound to, or is missing a required field never reaches the
-adapter, so no part of such a request can influence the egress.
+        tenant is reconciled against it second, the invocation identifier is
+        resolved third — minted when the caller omitted it — the request's
+        required fields are validated fourth, and only then is the canonical
+        search built and handed to the adapter. A request that fails
+        authentication, states a tenant its credential is not bound to, or is
+        missing a required field never reaches the adapter, so no part of such a
+        request can influence the egress.
         """
         try:
             identity = self._authenticator.identity(context)
             reconcile_identity(identity, request.tenant_id or None)
-            grounded_request = mapping.grounded_search_request_from_proto(request)
+            # The invocation id is resolved once, here, and that one value is
+            # what the request, the result and every settlement write carry: a
+            # caller that omits it gets a minted one, and a caller that states
+            # one keeps it, so the outbox's idempotency key is never blank.
+            invocation_id = request.invocation_id or str(uuid.uuid4())
+            grounded_request = replace(
+                mapping.grounded_search_request_from_proto(request), invocation_id=invocation_id
+            )
             _validate(grounded_request)
             if self._governance is not None:
                 await _authorize_grounded(self._governance, grounded_request)
             result = await self._adapter.search(grounded_request)
             if self._governance is not None:
                 await _settle_grounded(self._governance, grounded_request, result)
-            return mapping.grounded_search_response_to_proto(result)
+            return mapping.grounded_search_response_to_proto(
+                replace(result, invocation_id=invocation_id)
+            )
         except GroundedError as error:
             # A grounded failure carries its own reason token, which the
             # governance chain already classified; the mapping reads it and
