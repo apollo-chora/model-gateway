@@ -8,8 +8,10 @@ spent, and a debit after a call has actually produced output.
 **The meter is a policy layer over a client seam.** :class:`ManaClient` is the
 port to chora-identity's ``ManaService`` — ``quote`` runs
 ``DeductMana(dry_run=True, units=0)`` and ``debit`` runs
-``DeductMana(dry_run=False, units=0)``, both idempotent on the caller's key —
-and the ``grpc.aio`` wiring lands with the generated stubs. What the meter owns
+``DeductMana(dry_run=False, units=0)``, both idempotent on the caller's key and
+both carrying the tenant the action is priced under, because the service
+resolves the learner's wallet against that tenant's subsidy slices — and the
+``grpc.aio`` wiring lands with the generated stubs. What the meter owns
 is the decision policy the seam cannot: an action code that is not in the
 pricing catalogue is un-metered rather than a failure, and a meter that cannot
 be reached fails OPEN, because a metering outage must not deny service.
@@ -146,13 +148,18 @@ class ManaClient(Protocol):
     ``quote`` runs the dry-run affordability check and ``debit`` charges; both
     return the service's raw outcome and raise :class:`UnknownAction` when the
     action code is unpriced, or any other error when the meter could not be
-    read. The real implementation speaks ``grpc.aio``; a test injects a stub,
+    read. Both carry the tenant the action is priced under: the service selects
+    the subsidy slice the debit draws down by it, so a learner holding
+    allocations from several tenants is charged the one the call's tenant
+    names. The real implementation speaks ``grpc.aio``; a test injects a stub,
     which is why the meter never names a channel of its own.
     """
 
-    async def quote(self, gcid: str, action_code: str) -> ManaResult: ...
+    async def quote(self, gcid: str, tenant_id: str, action_code: str) -> ManaResult: ...
 
-    async def debit(self, gcid: str, action_code: str, idem_key: str) -> ManaResult: ...
+    async def debit(
+        self, gcid: str, tenant_id: str, action_code: str, idem_key: str
+    ) -> ManaResult: ...
 
 
 @dataclass(frozen=True)
@@ -214,10 +221,12 @@ class ManaMeter:
     def __init__(self, client: ManaClient) -> None:
         self._client = client
 
-    async def quote(self, gcid: str, action_code: str) -> ManaQuote:
+    async def quote(self, gcid: str, tenant_id: str, action_code: str) -> ManaQuote:
         """Whether the learner can afford one action, without charging it.
 
-        A shortfall denies with the required and available balances, which is
+        ``tenant_id`` is the tenant the action is priced under, carried to the
+        service so the wallet it checks is the one that tenant's subsidy slices
+        feed. A shortfall denies with the required and available balances, which is
         the caller's upsell context. An unpriced action code is un-metered, not
         a failure. A meter that raised is allowed through with the error on the
         result and a warning in the log — the fail-open half of the contract,
@@ -225,7 +234,7 @@ class ManaMeter:
         to.
         """
         try:
-            result = await self._client.quote(gcid, action_code)
+            result = await self._client.quote(gcid, tenant_id, action_code)
         except UnknownAction:
             return ManaQuote(affordable=True, unknown_action=True)
         except Exception as error:
@@ -234,6 +243,7 @@ class ManaMeter:
                 error_type=type(error).__name__,
                 error=str(error),
                 gcid=gcid,
+                tenant_id=tenant_id,
                 action_code=action_code,
             )
             return ManaQuote(affordable=True, error=str(error))
@@ -245,19 +255,23 @@ class ManaMeter:
             )
         return ManaQuote(affordable=True, available=result.balance_after_units)
 
-    async def debit(self, gcid: str, action_code: str, idem_key: str) -> ManaDebit:
+    async def debit(
+        self, gcid: str, tenant_id: str, action_code: str, idem_key: str
+    ) -> ManaDebit:
         """Charge one action against the learner's wallet, idempotently.
 
         ``idem_key`` is the caller's own key, so a retried debit collapses onto
-        the ledger row the first attempt wrote. A shortfall is reported, not
-        raised: the call has already been served, so the charge is a
-        bookkeeping outcome the caller accounts rather than a reason to un-serve
+        the ledger row the first attempt wrote. ``tenant_id`` is the tenant the
+        action is priced under, carried to the service so the subsidy slice it
+        draws down is the one that tenant's allocations feed. A shortfall is
+        reported, not raised: the call has already been served, so the charge is
+        a bookkeeping outcome the caller accounts rather than a reason to un-serve
         it. An unpriced action code is un-metered and a meter that raised is an
         error result, both logged rather than raised, for the same fail-open
         reason the quote documents.
         """
         try:
-            result = await self._client.debit(gcid, action_code, idem_key)
+            result = await self._client.debit(gcid, tenant_id, action_code, idem_key)
         except UnknownAction:
             return ManaDebit(result=ManaDebitResult.UN_METERED)
         except Exception as error:
@@ -266,6 +280,7 @@ class ManaMeter:
                 error_type=type(error).__name__,
                 error=str(error),
                 gcid=gcid,
+                tenant_id=tenant_id,
                 action_code=action_code,
             )
             return ManaDebit(result=ManaDebitResult.ERROR, error=str(error))

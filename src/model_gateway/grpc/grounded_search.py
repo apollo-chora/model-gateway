@@ -39,8 +39,11 @@ mana quote for a fail-closed action — before the Exa call, and any refusal
 aborts with the status the reason token declares. A search that is served then
 settles the same way an invoke does: the egress counter is incremented, the
 budget debit and the token-usage outbox record commit in one transaction, and
-the mana debit follows inside it. A deployment that wired no governance manager
-gates and settles nothing.
+the mana debit follows inside it. A search that fails after billable work —
+the Exa search succeeded and the synthesis failed — settles the partial spend
+only: the budget debit and the outbox record, with no mana debit and no egress
+counter, because the call never completed. A deployment that wired no
+governance manager gates and settles nothing.
 """
 
 from __future__ import annotations
@@ -133,7 +136,12 @@ adapter, so no part of such a request can influence the egress.
             # A grounded failure carries its own reason token, which the
             # governance chain already classified; the mapping reads it and
             # aborts with the status that reason declares, the same way the Go
-            # adapter's mapGroundedError does.
+            # adapter's mapGroundedError does. A failure after billable work
+            # settles the partial spend first — the provider charged for the
+            # search, and the tenant's ledger must account it — then the
+            # vendor's own error reaches the caller unchanged.
+            if self._governance is not None and error.usage is not None:
+                await _settle_grounded_partial(self._governance, grounded_request, error)
             await abort(context, _as_gateway_error(error))
         except Exception as error:
             if not isinstance(error, GatewayError):
@@ -178,7 +186,7 @@ async def _authorize_grounded(
             "the tenant's active LLM budget window is exhausted under its block policy",
         )
     if governance.mana is not None and request.action_code and is_fail_closed(request.action_code):
-        quote = await governance.mana.quote(request.gcid, request.action_code)
+        quote = await governance.mana.quote(request.gcid, request.tenant_id, request.action_code)
         if not quote.affordable and not quote.unknown_action:
             raise GroundedError(
                 "insufficient_mana",
@@ -232,10 +240,10 @@ async def _settle_grounded(
                 usage_id=usage_id,
                 tenant_id=request.tenant_id,
                 gcid=request.gcid,
-                # The grounded request names no model: the egress is priced
-                # under its action code, and the model the synthesis leg ran
-                # is the adapter's own configuration, not the caller's claim.
-                model_id="",
+                # The synthesis leg ran the adapter's configured model, and
+                # the result names the version that produced the tokens: the
+                # event records the model that actually served the call.
+                model_id=result.model_version,
                 invocation_id=request.invocation_id,
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
@@ -257,6 +265,74 @@ async def _settle_grounded(
         logger.error(
             "grounded settlement failed",
             error_type=type(error).__name__,
+            invocation_id=request.invocation_id,
+        )
+
+
+async def _settle_grounded_partial(
+    governance: GovernanceManager,
+    request: GroundedSearchRequest,
+    error: GroundedError,
+) -> None:
+    """Settle the partial spend of a failed grounded search, best-effort.
+
+    When the Exa search succeeded and billed but the synthesis failed, the
+    provider has charged for work the gateway owes for, and the usage the
+    error carries is the adapter's own record of it. The settlement is the
+    atomic pair a served search writes — the budget debit and the token-usage
+    outbox row in one transaction, under the invocation id so a redelivery of
+    the same failed search settles nothing — and nothing else.
+
+    What a failed call does not earn is withheld: there is no mana debit,
+    because the call never completed and the learner's wallet is not charged
+    for an answer that was never produced, and the egress counter is not
+    incremented, because the search returned no answer to count against the
+    tenant's daily ceiling. The vendor's own error is untouched: it is still
+    the caller's answer, mapped onto the status its reason token declares.
+
+    Every step is best-effort: a settlement failure is logged, never raised,
+    for the same reason the served settlement's is — a ledger the operator
+    misconfigured is not a reason to withhold the error.
+    """
+    usage = error.usage
+    if usage is None:
+        return
+    occurred_at = datetime.now(UTC)
+    usage_id = request.invocation_id
+    try:
+        await governance.budget.debit_and_enqueue(
+            tenant_id=request.tenant_id,
+            usage_id=usage_id,
+            gcid=request.gcid,
+            cost_micros=usage.cost_micros,
+            payload=build_token_usage_payload(
+                usage_id=usage_id,
+                tenant_id=request.tenant_id,
+                gcid=request.gcid,
+                # The synthesis never completed, so no model produced tokens:
+                # the event records the search's own spend under no model.
+                model_id="",
+                invocation_id=request.invocation_id,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cost_micros=usage.cost_micros,
+                action_code=request.action_code,
+                agent_role=request.agent_id,
+                occurred_at=occurred_at,
+            ),
+            envelope=token_usage_envelope(
+                usage_id=usage_id,
+                tenant_id=request.tenant_id,
+                gcid=request.gcid,
+                occurred_at=occurred_at,
+                traceparent=request.traceparent,
+                tracestate=request.tracestate,
+            ),
+        )
+    except Exception as settle_error:
+        logger.error(
+            "grounded partial settlement failed",
+            error_type=type(settle_error).__name__,
             invocation_id=request.invocation_id,
         )
 

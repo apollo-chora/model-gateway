@@ -23,7 +23,7 @@ from blacksheep.testing import TestClient
 
 from model_gateway.app import create_app
 from model_gateway.capabilities import Capability
-from model_gateway.config import Settings
+from model_gateway.config import ConfigurationError, Settings
 from model_gateway.config.routes import Operation, Route
 from model_gateway.governance import Database, GovernanceManager
 from model_gateway.grpc.grounded_search import GroundedSearch
@@ -132,6 +132,18 @@ def _registry() -> ModelRegistry:
     )
 
 
+def _standalone_settings(**extra: object) -> Settings:
+    """Settings with a governance database and no identity service.
+
+    These tests exercise the governance chain's wiring, not the mana meter, so
+    they run the chain un-metered by the operator's explicit standalone choice
+    — the default chora mode would refuse the start instead.
+    """
+    env = {"CHORA_OBSERVABILITY_DSN": _DSN, "CHORA_GOVERNANCE_MODE": "standalone"}
+    env.update(extra)
+    return Settings.from_env(env)
+
+
 def _free_port() -> int:
     """A port nothing else holds, for the gRPC listener to bind."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -172,10 +184,7 @@ class TestGovernanceWiring:
         monkeypatch.setattr("model_gateway.app.InferenceService", recording_service)
         _wire_database(monkeypatch, connection)
 
-        create_app(
-            Settings.from_env({"CHORA_OBSERVABILITY_DSN": _DSN}),
-            registry=_registry(),
-        )
+        create_app(_standalone_settings(), registry=_registry())
 
         # The service the factory built was handed the governance chain: the
         # budget, the outbox and the containment read are its to run.
@@ -197,9 +206,7 @@ class TestGovernanceWiring:
         )
         _wire_database(monkeypatch, connection)
 
-        settings = Settings.from_env(
-            {"CHORA_OBSERVABILITY_DSN": _DSN, "CHORA_GRPC_PORT": str(_free_port())}
-        )
+        settings = _standalone_settings(CHORA_GRPC_PORT=str(_free_port()))
         create_app(settings, registry=_registry(), serve_grpc=True)
 
         assert isinstance(captured["governance"], GovernanceManager)
@@ -223,14 +230,40 @@ class TestGovernanceWiring:
     ) -> None:
         created = _wire_database(monkeypatch, connection)
 
-        app = create_app(
-            Settings.from_env({"CHORA_OBSERVABILITY_DSN": _DSN}),
-            registry=_registry(),
-        )
+        app = create_app(_standalone_settings(), registry=_registry())
         await app.start()
         assert created[0].connect_calls == 1
         await app.stop()
         assert created[0].close_calls == 1
+
+    async def test_a_governed_deployment_without_the_identity_address_fails_at_startup(
+        self, monkeypatch: pytest.MonkeyPatch, connection: StubConnection
+    ) -> None:
+        """The default chora mode refuses a governed deployment with no mana meter.
+
+        A DSN without the identity address would run the chain un-metered, so
+        the start fails rather than let a governed deployment silently run
+        without metering.
+        """
+        _wire_database(monkeypatch, connection)
+
+        with pytest.raises(ConfigurationError, match="CHORA_IDENTITY_GRPC_ADDR"):
+            create_app(Settings.from_env({"CHORA_OBSERVABILITY_DSN": _DSN}), registry=_registry())
+
+    async def test_standalone_mode_allows_a_governed_deployment_without_the_identity_address(
+        self, monkeypatch: pytest.MonkeyPatch, connection: StubConnection
+    ) -> None:
+        """An explicit standalone choice runs the chain un-metered, by design.
+
+        The operator has decided to run the gateway apart from the platform's
+        mana ledger, so the start succeeds and the chain is wired without a
+        mana meter.
+        """
+        created = _wire_database(monkeypatch, connection)
+
+        create_app(_standalone_settings(), registry=_registry())
+
+        assert len(created) == 1
 
 
 class TestDenialThroughTheWiredApplication:
@@ -267,12 +300,9 @@ class TestDenialThroughTheWiredApplication:
         _wire_database(monkeypatch, connection)
 
         app = create_app(
-            Settings.from_env(
-                {
-                    "CHORA_OBSERVABILITY_DSN": _DSN,
-                    "GATEWAY_AUTH_ENABLED": "true",
-                    "GATEWAY_API_KEYS": f"{_API_KEY}:{_TENANT_ID}",
-                }
+            _standalone_settings(
+                GATEWAY_AUTH_ENABLED="true",
+                GATEWAY_API_KEYS=f"{_API_KEY}:{_TENANT_ID}",
             ),
             registry=_registry(),
         )
@@ -316,10 +346,7 @@ class TestDenialThroughTheWiredApplication:
         monkeypatch.setattr("model_gateway.app.LiteLLMProvider", recording_provider)
         _wire_database(monkeypatch, connection)
 
-        app = create_app(
-            Settings.from_env({"CHORA_OBSERVABILITY_DSN": _DSN}),
-            registry=_registry(),
-        )
+        app = create_app(_standalone_settings(), registry=_registry())
         await app.start()
         try:
             response = await TestClient(app).post(

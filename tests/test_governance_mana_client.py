@@ -29,7 +29,7 @@ import pytest
 
 from model_gateway.app import create_app
 from model_gateway.capabilities import Capability
-from model_gateway.config import Settings
+from model_gateway.config import ConfigurationError, Settings
 from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import GroundedFinishReason, GroundedSearchResult, GroundedUsage
 from model_gateway.governance import (
@@ -108,12 +108,13 @@ class TestGrpcManaClient:
         async with _serve_mana(service) as address:
             client = _client(address)
 
-            result = await client.quote(_GCID, "companion_chat")
+            result = await client.quote(_GCID, _TENANT_ID, "companion_chat")
 
         assert result == ManaResult(success=True, balance_after_units=90)
         assert len(service.calls) == 1
         call = service.calls[0]
         assert call.gcid == _GCID
+        assert call.tenant_id == _TENANT_ID
         assert call.action_code == "companion_chat"
         assert call.dry_run is True
         assert call.units == 0
@@ -127,11 +128,13 @@ class TestGrpcManaClient:
         async with _serve_mana(service) as address:
             client = _client(address)
 
-            result = await client.debit(_GCID, "companion_chat", "idem-key-1")
+            result = await client.debit(_GCID, _TENANT_ID, "companion_chat", "idem-key-1")
 
         assert result == ManaResult(success=True, balance_after_units=90)
         assert len(service.calls) == 1
         call = service.calls[0]
+        assert call.gcid == _GCID
+        assert call.tenant_id == _TENANT_ID
         assert call.dry_run is False
         assert call.idempotency_key == "idem-key-1"
 
@@ -144,7 +147,7 @@ class TestGrpcManaClient:
         async with _serve_mana(service) as address:
             client = _client(address)
 
-            result = await client.debit(_GCID, "companion_chat", "idem-key-1")
+            result = await client.debit(_GCID, _TENANT_ID, "companion_chat", "idem-key-1")
 
         assert result == ManaResult(
             success=False, required_units=50, current_balance_units=20
@@ -159,7 +162,7 @@ class TestGrpcManaClient:
             client = _client(address)
 
             with pytest.raises(UnknownAction):
-                await client.quote(_GCID, "not_in_the_catalogue")
+                await client.quote(_GCID, _TENANT_ID, "not_in_the_catalogue")
 
     async def test_another_failure_propagates_for_the_meter_to_fail_open(self) -> None:
         service = StubManaService()
@@ -170,7 +173,7 @@ class TestGrpcManaClient:
             client = _client(address)
 
             with pytest.raises(grpc.aio.AioRpcError) as error:
-                await client.debit(_GCID, "companion_chat", "idem-key-1")
+                await client.debit(_GCID, _TENANT_ID, "companion_chat", "idem-key-1")
 
         assert error.value.code() is grpc.StatusCode.UNAVAILABLE
 
@@ -398,7 +401,21 @@ class TestManaWiring:
         finally:
             await app.stop()
 
-    async def test_a_dsn_without_an_identity_address_runs_un_metered(
+    async def test_a_dsn_without_an_identity_address_fails_at_startup_in_chora_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The default chora mode refuses a governed deployment with no mana meter.
+
+        A DSN without the identity address would run the chain un-metered —
+        every metered action silently unpriced — so the start fails rather than
+        let a governed deployment drift into an un-metered one.
+        """
+        _wire_database(monkeypatch, StubConnection())
+
+        with pytest.raises(ConfigurationError, match="CHORA_IDENTITY_GRPC_ADDR"):
+            create_app(Settings.from_env({"CHORA_OBSERVABILITY_DSN": _DSN}), registry=_registry())
+
+    async def test_a_dsn_without_an_identity_address_runs_un_metered_in_standalone_mode(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         connection = StubConnection()
@@ -412,12 +429,20 @@ class TestManaWiring:
         monkeypatch.setattr("model_gateway.app.InferenceService", recording_service)
         _wire_database(monkeypatch, connection)
 
-        create_app(Settings.from_env({"CHORA_OBSERVABILITY_DSN": _DSN}), registry=_registry())
+        create_app(
+            Settings.from_env(
+                {
+                    "CHORA_OBSERVABILITY_DSN": _DSN,
+                    "CHORA_GOVERNANCE_MODE": "standalone",
+                }
+            ),
+            registry=_registry(),
+        )
 
         governance = created["governance"]
         assert isinstance(governance, GovernanceManager)
-        # No identity address: no mana client, so the chain runs un-metered —
-        # exactly as it runs without a budget window.
+        # No identity address in standalone mode: no mana client, so the chain
+        # runs un-metered by the operator's explicit choice.
         assert governance.mana is None
 
     async def test_the_mana_channel_closes_with_the_process(
@@ -493,11 +518,13 @@ class TestGroundedSettlementEndToEnd:
 
         assert response.grounded_answer == "Paris is the capital."
         # The mana debit crossed the real channel to the identity service: a
-        # real deduction, not a dry run, under the invocation id as the key.
+        # real deduction, not a dry run, under the invocation id as the key,
+        # and carrying the tenant the egress is priced under.
         assert len(mana_service.calls) == 1
         debit = mana_service.calls[0]
         assert debit.dry_run is False
         assert debit.gcid == "gcid-1"
+        assert debit.tenant_id == _TENANT_ID
         assert debit.action_code == "external_egress.search"
         assert debit.idempotency_key == "inv-grounded-1"
         # The egress was counted, the outbox row landed and the budget was
