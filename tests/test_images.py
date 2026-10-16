@@ -191,6 +191,7 @@ def test_a_request_round_trips_with_every_optional_field_unset():
         "response_format": None,
         "n": None,
         "metadata": None,
+        "surface": None,
     }
     assert ImageRequest.from_dict(minimal.to_dict()) == minimal
 
@@ -205,8 +206,16 @@ def test_a_request_round_trips_with_every_optional_field_set():
         "response_format": "b64_json",
         "n": 1,
         "metadata": {"trace": {"sampled": True}},
+        "surface": None,
     }
     assert ImageRequest.from_dict(document) == REQUEST
+
+
+def test_a_request_round_trips_a_stamped_surface():
+    stamped = request(surface="openai_compat")
+
+    assert ImageRequest.from_dict(stamped.to_dict()) == stamped
+    assert ImageRequest.from_dict(stamped.to_dict()).surface == "openai_compat"
 
 
 def test_a_request_round_trip_is_stable_under_reparsing():

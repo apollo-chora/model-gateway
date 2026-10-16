@@ -40,6 +40,22 @@ class UsageStorage(StrEnum):
     POSTGRES = "postgres"
 
 
+class GovernanceMode(StrEnum):
+    """How the deployment relates to the chora platform's governance plane.
+
+    ``CHORA`` is the governed default: the deployment is part of the chora
+    platform, so a configured governance database implies a configured identity
+    service — mana metering is not optional there, because a governed
+    deployment that silently runs un-metered is a ledger the platform cannot
+    reconcile. ``STANDALONE`` is the explicit opt-out: the deployment runs the
+    governance chain without the identity service, un-metered, for an operator
+    who has decided to run the gateway apart from the platform's mana ledger.
+    """
+
+    CHORA = "chora"
+    STANDALONE = "standalone"
+
+
 class ConfigurationError(ValueError):
     """Raised when the deployment environment cannot be used as configured."""
 
@@ -170,6 +186,19 @@ def _usage_storage_error(name: str, value: object) -> ConfigurationError:
     return ConfigurationError(f"{name} must be one of {supported}, got {value!r}")
 
 
+def _parse_governance_mode(name: str, value: object) -> GovernanceMode:
+    text = _text(value).lower()
+    try:
+        return GovernanceMode(text)
+    except ValueError as exc:
+        raise _governance_mode_error(name, text) from exc
+
+
+def _governance_mode_error(name: str, value: object) -> ConfigurationError:
+    supported = ", ".join(repr(member.value) for member in GovernanceMode)
+    return ConfigurationError(f"{name} must be one of {supported}, got {value!r}")
+
+
 def _parse_api_keys(name: str, value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         items: Iterable[object] = value.split(",")
@@ -248,6 +277,26 @@ _FIELDS: tuple[_Field, ...] = (
     _Field("usage_tracking_enabled", "USAGE_TRACKING_ENABLED", "true", _parse_bool),
     _Field("cost_tracking_enabled", "COST_TRACKING_ENABLED", "false", _parse_bool),
     _Field("usage_storage", "USAGE_STORAGE", "memory", _parse_usage_storage),
+    _Field(
+        "observability_dsn",
+        "CHORA_OBSERVABILITY_DSN",
+        "",
+        _parse_optional_text,
+    ),
+    _Field(
+        "identity_grpc_addr",
+        "CHORA_IDENTITY_GRPC_ADDR",
+        "",
+        _parse_optional_text,
+    ),
+    _Field("governance_mode", "CHORA_GOVERNANCE_MODE", "chora", _parse_governance_mode),
+    _Field("llm_budget_required", "CHORA_LLM_BUDGET_REQUIRED", "false", _parse_bool),
+    _Field(
+        "llm_budget_required_tenants",
+        "CHORA_LLM_BUDGET_REQUIRED_TENANTS",
+        "",
+        _parse_api_keys,
+    ),
     _Field("otel_enabled", "OTEL_ENABLED", "false", _parse_bool),
     _Field(
         "otel_exporter_otlp_endpoint",
@@ -290,6 +339,23 @@ class Settings:
     usage_tracking_enabled: bool
     cost_tracking_enabled: bool
     usage_storage: UsageStorage
+
+    # Governance. The DSN is the Postgres database the governance mechanisms
+    # (budget, outbox, idempotency) write to; it is required for governance to
+    # function and empty otherwise, so a deployment that does not configure it
+    # runs without a database. The identity address is the chora-identity gRPC
+    # endpoint the mana meter calls; it is required for mana to be wired and
+    # empty otherwise, so a deployment that does not configure it runs the
+    # chain un-metered. The budget flags make budget enforcement
+    # fail-closed: globally, or for the named tenants only. The mode states the
+    # deployment's intent: chora (the default) is part of the platform and
+    # requires the identity address whenever the DSN is set; standalone runs
+    # the chain un-metered by explicit choice.
+    observability_dsn: str
+    identity_grpc_addr: str
+    governance_mode: GovernanceMode
+    llm_budget_required: bool
+    llm_budget_required_tenants: tuple[str, ...]
 
     otel_enabled: bool
     otel_exporter_otlp_endpoint: str

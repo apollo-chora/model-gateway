@@ -92,6 +92,10 @@ _REQUEST_KEYS = frozenset(
         "fallback_models",
         "idempotency_key",
         "metadata",
+        "gcid",
+        "action_code",
+        "dispatch_idempotency_key",
+        "surface",
     }
 )
 _RESPONSE_KEYS = frozenset(
@@ -139,6 +143,10 @@ _OPTIONAL_TEXT = (
     "agent_id",
     "system_instruction",
     "idempotency_key",
+    "gcid",
+    "action_code",
+    "dispatch_idempotency_key",
+    "surface",
 )
 
 
@@ -203,6 +211,18 @@ class InvocationRequest:
     arbitrary JSON held as an immutable mapping, so a validated request cannot
     acquire a field afterwards, and the gateway must not place credentials in it.
 
+    ``gcid``, ``action_code``, ``dispatch_idempotency_key`` and ``surface`` are
+    the governance fields the platform's invocation flow stamps. ``gcid`` is the
+    caller's learner identity, the key the mana meter and the debit-claim ledger
+    are keyed by; ``action_code`` is the priced action the call is metered under;
+    ``dispatch_idempotency_key`` is the dispatch key a redelivered turn repeats,
+    so one dispatch is debited once; ``surface`` is the caller's surface, which
+    the companion containment read keys on. All four are optional and all four
+    are carried for governance only: none is forwarded to the model or the
+    provider, and a request that states none of them is simply ungoverned —
+    the budget fails open, the containment read is skipped and the call is
+    served un-metered.
+
     Two rules bound what it may carry. Both are enforced here rather than left as
     prose, because a semantic parked in metadata is a semantic the gateway
     neither represents nor forwards, and it would disappear between the caller
@@ -233,6 +253,10 @@ class InvocationRequest:
     idempotency_key: str | None = None
     metadata: Mapping[str, JsonValue] = field(default_factory=FrozenJsonObject)
     model: str | None = None
+    gcid: str | None = None
+    action_code: str | None = None
+    dispatch_idempotency_key: str | None = None
+    surface: str | None = None
 
     def __post_init__(self) -> None:
         model = as_optional_text("model", self.model)
@@ -298,6 +322,10 @@ class InvocationRequest:
             "fallback_models": list(self.fallback_models),
             "idempotency_key": self.idempotency_key,
             "metadata": thaw_json(self.metadata),
+            "gcid": self.gcid,
+            "action_code": self.action_code,
+            "dispatch_idempotency_key": self.dispatch_idempotency_key,
+            "surface": self.surface,
         }
 
     @classmethod
@@ -343,6 +371,12 @@ class InvocationRequest:
                 f"{where} 'idempotency_key'", payload.get("idempotency_key")
             ),
             metadata=as_json_object(f"{where} 'metadata'", payload.get("metadata")),
+            gcid=as_optional_text(f"{where} 'gcid'", payload.get("gcid")),
+            action_code=as_optional_text(f"{where} 'action_code'", payload.get("action_code")),
+            dispatch_idempotency_key=as_optional_text(
+                f"{where} 'dispatch_idempotency_key'", payload.get("dispatch_idempotency_key")
+            ),
+            surface=as_optional_text(f"{where} 'surface'", payload.get("surface")),
         )
 
 

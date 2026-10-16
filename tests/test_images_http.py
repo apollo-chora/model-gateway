@@ -228,6 +228,22 @@ class TestTheHappyPath:
         assert request.response_format == "b64_json"
         assert request.n == 2
 
+    async def test_the_request_reaches_the_provider_stamped_with_the_openai_compat_surface(
+        self, client, provider
+    ) -> None:
+        """The HTTP surface stamps the surface, as the Go gateway's do.
+
+        The OpenAI image format carries no surface, so the caller cannot
+        declare one; the stamped ``openai_compat`` surface states the turn's
+        surface — a non-companion one, so no companion containment read is
+        asked for.
+        """
+        response = await post_generations(client, payload())
+
+        assert response.status == 200
+        (_, request) = provider.calls[0]
+        assert request.surface == "openai_compat"
+
     async def test_the_prompt_reaches_the_request_verbatim(self, client, provider) -> None:
         await post_generations(client, payload(prompt="  A lighthouse at dusk  "))
 

@@ -172,6 +172,17 @@ _ANNOTATIONS_CAPABILITY = "annotations"
 _STRICT_TOOLS_CAPABILITY = "strict_tool_schemas"
 _REMOTE_IMAGE_CAPABILITY = "remote_image_fetch"
 
+_SURFACE = "responses"
+"""The surface every request this endpoint serves is stamped with.
+
+The Responses wire format carries no surface field, so a caller cannot declare
+one; the gateway stamps the surface the call arrived on, as the Go gateway
+does. ``responses`` is deliberately non-companion: it states the turn's
+surface — which the governance chain requires of every invoke, refusing an
+undeclared turn — without asking for the companion containment read, which
+a Responses turn is not subject to.
+"""
+
 _DATA_URI_PREFIX = "data:"
 _BASE64_MARKER = ";base64,"
 _SECURE_SCHEMES = frozenset({"http", "https"})
@@ -437,6 +448,13 @@ class ResponsesRequest:
     The invocation carries no tenant from the body. This endpoint's documented
     subset has no tenant field, so the tenant is the one bound to the presented
     credential and nothing else.
+
+    Every parsed request is stamped ``surface="responses"``: the Responses wire
+    format carries no surface, so the caller cannot declare one, and the
+    surface the call arrived on is stamped here rather than left undeclared —
+    a non-companion surface that satisfies the governance chain's
+    stamped-surface requirement without asking for the companion containment
+    read.
     """
 
     invocation: InvocationRequest
@@ -470,6 +488,7 @@ class ResponsesRequest:
                 idempotency_key=_as_idempotency_key(
                     f"{where} 'idempotency_key'", body.get("idempotency_key")
                 ),
+                surface=_SURFACE,
             )
         except ValueError as error:
             raise InvalidArgumentError(f"invalid responses request: {error}") from error

@@ -251,6 +251,20 @@ class TestTheHappyPath:
         assert request.user == "caller-7"
         assert request.metadata == {"trace": "t-1"}
 
+    async def test_the_request_carries_no_surface(self, client, provider) -> None:
+        """Embeddings state no surface, matching the Go reference.
+
+        The embeddings request is not subject to companion suspension, and
+        the Go gateway stamps no surface on its embedding requests, so the
+        canonical request carries no surface field at all rather than a
+        placeholder token.
+        """
+        response = await post(client, payload())
+
+        assert response.status == 200
+        (_, request) = provider.calls[0]
+        assert not hasattr(request, "surface")
+
     async def test_the_response_never_carries_upstream_configuration(self, client) -> None:
         response = await post(client, payload())
         body = await response.text()

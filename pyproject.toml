@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "AI model gateway"
 requires-python = ">=3.13"
 dependencies = [
+    "asyncpg>=0.32.0",
     "blacksheep==2.6.4",
     "exa-py>=2.25.0",
     "granian==2.8.4",
@@ -28,6 +29,7 @@ dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "ruff==0.17.0",
+    "testcontainers>=4.15.0",
 ]
 
 [build-system]
@@ -42,6 +44,8 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "live: needs a real provider account, so it is skipped unless one is configured; select it with `-m live`",
+    "postgres: needs a running Postgres container",
+    "e2e: drives the real transport against a real backend; select it with `-m e2e`",
 ]
 
 [tool.ruff]
@@ -49,7 +53,13 @@ line-length = 100
 src = ["src"]
 # Protobuf-generated modules are checked in and excluded from linting. Regenerate
 # them from the .proto source; do not edit the generated files.
-exclude = ["src/model_gateway/grpc/gateway_pb2.py", "src/model_gateway/grpc/gateway_pb2_grpc.py"]
+exclude = [
+    "src/model_gateway/grpc/gateway_pb2.py",
+    "src/model_gateway/grpc/gateway_pb2_grpc.py",
+    "src/model_gateway/governance/identity/v1/mana_service_pb2.py",
+    "src/model_gateway/governance/identity/v1/mana_service_pb2_grpc.py",
+    "src/model_gateway/governance/observability/v1/token_usage_pb2.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

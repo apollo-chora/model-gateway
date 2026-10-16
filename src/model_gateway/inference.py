@@ -154,6 +154,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import TypeVar
 from uuid import uuid4
 
@@ -192,6 +193,12 @@ from model_gateway.errors import (
     ResourceExhaustedError,
     normalise_exception,
 )
+from model_gateway.governance.manager import (
+    GovernanceDecision,
+    GovernanceManager,
+    governance_refusal,
+)
+from model_gateway.governance.outbox import build_token_usage_payload, token_usage_envelope
 from model_gateway.idempotency import (
     IdempotencyStore,
     MemoryIdempotencyStore,
@@ -524,6 +531,7 @@ class InferenceService:
         tenant_limiter: TenantConcurrencyLimiter | None = None,
         metrics: Metrics | None = None,
         tracer: Tracer | None = None,
+        governance: GovernanceManager | None = None,
     ) -> None:
         """Wire the service to the registry, the provider and the reliability policy.
 
@@ -616,6 +624,13 @@ class InferenceService:
         ``tracer`` is where the invocation's span goes, or ``None`` for a deployment
         that does not trace. It is a tracer rather than a provider because the
         provider is the process's and the tracer names this component within it.
+
+        ``governance`` is the governance chain the invocation runs through, or
+        ``None`` for a deployment that wired no governance manager — one that
+        configures no ``CHORA_OBSERVABILITY_DSN``. When it is wired, every
+        :meth:`invoke` asks it for a decision before any provider is called and
+        settles against it after a served call; when it is not, the invocation
+        runs exactly as it did before governance existed.
         """
         if attempt_timeout is not None and not _is_usable_budget(attempt_timeout):
             raise ValueError(
@@ -641,6 +656,7 @@ class InferenceService:
         self._tenant_limiter = tenant_limiter
         self._metrics = metrics
         self._tracer = tracer
+        self._governance = governance
 
     @contextmanager
     def _span(self, name: str, request: object) -> Iterator[object]:
@@ -729,6 +745,90 @@ class InferenceService:
             metrics.tokens_input_total.inc(usage.input_tokens)
         if usage.output_tokens is not None:
             metrics.tokens_output_total.inc(usage.output_tokens)
+
+    async def _governance_authorize(
+        self, request: InvocationRequest
+    ) -> GovernanceDecision | None:
+        """The governance chain's decision for one invoke, or ``None`` when ungoverned.
+
+        ``None`` means the deployment wired no governance manager: the
+        invocation runs exactly as it did before governance exists. A decision
+        that denies is raised by the caller as the governance refusal before
+        any provider is called; a decision that allows a redelivered dispatch
+        through unbilled returns with ``deduped`` set, and the settlement is
+        what honours it.
+        """
+        if self._governance is None:
+            return None
+        return await self._governance.authorize_invoke(
+            tenant_id=request.tenant_id or "",
+            gcid=request.gcid,
+            action_code=request.action_code,
+            dispatch_key=request.dispatch_idempotency_key,
+            surface=request.surface,
+            invocation_id=request.invocation_id or "",
+        )
+
+    async def _governance_settle(
+        self, request: InvocationRequest, response: InvocationResponse
+    ) -> None:
+        """Settle one served invocation against the governance ledger, best-effort.
+
+        The budget debit, the token-usage outbox record and the mana debit run
+        after the answer has been produced, because a call that produced output
+        is a call the gateway owes for. The outbox payload is the canonical
+        ``chora.observability.v1.TokenUsageRecorded`` protobuf — the bytes the
+        consumer ``proto.Unmarshal``s — built by
+        :func:`~model_gateway.governance.outbox.build_token_usage_payload`, and
+        the envelope beside it carries the contract's own keys. A settlement
+        failure is logged, never raised: the answer is already in the caller's
+        hands, and a ledger the operator misconfigured is not a reason to
+        withhold it — the same rule the accounting record follows. A request
+        with no tenant settles nothing: the budget and the outbox are
+        tenant-scoped, and there is no tenant to attribute the spend to.
+        """
+        assert self._governance is not None
+        if not request.tenant_id:
+            return
+        usage = response.usage
+        occurred_at = datetime.now(UTC)
+        usage_id = uuid4().hex
+        try:
+            await self._governance.settle_invoke(
+                tenant_id=request.tenant_id,
+                gcid=request.gcid,
+                action_code=request.action_code,
+                dispatch_key=request.dispatch_idempotency_key,
+                invocation_id=response.invocation_id or "",
+                usage_id=usage_id,
+                cost_micros=_cost_micros(response.estimated_cost),
+                payload=build_token_usage_payload(
+                    usage_id=usage_id,
+                    tenant_id=request.tenant_id,
+                    gcid=request.gcid or "",
+                    model_id=response.model,
+                    invocation_id=response.invocation_id or "",
+                    input_tokens=usage.input_tokens or 0,
+                    output_tokens=usage.output_tokens or 0,
+                    cached_tokens=usage.cached_tokens or 0,
+                    cost_micros=_cost_micros(response.estimated_cost),
+                    action_code=request.action_code or "",
+                    agent_role=request.actor_id or "",
+                    occurred_at=occurred_at,
+                ),
+                envelope=token_usage_envelope(
+                    usage_id=usage_id,
+                    tenant_id=request.tenant_id,
+                    gcid=request.gcid or "",
+                    occurred_at=occurred_at,
+                ),
+            )
+        except Exception as error:
+            logger.error(
+                "governance settlement failed",
+                error_type=type(error).__name__,
+                invocation_id=response.invocation_id,
+            )
 
     def _admit(self, namespace: str, tenant: str | None) -> None:
         """Take the admission decisions that can be answered without waiting.
@@ -856,8 +956,31 @@ class InferenceService:
         :class:`~model_gateway.errors.ModelNotFoundError` even when the key has
         a cached record. A request without a key is unaffected by all of this:
         it is never recorded and reports ``NOT_APPLICABLE``.
+
+        **A wired governance chain gates the call before the provider.** When
+        the deployment built the service with a
+        :class:`~model_gateway.governance.manager.GovernanceManager`, the
+        invocation asks it for a decision after the operation's routes are
+        resolved and before any provider is called: the companion containment
+        read, the dispatch debit claim, the tenant budget decision and — for a
+        fail-closed action — the mana quote, in that order. A decision that
+        denies is raised as the category the reason token selects and the
+        provider is never reached; a decision that allows a redelivered
+        dispatch through unbilled is served, and the settlement after the call
+        debits nothing for it. A served call settles against the ledger — the
+        budget debit and the token-usage outbox record atomically, then the mana
+        debit — and a settlement failure is logged rather than raised, so a
+        ledger the operator misconfigured never withholds an answer.
         """
         routes = self._registry.routes_for_operation(Operation.TEXT)
+        # Governance runs first, before admission and before any provider is
+        # called: a contained or overdrawn caller is refused without consuming
+        # a tenant slot, a rate-limit wait, or any upstream capacity. A
+        # decision that allows a redelivered dispatch through unbilled is
+        # remembered here and honoured at the settlement below.
+        decision = await self._governance_authorize(request)
+        if decision is not None and not decision.allowed:
+            raise governance_refusal(decision)
         # One deadline is anchored here, before admission, so the wait for a
         # tenant slot draws from the same budget the walk then spends rather
         # than from a full timeout of its own followed by a fresh one.
@@ -865,9 +988,12 @@ class InferenceService:
         started = time.monotonic()
         self._admit(namespace or "", tenant)
         async with self._tenant_slot(namespace or "", tenant, deadline):
-            return await self._invoke_admitted(
+            response = await self._invoke_admitted(
                 request, routes, namespace or "", started, deadline
             )
+        if decision is not None and not decision.deduped:
+            await self._governance_settle(request, response)
+        return response
 
     async def _invoke_admitted(
         self,
@@ -1919,6 +2045,21 @@ def _require_count(name: str, value: int) -> None:
     """
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+
+
+def _cost_micros(estimated_cost: float | None) -> int:
+    """The invocation's cost in integer micros of USD, with no price as zero.
+
+    Money is integer micros end to end in the budget tables; the canonical
+    answer reports a float dollar amount, or ``None`` when cost tracking is off
+    or no price is configured for the route. ``None`` is converted to zero
+    here — not because the call cost nothing, but because there is no amount
+    to settle, and zero micros is the honest debit for a usage whose price the
+    gateway never knew.
+    """
+    if estimated_cost is None:
+        return 0
+    return int(round(estimated_cost * 1_000_000))
 
 
 def _budget_is_spent(budget: float | None) -> bool:
