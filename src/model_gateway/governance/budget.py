@@ -2,24 +2,36 @@
 
 Every invocation a tenant makes draws down a windowed USD cap the operator
 configures in ``per_tenant_llm_budget``. This module is the gateway's half of
-that contract: it reads the active window, decides what the window allows, and
-settles the spend against it.
+that contract: it reads the active windows, decides what they allow, and
+settles the spend against them.
 
-**The read locks the window row.** :meth:`BudgetManager.read_active_budget`
-selects the most recent window that currently encloses ``now()`` with
-``FOR UPDATE``, so two concurrent invocations of one tenant cannot both read
-the same ``spent`` and both decide there is room: the second waits for the
-first's settlement and then reads the incremented value. The lock is held only
+**The read locks every active window row, across the decision.**
+:meth:`BudgetManager.active_budgets` selects every window that currently
+encloses ``now()`` with ``FOR UPDATE`` and holds the lock for the caller's
+whole block, so two concurrent invocations of one tenant cannot both read the
+same ``spent`` and both decide there is room: the second waits for the first's
+settlement and then reads the incremented value. A tenant may carry more than
+one active window — overlapping periods, or a window that opened before the
+current one closed — so :func:`decide_strictest` applies the strictest
+decision across all of them: a block anywhere refuses the call, a downgrade
+anywhere re-routes it, and an alert anywhere reports it. The lock is held only
 for the caller's transaction, which is what bounds contention even when one
 tenant fires concurrent calls.
 
-**The decision is a pure function of the window.** :func:`decide` takes the
+**The single-window read is the most recent, for callers that want it.**
+:meth:`BudgetManager.read_active_budget` returns the most recent active
+window over the same locked read; it holds the lock only for the read itself,
+so a caller that decides outside it does so without the lock the decision
+needs — :meth:`active_budgets` is the form that holds it.
+
+**The decision is a pure function of the windows.** :func:`decide` takes one
 window, or its absence, and nothing else, so the policy — allow, downgrade,
 block, alert — can be checked against every shape a window can take without a
-database. A tenant with no active window is allowed through: the budget is an
-operator opt-in, and refusing a tenant that was never configured would fail
-closed on a deployment choice the gateway does not own. ``budget_required``
-exists for the deployment that does want the closed behaviour.
+database; :func:`decide_strictest` lifts that to many. A tenant with no
+active window is allowed through: the budget is an operator opt-in, and
+refusing a tenant that was never configured would fail closed on a deployment
+choice the gateway does not own. ``budget_required`` exists for the
+deployment that does want the closed behaviour.
 
 **Settlement tolerates a missing window.** :meth:`BudgetManager.debit` updates
 the active window and accepts a zero-row result: the window may have closed
@@ -27,16 +39,26 @@ between the decision and the settlement, and charging a tenant against a window
 that no longer exists would attach a bookkeeping error to no row. Money is
 integer micros (``BIGINT``) end to end; nothing here converts to or from a
 float.
+
+**Settlement is atomic with the usage record.**
+:meth:`BudgetManager.debit_and_enqueue` writes the token-usage outbox row and
+debits the budget in one transaction, so a crash between them cannot record a
+usage the budget was not debited for, or debit a budget for a usage that was
+not recorded. The outbox insert is the idempotency guard: a usage whose row
+already exists settles nothing.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 
 from model_gateway.domain.serialization import as_int
-from model_gateway.governance.db import Database, validate_uuid
+from model_gateway.governance.db import Database, rows_affected, validate_uuid
+from model_gateway.governance.outbox import INSERT_TOKEN_USAGE, validate_usage_event
 
 __all__ = [
     "BudgetDecision",
@@ -44,18 +66,19 @@ __all__ = [
     "BudgetPolicy",
     "BudgetWindow",
     "decide",
+    "decide_strictest",
 ]
 
-_SELECT_ACTIVE_BUDGET = """
+_SELECT_ACTIVE_BUDGETS = """
     SELECT budget_id, budget_usd_micros, spent_usd_micros, policy, downgrade_to_logical_model_id
     FROM per_tenant_llm_budget
     WHERE tenant_id = $1::uuid
       AND budget_period_start <= now()
       AND budget_period_end > now()
     ORDER BY budget_period_start DESC
-    LIMIT 1
     FOR UPDATE
 """
+"""Every active window for the tenant, locked ``FOR UPDATE`` for the block's duration."""
 
 _DEBIT_ACTIVE_BUDGET = """
     UPDATE per_tenant_llm_budget
@@ -93,6 +116,15 @@ class BudgetDecision(StrEnum):
     DOWNGRADE = "downgrade"
     BLOCK = "block"
     ALERT = "alert"
+
+
+_STRICTNESS: dict[BudgetDecision, int] = {
+    BudgetDecision.ALLOW: 0,
+    BudgetDecision.ALERT: 1,
+    BudgetDecision.DOWNGRADE: 2,
+    BudgetDecision.BLOCK: 3,
+}
+"""How strictly each decision constrains the caller, for the strictest-of-many fold."""
 
 
 @dataclass(frozen=True)
@@ -153,6 +185,35 @@ def decide(budget: BudgetWindow | None, *, budget_required: bool = False) -> Bud
     return BudgetDecision.BLOCK
 
 
+def decide_strictest(
+    windows: Sequence[BudgetWindow], *, budget_required: bool = False
+) -> BudgetDecision:
+    """The strictest decision across every active window, or their absence.
+
+    A tenant may carry more than one active window, and the strictest of them
+    is the one the caller must honour: a block anywhere refuses the call, a
+    downgrade anywhere re-routes it, and an alert anywhere reports it, so a
+    tenant with a exhausted block window alongside an allowed one is refused
+    rather than served against the window that had room. With no window at
+    all the decision is :func:`decide`'s own — allowed, or blocked when the
+    deployment has made budgets required.
+    """
+    if not windows:
+        return decide(None, budget_required=budget_required)
+    return max((decide(window) for window in windows), key=lambda decision: _STRICTNESS[decision])
+
+
+def _window_from_row(row: Mapping[str, object]) -> BudgetWindow:
+    """One active budget window as the database row states it."""
+    return BudgetWindow(
+        budget_id=row["budget_id"],
+        budget_usd_micros=row["budget_usd_micros"],
+        spent_usd_micros=row["spent_usd_micros"],
+        policy=BudgetPolicy(row["policy"]),
+        downgrade_to_logical_model_id=row["downgrade_to_logical_model_id"],
+    )
+
+
 class BudgetManager:
     """Budget admission and settlement against ``per_tenant_llm_budget``.
 
@@ -167,23 +228,34 @@ class BudgetManager:
     async def read_active_budget(self, tenant_id: str) -> BudgetWindow | None:
         """The tenant's most recent window enclosing now, or ``None``.
 
-        The row is locked ``FOR UPDATE`` for the transaction's duration, so a
-        concurrent settlement cannot interleave between this read and the debit
-        it gates. ``None`` means the tenant has no active window — which
+        The row is locked ``FOR UPDATE`` for the read's duration. The lock is
+        released before the caller decides, so a decision made from this
+        window is made without it — :meth:`active_budgets` is the form that
+        holds the lock across the decision, and what the governance chain
+        uses. ``None`` means the tenant has no active window — which
         :func:`decide` reads as an allowed call, not an error.
+        """
+        async with self.active_budgets(tenant_id) as windows:
+            return windows[0] if windows else None
+
+    @asynccontextmanager
+    async def active_budgets(self, tenant_id: str) -> AsyncIterator[tuple[BudgetWindow, ...]]:
+        """Every active window enclosing now, locked ``FOR UPDATE`` for the block.
+
+        The lock is held for the whole of the caller's block, so the decision
+        the block makes is made against rows no concurrent settlement can
+        interleave with: a second invocation of the same tenant waits for the
+        first's settlement and then reads the incremented ``spent``, rather
+        than both reading the same value and both deciding there is room. A
+        tenant with no active window yields an empty tuple, which
+        :func:`decide_strictest` reads as an allowed call. A ``tenant_id``
+        that is not a UUID's shape is refused before a connection is taken,
+        the same caller bug the other governance mechanisms refuse.
         """
         validate_uuid(tenant_id, "tenant_id")
         async with self._db.transaction(tenant_id=tenant_id) as connection:
-            row = await connection.fetchrow(_SELECT_ACTIVE_BUDGET, tenant_id)
-        if row is None:
-            return None
-        return BudgetWindow(
-            budget_id=row["budget_id"],
-            budget_usd_micros=row["budget_usd_micros"],
-            spent_usd_micros=row["spent_usd_micros"],
-            policy=BudgetPolicy(row["policy"]),
-            downgrade_to_logical_model_id=row["downgrade_to_logical_model_id"],
-        )
+            rows = await connection.fetch(_SELECT_ACTIVE_BUDGETS, tenant_id)
+            yield tuple(_window_from_row(row) for row in rows)
 
     async def debit(self, tenant_id: str, usd_micros: int) -> None:
         """Add ``usd_micros`` to the tenant's active window.
@@ -201,3 +273,39 @@ class BudgetManager:
             return
         async with self._db.transaction(tenant_id=tenant_id) as connection:
             await connection.execute(_DEBIT_ACTIVE_BUDGET, tenant_id, amount)
+
+    async def debit_and_enqueue(
+        self,
+        tenant_id: str,
+        usage_id: str,
+        gcid: str,
+        cost_micros: int,
+        payload: bytes,
+        envelope: Mapping[str, str],
+    ) -> bool:
+        """Write the token-usage outbox row and debit the budget in one transaction.
+
+        The two writes commit together, so a crash between them cannot record
+        a usage the budget was not debited for, or debit a budget for a usage
+        that was not recorded — the outbox's own idempotency guard is what
+        makes the pair atomic rather than merely adjacent. The insert runs
+        first with ``ON CONFLICT DO NOTHING``: when it lands (one row), the
+        debit follows in the same transaction; when it does not (the usage
+        was already recorded), the debit is skipped and ``False`` is returned,
+        so a redelivery of one usage cannot charge the tenant twice. A
+        non-positive amount carries nothing to settle and skips only the
+        debit — the usage is still recorded. Both statements run under the
+        tenant's RLS GUCs, because the outbox and the budget tables key their
+        policies on them.
+        """
+        envelope_json = validate_usage_event(usage_id, tenant_id, gcid, payload, envelope)
+        amount = as_int("budget debit 'usd_micros'", cost_micros, minimum=0)
+        async with self._db.transaction(tenant_id=tenant_id) as connection:
+            status = await connection.execute(
+                INSERT_TOKEN_USAGE, usage_id, tenant_id, gcid, bytes(payload), envelope_json
+            )
+            if rows_affected(status) != 1:
+                return False
+            if amount:
+                await connection.execute(_DEBIT_ACTIVE_BUDGET, tenant_id, amount)
+        return True

@@ -30,6 +30,14 @@ classified by the taxonomy's own normaliser, and the abort is awaited because
 renderable citation is an in-band anomaly, not an error: the adapter returns it
 with empty citations and the unspecified finish reason, and the handler passes
 it through so the caller hedges rather than presenting web content as knowledge.
+
+**A wired governance chain gates the search before the egress.** When the
+deployment built the handler with a
+:class:`~model_gateway.governance.manager.GovernanceManager`, the search runs
+the same chain an invoke does — the egress gate, the budget decision and the
+mana quote for a fail-closed action — before the Exa call, and any refusal
+aborts with the status the reason token declares. A deployment that wired no
+governance manager gates nothing.
 """
 
 from __future__ import annotations
@@ -46,6 +54,9 @@ from model_gateway.errors import (
     ResourceExhaustedError,
     UnavailableError,
 )
+from model_gateway.governance.budget import BudgetDecision, decide_strictest
+from model_gateway.governance.mana import is_fail_closed
+from model_gateway.governance.manager import GovernanceManager
 from model_gateway.grpc import gateway_pb2 as pb
 from model_gateway.grpc import mapping
 from model_gateway.grpc.errors import abort
@@ -74,12 +85,20 @@ class GroundedSearch:
     Built by the listener with the authenticator and the Exa configuration the
     deployment wired, so the handler owns no configuration: it authenticates
     through the one object that owns inbound authentication and searches through
-    the one adapter that owns the operation.
+    the one adapter that owns the operation. The optional governance manager is
+    the chain the search runs through before the egress, when the deployment
+    wired one.
     """
 
-    def __init__(self, authenticator: Authenticator, config: ExaConfig) -> None:
+    def __init__(
+        self,
+        authenticator: Authenticator,
+        config: ExaConfig,
+        governance: GovernanceManager | None = None,
+    ) -> None:
         self._authenticator = authenticator
         self._adapter = ExaGroundedSearch(config)
+        self._governance = governance
 
     async def grounded_search(
         self, request: pb.GroundedSearchRequest, context: grpc.ServicerContext
@@ -98,6 +117,8 @@ adapter, so no part of such a request can influence the egress.
             reconcile_identity(identity, request.tenant_id or None)
             grounded_request = mapping.grounded_search_request_from_proto(request)
             _validate(grounded_request)
+            if self._governance is not None:
+                await _authorize_grounded(self._governance, grounded_request)
             result = await self._adapter.search(grounded_request)
             return mapping.grounded_search_response_to_proto(result)
         except GroundedError as error:
@@ -123,11 +144,48 @@ def _validate(request: GroundedSearchRequest) -> None:
             raise InvalidArgumentError(f"{field} is required")
 
 
+async def _authorize_grounded(
+    governance: GovernanceManager, request: GroundedSearchRequest
+) -> None:
+    """Run the governance chain for one grounded search, or raise on a refusal.
+
+    Grounded search is the gateway's one controlled egress surface, so it is
+    gated by the same chain an invoke runs, in the same order: the egress gate
+    first — the kill switch, the entitlement and the daily ceiling, read
+    uncached — then the tenant budget decision, then the mana quote for a
+    fail-closed action. Any refusal raises a :class:`GroundedError` carrying
+    the refusing mechanism's own reason token, which the handler maps onto the
+    gRPC status the governance chain declares for it, so a grounded denial
+    reaches the caller as the same status the Exa adapter's own denials do.
+    A deployment that wired no governance manager gates nothing here.
+    """
+    egress = await governance.egress.authorize(request.tenant_id)
+    if not egress.allowed:
+        raise GroundedError(egress.reason, egress.detail)
+    async with governance.budget.active_budgets(request.tenant_id) as windows:
+        decision = decide_strictest(windows)
+    if decision is BudgetDecision.BLOCK:
+        raise GroundedError(
+            "budget_exhausted",
+            "the tenant's active LLM budget window is exhausted under its block policy",
+        )
+    if governance.mana is not None and request.action_code and is_fail_closed(request.action_code):
+        quote = await governance.mana.quote(request.gcid, request.action_code)
+        if not quote.affordable and not quote.unknown_action:
+            raise GroundedError(
+                "insufficient_mana",
+                f"required={quote.required} available={quote.available} "
+                f"action={request.action_code}",
+            )
+
+
 _GROUNDED_CATEGORIES: dict[str, type[GatewayError]] = {
     "kill_switch_engaged": FailedPreconditionError,
     "external_egress_disabled": FailedPreconditionError,
     "budget_exhausted": FailedPreconditionError,
     "daily_ceiling_exceeded": ResourceExhaustedError,
+    "egress_unreadable": UnavailableError,
+    "insufficient_mana": ResourceExhaustedError,
     "invalid_argument": InvalidArgumentError,
     "vendor_unavailable": UnavailableError,
 }
@@ -135,8 +193,10 @@ _GROUNDED_CATEGORIES: dict[str, type[GatewayError]] = {
 
 The egress preconditions (kill switch, egress disabled, budget exhausted) are
 failed preconditions the caller must resolve; the daily ceiling is resource
-exhaustion the caller retries later; a vendor failure is unavailability; and an
-unrecognised reason — a gateway misconfiguration above all — is an internal
+exhaustion the caller retries later; a mana shortfall is resource exhaustion
+the caller tops up; an egress store the gateway could not read is a gateway
+fault rather than a verdict, so it is unavailability like a vendor failure; and
+an unrecognised reason — a gateway misconfiguration above all — is an internal
 error rather than something the caller could act on.
 """
 
@@ -145,19 +205,21 @@ def _as_gateway_error(error: GroundedError) -> GatewayError:
     """The gateway error a grounded failure's reason token selects.
 
     The reason tokens are the governance chain's own, and each selects the
-    category whose transport status the chain declares for it. A reason outside
-    the table is an internal error: it names a failure the gateway cannot
-    classify, which is a misconfiguration rather than a caller's remedy.
+    category whose transport status the chain declares for it. The message
+    leads with the reason token, the same way the Go adapter's
+    ``mapGroundedError`` does, so a caller can prefix-match the denial reason
+    off the status without a structured field on the wire.
 
     When the failure carries partial spend — the Exa search billed but the
     synthesis failed — the usage is included in the error details so the
     caller can account the cost the provider already charged.
     """
     category = _GROUNDED_CATEGORIES.get(error.reason, InternalError)
+    message = f"{error.reason}: {error.detail}" if error.detail else error.reason
     details = None
     if error.usage is not None:
         details = {
             "partial_grounding_units": str(error.usage.grounding_units),
             "partial_cost_micros": str(error.usage.cost_micros),
         }
-    return category(error.detail or error.reason, details=details)
+    return category(message, details=details)

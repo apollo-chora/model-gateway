@@ -33,6 +33,16 @@ from model_gateway.governance.mana import (
     ManaQuote,
     ManaResult,
     UnknownAction,
+    is_fail_closed,
+)
+from model_gateway.governance.manager import (
+    COMPANION_SURFACES,
+    FAIL_CLOSED_ACTIONS,
+    FAIL_CLOSED_PREFIXES,
+    GovernanceDecision,
+    GovernanceManager,
+    governance_refusal,
+    is_companion_surface,
 )
 from model_gateway.governance.outbox import Outbox
 from model_gateway.governance.suspension import SuspensionChecker, SuspensionDecision
@@ -42,9 +52,14 @@ __all__ = [
     "BudgetManager",
     "BudgetPolicy",
     "BudgetWindow",
+    "COMPANION_SURFACES",
     "Database",
     "EgressDecision",
     "EgressGate",
+    "FAIL_CLOSED_ACTIONS",
+    "FAIL_CLOSED_PREFIXES",
+    "GovernanceDecision",
+    "GovernanceManager",
     "IdempotencyClaims",
     "ManaClient",
     "ManaDebit",
@@ -57,4 +72,8 @@ __all__ = [
     "SuspensionDecision",
     "UnknownAction",
     "decide",
+    "decide_strictest",
+    "governance_refusal",
+    "is_companion_surface",
+    "is_fail_closed",
 ]

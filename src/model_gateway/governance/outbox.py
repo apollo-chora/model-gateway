@@ -32,7 +32,9 @@ import orjson
 from model_gateway.governance.db import Database, rows_affected, validate_uuid
 
 __all__ = [
+    "INSERT_TOKEN_USAGE",
     "Outbox",
+    "validate_usage_event",
 ]
 
 TOPIC = "chora.observability.token_usage.recorded.v1"
@@ -41,7 +43,7 @@ TOPIC = "chora.observability.token_usage.recorded.v1"
 AGGREGATE_TYPE = "token_usage"
 """The aggregate type stamped on every token-usage event."""
 
-_INSERT_TOKEN_USAGE = """
+INSERT_TOKEN_USAGE = """
     INSERT INTO outbox_events (
         id, tenant_id, gcid, agid, aggregate_type, aggregate_id,
         event_type, topic, payload, envelope, occurred_at, status,
@@ -55,6 +57,37 @@ _INSERT_TOKEN_USAGE = """
     )
     ON CONFLICT (idempotency_key) DO NOTHING
 """
+
+
+def validate_usage_event(
+    usage_id: str,
+    tenant_id: str,
+    gcid: str,
+    payload: bytes,
+    envelope: Mapping[str, str],
+) -> str:
+    """Validate one token-usage event and return its serialised envelope.
+
+    The validation :meth:`Outbox.insert_token_usage` refuses — a blank usage
+    id, a tenant that is not a UUID, a payload that is not bytes, an envelope
+    that is not a flat string map — is shared with the atomic settlement in
+    :meth:`~model_gateway.governance.budget.BudgetManager.debit_and_enqueue`,
+    which writes the same row in the same transaction as the budget debit. It
+    lives here so both writers state the event's rules once.
+    """
+    if not isinstance(usage_id, str) or not usage_id:
+        raise ValueError("outbox 'usage_id' must be a non-empty string")
+    validate_uuid(tenant_id, "tenant_id")
+    if not isinstance(gcid, str):
+        raise ValueError("outbox 'gcid' must be a string")
+    if not isinstance(payload, bytes | bytearray):
+        raise ValueError("outbox 'payload' must be bytes")
+    if not isinstance(envelope, Mapping):
+        raise ValueError("outbox 'envelope' must be a mapping of strings to strings")
+    for key, value in envelope.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError("outbox 'envelope' must map strings to strings")
+    return orjson.dumps(dict(envelope)).decode("utf-8")
 
 
 class Outbox:
@@ -86,21 +119,9 @@ class Outbox:
         envelope is serialised to JSON here; the payload is stored as the bytes
         it is given.
         """
-        if not isinstance(usage_id, str) or not usage_id:
-            raise ValueError("outbox 'usage_id' must be a non-empty string")
-        validate_uuid(tenant_id, "tenant_id")
-        if not isinstance(gcid, str):
-            raise ValueError("outbox 'gcid' must be a string")
-        if not isinstance(payload, bytes | bytearray):
-            raise ValueError("outbox 'payload' must be bytes")
-        if not isinstance(envelope, Mapping):
-            raise ValueError("outbox 'envelope' must be a mapping of strings to strings")
-        for key, value in envelope.items():
-            if not isinstance(key, str) or not isinstance(value, str):
-                raise ValueError("outbox 'envelope' must map strings to strings")
-        envelope_json = orjson.dumps(dict(envelope)).decode("utf-8")
+        envelope_json = validate_usage_event(usage_id, tenant_id, gcid, payload, envelope)
         async with self._db.transaction(tenant_id=tenant_id) as connection:
             status = await connection.execute(
-                _INSERT_TOKEN_USAGE, usage_id, tenant_id, gcid, bytes(payload), envelope_json
+                INSERT_TOKEN_USAGE, usage_id, tenant_id, gcid, bytes(payload), envelope_json
             )
         return rows_affected(status) == 1

@@ -374,6 +374,13 @@ def invocation_request_from_proto(request: pb.InvokeRequest, *, identity) -> Inv
     an absent key is ``None``, and an empty one is refused rather than read as
     no key at all.
 
+    The governance fields — ``gcid``, ``action_code``,
+    ``dispatch_idempotency_key`` and ``surface`` — are read through ``HasField``
+    the same way, because each is ``optional`` and an absent field is a request
+    that is simply ungoverned: ``None`` reaches the canonical record, which
+    reads it as no learner to meter, no action to price, no dispatch key to
+    claim and no surface to contain.
+
     Every canonical constructor this mapping reaches — each message, the tool
     declarations, the generation config and its response format, the tool choice
     and the invocation itself — validates what it is given, and a failure there
@@ -422,6 +429,14 @@ def invocation_request_from_proto(request: pb.InvokeRequest, *, identity) -> Inv
                 if request.metadata_json
                 else {}
             ),
+            gcid=request.gcid if request.HasField("gcid") else None,
+            action_code=request.action_code if request.HasField("action_code") else None,
+            dispatch_idempotency_key=(
+                request.dispatch_idempotency_key
+                if request.HasField("dispatch_idempotency_key")
+                else None
+            ),
+            surface=request.surface if request.HasField("surface") else None,
         )
     except ValueError as error:
         raise InvalidArgumentError(f"the invocation request is not valid: {error}") from error
