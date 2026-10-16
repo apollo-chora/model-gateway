@@ -45,6 +45,7 @@ testpaths = ["tests"]
 markers = [
     "live: needs a real provider account, so it is skipped unless one is configured; select it with `-m live`",
     "postgres: needs a running Postgres container",
+    "e2e: drives the real transport against a real backend; select it with `-m e2e`",
 ]
 
 [tool.ruff]
