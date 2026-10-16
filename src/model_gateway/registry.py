@@ -223,7 +223,10 @@ class ModelRegistry:
     def _routes_of(self, operation: Operation) -> tuple[Route, ...]:
         routes = self._by_operation.get(operation)
         if routes is None:
-            raise _unknown_model_error(PUBLIC_MODEL_IDS[operation], self.list_models())
+            public_id = PUBLIC_MODEL_IDS.get(operation)
+            if public_id is None:
+                raise _unknown_model_error(f"<operation {operation.value}>", self.list_models())
+            raise _unknown_model_error(public_id, self.list_models())
         return routes
 
     def _info(self, operation: Operation, routes: tuple[Route, ...]) -> ModelInfo:

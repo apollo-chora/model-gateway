@@ -59,6 +59,12 @@ class Operation(StrEnum):
     TEXT = "text"
     IMAGE = "image"
     EMBEDDINGS = "embeddings"
+    # The grounded web-research operation the contract vocabulary reserves: the proto
+    # enum carries it as a stable member. The gateway serves no binding and configures
+    # no block for it, and the registry publishes no public model ID, so it is in the
+    # enum so a lookup for it fails as the model-not-found it is rather than as a
+    # KeyError on the mapping that names the public IDs.
+    GROUNDED_SEARCH = "grounded-search"
 
 
 @dataclass(frozen=True)

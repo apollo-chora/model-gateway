@@ -96,7 +96,6 @@ def fingerprint_payload(request: InvocationRequest) -> dict[str, Any]:
     bytes rather than re-deriving them.
     """
     return {
-        "model": request.model,
         "messages": [message.to_dict() for message in request.messages],
         "system_instruction": request.system_instruction,
         "generation_config": request.generation_config.to_dict(),
@@ -110,14 +109,14 @@ def fingerprint_payload(request: InvocationRequest) -> dict[str, Any]:
 def request_fingerprint(request: InvocationRequest) -> RequestFingerprint:
     """The fingerprint of one invocation request.
 
-    Every field the answer depends on is fingerprinted: the model, the
+    Every field the answer depends on is fingerprinted: the
     conversation, the instruction, the generation config, the tools and the tool
     choice, the modality and the tenant the request acts
     under. The tenant is included because the same key under two tenants is two
     requests, and answering one from the other would leak an answer across a
     boundary the gateway is required to hold.
 
-    Four fields are deliberately excluded, each for a stated reason:
+    Five fields are deliberately excluded, each for a stated reason:
 
     * ``invocation_id`` — the gateway mints its own identifier and discards a
       provider's, so it is not a property of what the caller asked. Fingerprinting
@@ -132,6 +131,10 @@ def request_fingerprint(request: InvocationRequest) -> RequestFingerprint:
       anything: the operation is resolved from the transport and the configured
       route order applies, so the field cannot change the answer and two requests
       differing only in it are the same request.
+    * ``model`` — the caller's model string is semantically irrelevant: the
+      operation is resolved from the transport and the response is stamped with
+      the gateway's fixed public model ID, so the field cannot change the answer
+      and two requests differing only in it are the same request.
     """
     digest = sha256(
         orjson.dumps(fingerprint_payload(request), option=orjson.OPT_SORT_KEYS)
