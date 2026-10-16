@@ -319,6 +319,18 @@ class GovernanceManager:
         an unkeyed turn has nothing to dedupe. A ``gcid`` that is not a valid
         UUID also passes through: the claim's identity is unusable without one,
         and refusing to debit an unkeyed turn would bill nobody.
+
+        **The claim commits before the work it guards, so the window between the
+        two is lossy by design.** A caller that wins the claim and then crashes
+        before its call settles leaves the claim behind: a retry with the same
+        key finds it claimed, is deduped and settles nothing — for a grounded
+        search the retry skips Exa and returns an empty response, for an invoke
+        it is served unbilled. The work the first attempt did is neither re-run
+        nor re-billed; the alternative, retrying the provider call on the
+        strength of an unsettled claim, would risk double-charging the learner,
+        which is the worse outcome. The Go implementation behaves the same way:
+        its invoke takes the same claim in its own transaction before the
+        provider dispatch, and a retry after a crash is deduped, not re-run.
         """
         if not gcid or not dispatch_key:
             return True

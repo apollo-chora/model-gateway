@@ -54,11 +54,26 @@ only: the budget debit and the outbox record, with no mana debit and no egress
 counter, because the call never completed. A deployment that wired no
 governance manager gates and settles nothing.
 
-**The dispatch is claimed before the Exa call, so a redelivery is not charged
-twice.** The invocation id is the dispatch key: the first search with that id
-claims the dispatch, runs the Exa call and settles; a redelivery with the same
-id finds the dispatch already claimed, skips the Exa call and returns a deduped
-response — no second budget debit, no second outbox row, no second mana debit.
+**The dispatch is claimed before the governance gates, so a redelivery is
+answered, not re-judged.** The invocation id is the dispatch key: the first
+search with that id claims the dispatch, runs the egress gate, the budget
+decision and the mana quote, runs the Exa call and settles; a redelivery with
+the same id finds the dispatch already claimed and returns a deduped response
+before any gate runs — no second budget debit, no second outbox row, no second
+mana debit, and no refusal from a policy that changed after the first delivery
+was already answered.
+
+**A crash between the claim and the settlement loses the work, and that is the
+accepted trade.** The claim commits before the Exa call, so a process that
+crashes after claiming the dispatch but before the search completes and
+settles leaves a claimed key behind: a retry with the same invocation id finds
+the claim, skips the Exa call and returns an empty (deduped) response — the
+search is neither re-run nor re-billed, and spend that was never settled is not
+recorded. The alternative — retrying the Exa call on the strength of an
+unsettled claim — would risk charging the learner twice for one search, which
+is the worse outcome. The Go implementation carries the same behaviour: its
+invoke takes the same claim in its own transaction before the provider
+dispatch, and a retry after a crash is deduped, not re-run.
 """
 
 from __future__ import annotations
@@ -119,6 +134,16 @@ class GroundedSearch:
     the one adapter that owns the operation. The optional governance manager is
     the chain the search runs through before the egress, when the deployment
     wired one.
+
+    **The claim-then-settle window is a known lossy boundary.** If the process
+    crashes after the dispatch is claimed but before the Exa call completes and
+    settlement commits, a retry with the same ``invocation_id`` finds the
+    claim, skips Exa and returns an empty response — the search is not re-run,
+    not re-billed and not settled. This is a known limitation: the dispatch is
+    claimed before the Exa call precisely so a redelivery cannot be charged
+    twice, and the alternative — retrying the Exa call on the strength of an
+    unsettled claim — would risk double-charging the learner for one search,
+    which is the worse outcome. The Go implementation's behaviour is the same.
     """
 
     def __init__(
@@ -139,11 +164,13 @@ class GroundedSearch:
         The order is the rule: the identity is established first, the claimed
         tenant is reconciled against it second, the invocation identifier is
         resolved third — minted when the caller omitted it — the request's
-        required fields are validated fourth, and only then is the canonical
-        search built and handed to the adapter. A request that fails
+        required fields are validated fourth, the dispatch is claimed fifth, the
+        governance chain runs sixth and the Exa call last. A request that fails
         authentication, states a tenant its credential is not bound to, or is
         missing a required field never reaches the adapter, so no part of such a
-        request can influence the egress.
+        request can influence the egress. A redelivery whose dispatch was already
+        claimed is answered with the deduped response before the governance chain
+        runs, so a policy change since the first delivery cannot refuse it.
         """
         try:
             identity = self._authenticator.identity(context)
@@ -158,11 +185,13 @@ class GroundedSearch:
             )
             _validate(grounded_request)
             if self._governance is not None:
-                await _authorize_grounded(self._governance, grounded_request)
-                # Claim the dispatch before the Exa call. The dispatch key is
-                # the invocation id, so a redelivered search with the same
-                # invocation id is deduped: the claim fails, the Exa call is
-                # skipped, and the caller gets a deduped response.
+                # Claim the dispatch before the governance gates. The dispatch
+                # key is the invocation id, so a redelivered search with the same
+                # invocation id is deduped here — before the egress gate, the
+                # budget decision and the mana quote can refuse it — and the
+                # caller gets the deduped response the first delivery was
+                # promised, not a refusal a policy change since then would
+                # invent.
                 claimed = await self._governance.claim_dispatch(
                     gcid=grounded_request.gcid,
                     dispatch_key=invocation_id,
@@ -182,6 +211,7 @@ class GroundedSearch:
                             completed_at="",
                         )
                     )
+                await _authorize_grounded(self._governance, grounded_request)
             result = await self._adapter.search(grounded_request)
             if self._governance is not None:
                 await _settle_grounded(self._governance, grounded_request, result)
