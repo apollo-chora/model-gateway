@@ -66,7 +66,7 @@ from __future__ import annotations
 import grpc
 import structlog
 
-from model_gateway.errors import GatewayError
+from model_gateway.errors import GatewayError, InvalidArgumentError
 from model_gateway.grpc import gateway_pb2 as pb
 from model_gateway.grpc import mapping
 from model_gateway.grpc.errors import abort
@@ -108,6 +108,24 @@ class Invoke:
         try:
             identity = self._authenticator.identity(context)
             reconcile_identity(identity, request.tenant_id or None)
+            if request.response_modality == pb.RESPONSE_MODALITY_IMAGE:
+                # The contract carries the modality on the one Invoke RPC, so
+                # this entry point serves the operation the request declares
+                # rather than assuming text: an image call answered by the text
+                # operation is an answer to a request nobody made.
+                image_request = mapping.image_request_from_proto(request, identity=identity)
+                image_response = await self._service.generate(
+                    image_request,
+                    namespace=caller_namespace(identity),
+                    tenant=caller_tenant(identity),
+                )
+                return mapping.image_response_to_proto(image_response)
+            if request.response_modality == pb.RESPONSE_MODALITY_MULTIMODAL:
+                raise InvalidArgumentError(
+                    "the gateway serves text and image answers separately; a multimodal answer "
+                    "has no canonical representation here, so the modality is refused rather "
+                    "than approximated"
+                )
             invocation = mapping.invocation_request_from_proto(request, identity=identity)
             response = await self._service.invoke(
                 invocation,

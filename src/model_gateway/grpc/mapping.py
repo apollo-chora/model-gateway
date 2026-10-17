@@ -49,6 +49,8 @@ from model_gateway.domain import (
     GroundedUsage,
     IdempotencyStatus,
     ImagePart,
+    ImageRequest,
+    ImageResponse,
     InvocationRequest,
     Message,
     OutputItem,
@@ -771,4 +773,91 @@ def list_models_response_to_proto(infos: tuple[ModelInfo, ...]) -> pb.ListModels
     """The protobuf model listing."""
     result = pb.ListModelsResponse()
     result.models.extend(model_info_to_proto(info) for info in infos)
+    return result
+
+
+# --------------------------------------------------------------------------- image entry
+
+
+def image_request_from_proto(request: pb.InvokeRequest, *, identity) -> ImageRequest:
+    """The canonical image request an ``Invoke`` states when it asks for an image.
+
+    The image operation's request is a prompt, and the gRPC contract carries it
+    the only way it can: as the text of a message. The mapping is therefore
+    deliberately exact rather than permissive — exactly one message carrying
+    exactly one text part and nothing else — because every relaxation would be
+    the gateway rewriting what the caller asked for. Two messages, two text
+    parts, or a part that is not text all have obvious readings (join them, take
+    the last, ignore it) and each reading changes the prompt a provider is
+    asked to illustrate, so each is refused instead, naming the rule.
+
+    An image part is refused for the same reason from the other direction: this
+    entry point has no image-to-image field, so carrying it would mean dropping
+    the source the caller supplied. The HTTP images endpoint refuses an inbound
+    image URL for its own reason; neither endpoint accepts one.
+
+    ``model`` is carried for the caller's correlation and never routes; the
+    operation is this entry point's, exactly as it is for text.
+    """
+    where = "the invocation request"
+    parts: list[str] = []
+    for message_index, message in enumerate(request.messages):
+        for part_index, part in enumerate(message.content):
+            kind = part.WhichOneof("part")
+            if kind != "text":
+                raise InvalidArgumentError(
+                    f"the image operation's prompt is a text part, so {where} cannot carry a "
+                    f"{kind or 'empty'} part at messages[{message_index}].content[{part_index}]"
+                )
+            parts.append(part.text.text)
+    if len(request.messages) != 1:
+        raise InvalidArgumentError(
+            f"the image operation takes exactly one message carrying one text part, got "
+            f"{len(request.messages)} messages"
+        )
+    if len(parts) != 1:
+        raise InvalidArgumentError(
+            f"the image operation takes exactly one text part as its prompt, got {len(parts)}"
+        )
+    try:
+        return ImageRequest(
+            model=request.model or None,
+            prompt=parts[0],
+            surface=request.surface if request.HasField("surface") else "",
+            metadata=(
+                _mapped("metadata", lambda: orjson.loads(request.metadata_json))
+                if request.metadata_json
+                else {}
+            ),
+        )
+    except ValueError as error:
+        raise InvalidArgumentError(f"{where} is not valid: {error}") from error
+
+
+def image_response_to_proto(response: ImageResponse) -> pb.InvokeResponse:
+    """The protobuf answer to an ``Invoke`` that asked for an image.
+
+    Each generated image becomes one output item carrying an image content part:
+    the payload when the provider returned bytes, its location when it returned
+    a URL, never both and never neither, because the canonical record refuses an
+    entry that leaves the caller's reading of it ambiguous. The finish reason is
+    a completed answer — the image operation has no other outcome — and the
+    remaining response fields are the gateway's own identity, which is what the
+    text path stamps on its answers too.
+    """
+    result = pb.InvokeResponse(
+        invocation_id=response.invocation_id,
+        model=response.model,
+        upstream_model=response.upstream_model,
+        finish_reason=pb.FINISH_REASON_STOP,
+        idempotency_status=pb.IDEMPOTENCY_STATUS_NOT_APPLICABLE,
+    )
+    result.usage.CopyFrom(_usage_to_proto(response.usage))
+    for image in response.data:
+        part = pb.ContentPart()
+        if image.b64_json is not None:
+            part.image.data = image.b64_json
+        else:
+            part.image.url = image.url or ""
+        result.output.append(pb.OutputItem(content=part))
     return result
