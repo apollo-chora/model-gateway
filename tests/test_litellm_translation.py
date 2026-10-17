@@ -1648,3 +1648,61 @@ class TestUsageDetailsDiscardPolicy:
             from_litellm_response(make_route(discard_usage_details=True), make_request(), response)
 
         assert "server-tool-use" in str(error.value)
+
+
+class TestUnclassifiedUsageDetails:
+    """A detail the library stores as a pydantic extra is examined like any other."""
+
+    def extra_detail_response(self):
+        return response_from(usage_payload(9, 40, prompt_tokens_details={"prediction_tokens": 5}))
+
+    def test_an_extra_detail_field_is_refused_by_a_strict_route(self) -> None:
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(), make_request(), self.extra_detail_response())
+
+        assert "'prediction_tokens'" in str(error.value)
+
+    def test_an_extra_detail_field_is_refused_on_an_opted_in_route(self) -> None:
+        """The allowlist is the boundary: a category outside it is not discarded."""
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(
+                make_route(discard_usage_details=True), make_request(), self.extra_detail_response()
+            )
+
+        assert "'prediction_tokens'" in str(error.value)
+
+    def test_the_library_synthetic_completion_shape_is_still_accepted(self) -> None:
+        response = response_from(
+            usage_payload(
+                9,
+                4,
+                completion_tokens_details={"reasoning_tokens": 0, "text_tokens": 4},
+            )
+        )
+
+        result = from_litellm_response(make_route(), make_request(), response)
+
+        assert result.usage.output_tokens == 4
+
+    def test_an_extra_beside_the_synthetic_shape_breaks_the_exception(self) -> None:
+        """One measured shape is exempt; a field outside it must not ride along."""
+        response = ModelResponse()
+        response.choices = [
+            Choices(
+                finish_reason="stop",
+                index=0,
+                message=LiteLLMMessage(content="ok", role="assistant"),
+            )
+        ]
+        response.usage = litellm.types.utils.Usage(
+            prompt_tokens=9,
+            completion_tokens=4,
+            total_tokens=13,
+            completion_tokens_details={"reasoning_tokens": 0, "text_tokens": 4},
+            prompt_tokens_details={"prediction_tokens": 5},
+        )
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(), make_request(), response)
+
+        assert "'prediction_tokens'" in str(error.value)

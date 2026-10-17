@@ -846,6 +846,11 @@ def _reject_unrepresentable_usage(
     checked: cost is the gateway's, computed from configured pricing data,
     not a provider semantic the binding forwards.
 
+    The refusal is the strict reading, and a route can declare it does not want
+    the breakdown: :func:`_reject_extra_detail_fields` takes the categories such
+    a route may discard, and nothing outside them is ever discarded, so a route
+    cannot widen its own record by opting in.
+
     A refusal that recurs — extra token categories in the usage details, such
     as a reasoning-token count — is a signal that the canonical usage model
     may genuinely need extending with a field for that
@@ -935,16 +940,39 @@ def _reject_extra_detail_fields(
     # ``discardable`` is non-empty only on a route that declared the breakdown is
     # not part of the usage record it wants; the empty default is the strict
     # reading every other route keeps.
-    for name in type(details).model_fields:
-        if name in allowed:
-            continue
-        value = getattr(details, name, None)
-        if value is None or name in discardable:
+    for name, value in _detail_values(details).items():
+        if name in allowed or value is None or name in discardable:
             continue
         raise InternalError(
             f"the upstream usage carries {where[:-1]} field {name!r}, which the canonical "
             f"usage representation cannot carry"
         )
+
+
+def _detail_values(details: Any) -> dict[str, Any]:
+    """Every value the details object carries, declared field or extra.
+
+    Walking ``model_fields`` alone examined only the fields the pinned library
+    declares, so a value the library stored as a *pydantic extra* — it does that
+    for a usage key it has no field for — was never looked at, and an
+    unclassified token category could pass unexamined. That is the exact hole the
+    refusal exists to close, so the walk covers the instance: the declared fields
+    through ``model_dump`` and whatever else the model holds through
+    ``model_extra``.
+
+    A value of ``None`` still means *not reported* here, exactly as it does on a
+    declared field: the library writes ``None`` for a detail a provider omitted,
+    and the key's presence is the library's schema, not the provider's claim.
+    """
+    values: dict[str, Any] = {}
+    dump = getattr(details, "model_dump", None)
+    if callable(dump):
+        values.update(dump())
+    else:
+        for name in getattr(type(details), "model_fields", {}):
+            values[name] = getattr(details, name, None)
+    values.update(getattr(details, "model_extra", None) or {})
+    return values
 
 
 def _is_library_synthetic_completion_details(details: Any, completion_tokens: int | None) -> bool:
@@ -965,6 +993,11 @@ def _is_library_synthetic_completion_details(details: Any, completion_tokens: in
     refused.
     """
     if completion_tokens is None:
+        return False
+    if getattr(details, "model_extra", None):
+        # An extra field means the instance is not the library's shape, whatever
+        # its declared fields say: the exception exists for one measured shape,
+        # and a field outside that shape must not ride along on it.
         return False
     set_fields = {
         name for name in type(details).model_fields if getattr(details, name, None) is not None
