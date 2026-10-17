@@ -806,8 +806,14 @@ def image_request_from_proto(request: pb.InvokeRequest, *, identity) -> ImageReq
 
     * **Carried** — ``messages`` (the prompt), ``model``, ``surface`` and
       ``metadata`` build the canonical request; ``tenant_id``, ``gcid``,
-      ``actor_id`` and ``agent_id`` are identity, reconciled before this runs;
-      ``invocation_id`` is the caller's and is echoed.
+      ``actor_id`` and ``agent_id`` are identity, reconciled before this runs,
+      and the invocation is stamped by the image operation. ``invocation_id`` is
+      the one field the canonical image *request* has nowhere to hold: it is the
+      caller's correlation id and it appears on the request the proto carries,
+      but the image operation mints its own for the response, so a caller
+      correlating by the id it sent would be misled. It is accepted because the
+      Go client always sends one and refused nowhere, and this is the field's
+      documented exception.
     * **Accepted as transport facts, not as request semantics** —
       ``dispatch_idempotency_key`` and ``surface`` are stamped on every call by
       the Go client, including the renderer's, and the canonical image request
@@ -827,6 +833,13 @@ def image_request_from_proto(request: pb.InvokeRequest, *, identity) -> ImageReq
     """
     where = "the invocation request"
     _reject_text_only_image_fields(request, where)
+    for index, message in enumerate(request.messages):
+        if message.role != pb.ROLE_USER:
+            raise InvalidArgumentError(
+                f"an image prompt is the user's turn, so {where} cannot carry a message with "
+                f"role {message.role} at messages[{index}]: a system or tool message read as a "
+                f"prompt would answer a request the caller did not make"
+            )
     parts: list[str] = []
     for message_index, message in enumerate(request.messages):
         for part_index, part in enumerate(message.content):

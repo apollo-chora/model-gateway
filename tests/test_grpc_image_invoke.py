@@ -311,3 +311,26 @@ class TestTheRefusedTextOnlyFields:
 
         with pytest.raises(MalformedResponseError, match="revised prompt"):
             mapping.image_response_to_proto(response)
+
+    @pytest.mark.parametrize(
+        "role",
+        [
+            pytest.param(pb.ROLE_SYSTEM, id="system"),
+            pytest.param(pb.ROLE_ASSISTANT, id="assistant"),
+            pytest.param(pb.ROLE_TOOL, id="tool"),
+            pytest.param(pb.ROLE_UNSPECIFIED, id="unspecified"),
+        ],
+    )
+    def test_a_message_that_is_not_the_user_turn_is_refused(self, role) -> None:
+        """A system or tool message read as a prompt would answer a request nobody made."""
+        request = image_request(
+            messages=(
+                pb.Message(
+                    role=role,
+                    content=(pb.ContentPart(text=pb.TextPart(text="a fox on the moon")),),
+                ),
+            )
+        )
+
+        with pytest.raises(InvalidArgumentError, match="role"):
+            mapping.image_request_from_proto(request, identity=self.ident())
