@@ -22,8 +22,8 @@ SUPPORTED_AUTH_TYPES = "'bearer', 'x-api-key', 'api-key', 'none', 'custom-header
 
 ENTRY_KEYS = (
     "'allow_absolute_path_url', 'api_key', 'auth_type', 'capabilities', 'dimensions', "
-    "'discard_reasoning', 'endpoint', 'extra_headers', 'format', 'model_id', 'path', "
-    "'supports_dimensions_param'"
+    "'discard_reasoning', 'discard_usage_details', 'endpoint', 'extra_headers', 'format', "
+    "'model_id', 'path', 'supports_dimensions_param'"
 )
 
 
@@ -1620,7 +1620,7 @@ def test_a_non_text_route_cannot_declare_a_reasoning_policy(prefix):
     operation = Operation.IMAGE if prefix == "IMAGE_GEN" else Operation.EMBEDDINGS
 
     assert message(env) == (
-        f"{prefix}_DISCARD_REASONING is set but a reasoning trace is a text-answer concern; the "
+        f"{prefix}_DISCARD_REASONING is set but reasoning trace is a text-answer concern; the "
         f"{prefix} block serves the {operation} operation, which carries no reasoning trace to "
         f"discard, so the setting is refused rather than accepted and ignored"
     )
@@ -1650,7 +1650,7 @@ def test_a_fallback_entry_cannot_declare_a_reasoning_policy_for_another_operatio
     }
 
     assert message(env) == (
-        "IMAGE_GEN_ROUTES_JSON entry 1 'discard_reasoning' is set but a reasoning trace is a "
+        "IMAGE_GEN_ROUTES_JSON entry 1 'discard_reasoning' is set but reasoning trace is a "
         "text-answer concern; the IMAGE_GEN block serves the image operation, which carries no "
         "reasoning trace to discard, so the setting is refused rather than accepted and ignored"
     )
@@ -1662,3 +1662,44 @@ def test_a_fallback_entry_reasoning_policy_must_be_a_boolean():
     assert message(env) == (
         "TEXT_LLM_ROUTES_JSON entry 1 'discard_reasoning' must be a boolean, got a string"
     )
+
+
+def test_discarding_usage_details_defaults_to_the_strict_reading():
+    (route,) = parse(block())
+
+    assert route.discard_usage_details is False
+
+
+def test_a_text_route_can_declare_it_wants_no_token_breakdown():
+    (route,) = parse(block(TEXT_LLM_DISCARD_USAGE_DETAILS="true"))
+
+    assert route.discard_usage_details is True
+
+
+def test_a_usage_breakdown_opt_in_on_another_operation_is_rejected():
+    env = {
+        "IMAGE_GEN_ENDPOINT": "https://other.example/v1",
+        "IMAGE_GEN_MODEL_ID": "other-model",
+        "IMAGE_GEN_FORMAT": "openai",
+        "IMAGE_GEN_DISCARD_USAGE_DETAILS": "true",
+    }
+
+    assert message(env) == (
+        "IMAGE_GEN_DISCARD_USAGE_DETAILS is set but token breakdown is a text-answer concern; "
+        "the IMAGE_GEN block serves the image operation, which carries no token breakdown to "
+        "discard, so the setting is refused rather than accepted and ignored"
+    )
+
+
+def test_the_two_answer_contracts_are_independent_per_route():
+    routes = parse(
+        {
+            **block(TEXT_LLM_DISCARD_REASONING="true"),
+            **routes_json(entry(discard_usage_details=True)),
+        }
+    )
+
+    assert [(r.discard_reasoning, r.discard_usage_details) for r in routes] == [
+        (True, False),
+        (False, True),
+    ]
