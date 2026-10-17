@@ -49,6 +49,8 @@ from model_gateway.domain import (
     GroundedUsage,
     IdempotencyStatus,
     ImagePart,
+    ImageRequest,
+    ImageResponse,
     InvocationRequest,
     Message,
     OutputItem,
@@ -66,7 +68,7 @@ from model_gateway.domain import (
 )
 from model_gateway.domain.json_value import JsonValue, thaw_json
 from model_gateway.domain.streaming import StreamEvent, StreamEventKind, ToolCallDelta
-from model_gateway.errors import InvalidArgumentError
+from model_gateway.errors import InvalidArgumentError, MalformedResponseError
 from model_gateway.grpc import gateway_pb2 as pb
 from model_gateway.registry import ModelInfo
 
@@ -772,3 +774,183 @@ def list_models_response_to_proto(infos: tuple[ModelInfo, ...]) -> pb.ListModels
     result = pb.ListModelsResponse()
     result.models.extend(model_info_to_proto(info) for info in infos)
     return result
+
+
+# --------------------------------------------------------------------------- image entry
+
+
+def image_request_from_proto(request: pb.InvokeRequest, *, identity) -> ImageRequest:
+    """The canonical image request an ``Invoke`` states when it asks for an image.
+
+    The image operation's request is a prompt, and the gRPC contract carries it
+    the only way it can: as the text of a message. The mapping is therefore
+    deliberately exact rather than permissive — exactly one message carrying
+    exactly one text part and nothing else — because every relaxation would be
+    the gateway rewriting what the caller asked for. Two messages, two text
+    parts, or a part that is not text all have obvious readings (join them, take
+    the last, ignore it) and each reading changes the prompt a provider is
+    asked to illustrate, so each is refused instead, naming the rule.
+
+    An image part is refused for the same reason from the other direction: this
+    entry point has no image-to-image field, so carrying it would mean dropping
+    the source the caller supplied. The HTTP images endpoint refuses an inbound
+    image URL for its own reason; neither endpoint accepts one.
+
+    ``model`` is carried for the caller's correlation and never routes; the
+    operation is this entry point's, exactly as it is for text, and the route
+    that serves it is the image operation's configured one.
+
+    Every other field the contract carries is classified rather than ignored,
+    because a field the caller stated and the gateway dropped would make the
+    answer a reply to a request that was never made. Three groups:
+
+    * **Carried** — ``messages`` (the prompt), ``model``, ``surface`` and
+      ``metadata`` build the canonical request; ``tenant_id``, ``gcid``,
+      ``actor_id`` and ``agent_id`` are identity, reconciled before this runs,
+      and the invocation is stamped by the image operation. ``invocation_id`` is
+      the one field the canonical image *request* has nowhere to hold: it is the
+      caller's correlation id and it appears on the request the proto carries,
+      but the image operation mints its own for the response, so a caller
+      correlating by the id it sent would be misled. It is accepted because the
+      Go client always sends one and refused nowhere, and this is the field's
+      documented exception.
+    * **Accepted as transport facts, not as request semantics** —
+      ``dispatch_idempotency_key`` and ``surface`` are stamped on every call by
+      the Go client, including the renderer's, and the canonical image request
+      has nowhere to put a dispatch key: the image operation serves no
+      idempotency store. They are accepted because refusing them would refuse
+      the only caller there is, and they are named here so the exception is a
+      decision rather than an oversight.
+    * **Refused when stated** — ``system_instruction``, ``tools``,
+      ``tool_choice``, ``generation_config``, ``fallback_models``,
+      ``action_code`` and ``idempotency_key``. None has a canonical image
+      representation, and each changes what the caller asked for: a system
+      instruction or a tool set would steer a text answer, generation settings
+      would constrain sampling, a fallback list would route, an action code
+      would meter, and an idempotency key would claim one. An image answered
+      while any of them was silently dropped would be an answer to a different
+      request.
+    """
+    where = "the invocation request"
+    _reject_text_only_image_fields(request, where)
+    for index, message in enumerate(request.messages):
+        if message.role != pb.ROLE_USER:
+            raise InvalidArgumentError(
+                f"an image prompt is the user's turn, so {where} cannot carry a message with "
+                f"role {message.role} at messages[{index}]: a system or tool message read as a "
+                f"prompt would answer a request the caller did not make"
+            )
+    parts: list[str] = []
+    for message_index, message in enumerate(request.messages):
+        for part_index, part in enumerate(message.content):
+            kind = part.WhichOneof("part")
+            if kind != "text":
+                raise InvalidArgumentError(
+                    f"the image operation's prompt is a text part, so {where} cannot carry a "
+                    f"{kind or 'empty'} part at messages[{message_index}].content[{part_index}]"
+                )
+            parts.append(part.text.text)
+    if len(request.messages) != 1:
+        raise InvalidArgumentError(
+            f"the image operation takes exactly one message carrying one text part, got "
+            f"{len(request.messages)} messages"
+        )
+    if len(parts) != 1:
+        raise InvalidArgumentError(
+            f"the image operation takes exactly one text part as its prompt, got {len(parts)}"
+        )
+    try:
+        return ImageRequest(
+            model=request.model or None,
+            prompt=parts[0],
+            surface=request.surface if request.HasField("surface") else "",
+            metadata=(
+                _mapped("metadata", lambda: orjson.loads(request.metadata_json))
+                if request.metadata_json
+                else {}
+            ),
+        )
+    except ValueError as error:
+        raise InvalidArgumentError(f"{where} is not valid: {error}") from error
+
+
+def image_response_to_proto(response: ImageResponse) -> pb.InvokeResponse:
+    """The protobuf answer to an ``Invoke`` that asked for an image.
+
+    Each generated image becomes one output item carrying an image content part:
+    the payload when the provider returned bytes, its location when it returned
+    a URL, never both and never neither, because the canonical record refuses an
+    entry that leaves the caller's reading of it ambiguous. The finish reason is
+    a completed answer — the image operation has no other outcome — and the
+    remaining response fields are the gateway's own identity, which is what the
+    text path stamps on its answers too.
+    """
+    result = pb.InvokeResponse(
+        invocation_id=response.invocation_id,
+        model=response.model,
+        upstream_model=response.upstream_model,
+        finish_reason=pb.FINISH_REASON_STOP,
+        idempotency_status=pb.IDEMPOTENCY_STATUS_NOT_APPLICABLE,
+    )
+    result.usage.CopyFrom(_usage_to_proto(response.usage))
+    for image in response.data:
+        if image.revised_prompt is not None:
+            # The protobuf image part carries a payload or a location, and has
+            # no field for the prompt the provider says it actually used. The
+            # sentence the caller would lose is the provider's own account of
+            # what it drew, so the answer is refused instead of trimmed.
+            raise MalformedResponseError(
+                "the upstream image answer carries a revised prompt, which the canonical "
+                "protobuf image part cannot carry"
+            )
+        part = pb.ContentPart()
+        if image.b64_json is not None:
+            part.image.data = image.b64_json
+        else:
+            part.image.url = image.url or ""
+        result.output.append(pb.OutputItem(content=part))
+    return result
+
+
+def _reject_text_only_image_fields(request: pb.InvokeRequest, where: str) -> None:
+    """Refuse the ``Invoke`` fields an image request cannot honour, naming each.
+
+    A field is refused only when it is *stated*: the protobuf defaults are the
+    absence of a claim, and refusing those would refuse every ordinary image
+    request. ``generation_config`` is judged by its presence because every
+    member of it is a text-sampling control, and ``tools``/``fallback_models``
+    by length for the same reason.
+    """
+    if request.system_instruction:
+        raise InvalidArgumentError(
+            f"an image request has no system instruction, so {where} cannot carry one"
+        )
+    if request.tools:
+        raise InvalidArgumentError(
+            "an image request has no tool set, so the invocation request cannot carry tools"
+        )
+    if request.HasField("tool_choice"):
+        raise InvalidArgumentError(
+            "an image request has no tool choice, so the invocation request cannot carry one"
+        )
+    if request.HasField("generation_config"):
+        raise InvalidArgumentError(
+            "an image request carries no generation config: the image operation's parameters are "
+            "the prompt, its size, its count and its response format, so sampling controls stated "
+            "here would be dropped"
+        )
+    if request.fallback_models:
+        raise InvalidArgumentError(
+            "an image request cannot carry a fallback model list: the image operation's routes "
+            "are its configured ones, so a stated list would be dropped"
+        )
+    if request.HasField("action_code"):
+        raise InvalidArgumentError(
+            "an image request cannot carry an action code: the image operation prices nothing, so "
+            "a stated code would be dropped rather than billed"
+        )
+    if request.HasField("idempotency_key"):
+        raise InvalidArgumentError(
+            "an image request cannot carry an idempotency key: the image operation serves no "
+            "idempotency store, so a stated key would be dropped rather than claimed"
+        )
