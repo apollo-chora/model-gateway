@@ -1089,8 +1089,11 @@ def _reject_extra_provider_fields(
     ``citations`` slot on every message and leaves it null said nothing about
     citations, and refusing that placeholder refused every ordinary answer.
     Only ``None`` is exempt; ``[]``, ``{}`` and a populated structure are values
-    the provider chose to send and are still refused, because an empty container
-    is a claim about citations in a way a null placeholder is not.
+    the provider chose to send and are still refused. That last part is a policy
+    decision recorded for this field rather than a universal property of empty
+    collections — a provider could use an empty array to mean "no citations", and
+    until that reading is classified on evidence it is refused like any other
+    unexamined value.
     """
     if not fields:
         return
@@ -1120,11 +1123,12 @@ def _reject_unmappable_chunk(chunk: ModelResponseStream) -> None:
     classified, exactly as on the response side, so a new one cannot pass
     unexamined.
 
-    Citations are refused for the same reason the response side refuses them: a
-    citation is a statement about where the answer came from, and the canonical
-    stream has no event that could carry one. Ignoring it would tell a consumer
-    it had the whole answer when part of what the provider said about it was
-    dropped.
+    Citations are read the same way as on the response side, and for the same
+    reason: a citation is a statement about where the answer came from, and the
+    canonical stream has no event that could carry one, so a non-null citation is
+    refused rather than dropped. A null provider-specific ``citations`` slot is
+    the placeholder the response side classifies as absent, and is treated as
+    absent here too.
     """
     _reject_extra_provider_fields(
         getattr(chunk, "provider_specific_fields", None),

@@ -1522,3 +1522,20 @@ class TestReasoningDiscardPolicy:
         assert strict.finish_reason is plain.finish_reason
         assert strict.raw_finish_reason == plain.raw_finish_reason
         assert strict.usage == plain.usage
+
+    def test_the_opt_in_does_not_exempt_an_unclassified_null_field(self) -> None:
+        """Only ``citations`` is classified as absent; a null elsewhere is still refused."""
+        response = response_from(
+            reasoning_payload(
+                reasoning_content="the trace",
+                provider_specific_fields={"citations": None, "safety": None},
+            )
+        )
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(discard_reasoning=True), make_request(), response)
+
+        assert str(error.value) == (
+            "the upstream message carries provider-specific field 'safety', which the canonical "
+            "representation cannot carry"
+        )
