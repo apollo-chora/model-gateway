@@ -1539,3 +1539,170 @@ class TestReasoningDiscardPolicy:
             "the upstream message carries provider-specific field 'safety', which the canonical "
             "representation cannot carry"
         )
+
+
+def usage_payload(prompt_tokens: int, completion_tokens: int, **usage_fields: object) -> dict:
+    """A completion whose usage carries the given detail objects."""
+    payload = completion_payload()
+    usage = payload["usage"]
+    assert isinstance(usage, dict)
+    usage.update(
+        {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+    )
+    usage.update(usage_fields)
+    return payload
+
+
+class TestUsageDetailsDiscardPolicy:
+    """A route may declare it wants the answer without the token breakdown."""
+
+    def longcat_usage(self) -> dict[str, object]:
+        return {
+            "completion_tokens_details": {"reasoning_tokens": 36, "text_tokens": 4},
+            "prompt_tokens_details": {
+                "cache_write_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cached_tokens": 0,
+                "text_tokens": 9,
+            },
+        }
+
+    def test_the_reported_longcat_usage_is_refused_by_default(self) -> None:
+        response = response_from(usage_payload(9, 40, **self.longcat_usage()))
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(), make_request(), response)
+
+        assert "prompt token detail field" in str(error.value)
+
+    def test_the_same_usage_maps_when_the_route_discards_the_breakdown(self) -> None:
+        response = response_from(usage_payload(9, 40, **self.longcat_usage()))
+
+        result = from_litellm_response(
+            make_route(discard_usage_details=True), make_request(), response
+        )
+
+        assert result.usage.input_tokens == 9
+        assert result.usage.output_tokens == 40
+        assert result.usage.total_tokens == 49
+        assert result.usage.cached_tokens == 0
+
+    @pytest.mark.parametrize(
+        "usage_fields",
+        [
+            pytest.param(
+                {"prompt_tokens_details": {"cache_write_tokens": 120, "cached_tokens": 0}},
+                id="cache-write",
+            ),
+            pytest.param(
+                {"prompt_tokens_details": {"cache_creation_tokens": 120}},
+                id="cache-creation",
+            ),
+            pytest.param(
+                {"completion_tokens_details": {"reasoning_tokens": 36, "text_tokens": 4}},
+                id="completion-reasoning",
+            ),
+            pytest.param(
+                {"prompt_tokens_details": {"text_tokens": 9}},
+                id="prompt-text",
+            ),
+        ],
+    )
+    def test_each_classified_category_is_dropped_only_under_the_opt_in(
+        self, usage_fields: dict[str, object]
+    ) -> None:
+        response = response_from(usage_payload(9, 40, **usage_fields))
+
+        with pytest.raises(InternalError):
+            from_litellm_response(make_route(), make_request(), response)
+
+        result = from_litellm_response(
+            make_route(discard_usage_details=True), make_request(), response
+        )
+
+        assert result.usage.input_tokens == 9
+        assert result.usage.output_tokens == 40
+        assert result.usage.total_tokens == 49
+
+    def test_an_unclassified_detail_category_is_still_refused(self) -> None:
+        response = response_from(
+            usage_payload(9, 40, prompt_tokens_details={"web_search_requests": 2})
+        )
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(discard_usage_details=True), make_request(), response)
+
+        assert str(error.value) == (
+            "the upstream usage carries prompt token detail field 'web_search_requests', which "
+            "the canonical usage representation cannot carry"
+        )
+
+    def test_a_server_tool_use_record_is_still_refused(self) -> None:
+        response = response_from(usage_payload(9, 40, server_tool_use={"web_search_requests": 1}))
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(discard_usage_details=True), make_request(), response)
+
+        assert "server-tool-use" in str(error.value)
+
+
+class TestUnclassifiedUsageDetails:
+    """A detail the library stores as a pydantic extra is examined like any other."""
+
+    def extra_detail_response(self):
+        return response_from(usage_payload(9, 40, prompt_tokens_details={"prediction_tokens": 5}))
+
+    def test_an_extra_detail_field_is_refused_by_a_strict_route(self) -> None:
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(), make_request(), self.extra_detail_response())
+
+        assert "'prediction_tokens'" in str(error.value)
+
+    def test_an_extra_detail_field_is_refused_on_an_opted_in_route(self) -> None:
+        """The allowlist is the boundary: a category outside it is not discarded."""
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(
+                make_route(discard_usage_details=True), make_request(), self.extra_detail_response()
+            )
+
+        assert "'prediction_tokens'" in str(error.value)
+
+    def test_the_library_synthetic_completion_shape_is_still_accepted(self) -> None:
+        response = response_from(
+            usage_payload(
+                9,
+                4,
+                completion_tokens_details={"reasoning_tokens": 0, "text_tokens": 4},
+            )
+        )
+
+        result = from_litellm_response(make_route(), make_request(), response)
+
+        assert result.usage.output_tokens == 4
+
+    def test_an_extra_beside_the_synthetic_shape_breaks_the_exception(self) -> None:
+        """One measured shape is exempt; a field outside it must not ride along."""
+        response = ModelResponse()
+        response.choices = [
+            Choices(
+                finish_reason="stop",
+                index=0,
+                message=LiteLLMMessage(content="ok", role="assistant"),
+            )
+        ]
+        response.usage = litellm.types.utils.Usage(
+            prompt_tokens=9,
+            completion_tokens=4,
+            total_tokens=13,
+            completion_tokens_details={"reasoning_tokens": 0, "text_tokens": 4},
+            prompt_tokens_details={"prediction_tokens": 5},
+        )
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(), make_request(), response)
+
+        assert "'prediction_tokens'" in str(error.value)

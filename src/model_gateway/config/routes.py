@@ -125,6 +125,7 @@ class Route:
     supports_dimensions_param: bool = False
     auth_type: AuthType | None = None
     discard_reasoning: bool = False
+    discard_usage_details: bool = False
 
     @property
     def litellm_model(self) -> str:
@@ -184,6 +185,7 @@ _EXTRA_HEADERS_JSON = "EXTRA_HEADERS_JSON"
 _CAPABILITIES = "CAPABILITIES"
 _ALLOW_ABSOLUTE_PATH_URL = "ALLOW_ABSOLUTE_PATH_URL"
 _DISCARD_REASONING = "DISCARD_REASONING"
+_DISCARD_USAGE_DETAILS = "DISCARD_USAGE_DETAILS"
 _CONTEXT_WINDOW = "CONTEXT_WINDOW"
 _MAX_OUTPUT_TOKENS = "MAX_OUTPUT_TOKENS"
 _DIMENSIONS = "DIMENSIONS"
@@ -202,6 +204,7 @@ _ENTRY_EXTRA_HEADERS = "extra_headers"
 _ENTRY_CAPABILITIES = "capabilities"
 _ENTRY_ALLOW_ABSOLUTE_PATH_URL = "allow_absolute_path_url"
 _ENTRY_DISCARD_REASONING = "discard_reasoning"
+_ENTRY_DISCARD_USAGE_DETAILS = "discard_usage_details"
 _ENTRY_DIMENSIONS = "dimensions"
 _ENTRY_SUPPORTS_DIMENSIONS_PARAM = "supports_dimensions_param"
 
@@ -217,6 +220,7 @@ _ENTRY_KEYS: frozenset[str] = frozenset(
         _ENTRY_CAPABILITIES,
         _ENTRY_ALLOW_ABSOLUTE_PATH_URL,
         _ENTRY_DISCARD_REASONING,
+        _ENTRY_DISCARD_USAGE_DETAILS,
         _ENTRY_DIMENSIONS,
         _ENTRY_SUPPORTS_DIMENSIONS_PARAM,
     }
@@ -298,6 +302,9 @@ def _parse_block(
     opt_in = _read(env, opt_in_variable)
     allow_absolute_path_url = _parse_bool(opt_in_variable, opt_in) if opt_in else False
     discard_reasoning = _singleton_discard_reasoning(block, env)
+    discard_usage_details = _singleton_answer_contract(
+        block, env, _DISCARD_USAGE_DETAILS, "token breakdown"
+    )
     capabilities = _singleton_capabilities(block, _read(env, _variable(block, _CAPABILITIES)))
     extra_headers = _singleton_extra_headers(
         block, _read(env, _variable(block, _EXTRA_HEADERS_JSON))
@@ -338,6 +345,7 @@ def _parse_block(
         dimensions=dimensions,
         supports_dimensions_param=supports_dimensions_param,
         discard_reasoning=discard_reasoning,
+        discard_usage_details=discard_usage_details,
     )
 
     sources: list[tuple[str, Route]] = [(f"the {block.prefix}_* block", primary)]
@@ -349,41 +357,57 @@ def _parse_block(
     return [route for _, route in sources]
 
 
-def _singleton_discard_reasoning(block: _Block, env: Mapping[str, str]) -> bool:
-    """Read the block's reasoning-discard opt-in, confined to the text operation.
+def _singleton_answer_contract(
+    block: _Block, env: Mapping[str, str], suffix: str, concern: str
+) -> bool:
+    """Read one of the block's answer-contract opt-ins, confined to text.
 
-    A reasoning trace is a text-answer concern: the image and embeddings
-    operations have no trace to discard, so an enabled value there is refused at
-    startup rather than accepted and left to do nothing.
+    ``concern`` names what the setting is about, so the refusal below reads as
+    the fact it is: there is nothing on the image or embeddings operation for the
+    setting to describe, so an enabled value there is refused at startup rather
+    than accepted and left to do nothing.
     """
-    variable = _variable(block, _DISCARD_REASONING)
+    variable = _variable(block, suffix)
     raw = _read(env, variable)
     if not raw:
         return False
     enabled = _parse_bool(variable, raw)
-    _reject_non_text_discard_reasoning(variable, enabled, block)
+    _reject_non_text_answer_contract(variable, enabled, block, concern)
     return enabled
 
 
-def _entry_discard_reasoning(block: _Block, where: str, entry: Mapping[str, object]) -> bool:
-    """Read one ``ROUTES_JSON`` entry's reasoning-discard opt-in.
+def _singleton_discard_reasoning(block: _Block, env: Mapping[str, str]) -> bool:
+    """The block's reasoning-discard opt-in (see :class:`Route`)."""
+    return _singleton_answer_contract(block, env, _DISCARD_REASONING, "reasoning trace")
+
+
+def _entry_answer_contract(
+    block: _Block, where: str, entry: Mapping[str, object], key: str, concern: str
+) -> bool:
+    """Read one ``ROUTES_JSON`` entry's answer-contract opt-in.
 
     Each entry declares its own answer contract: an entry that does not set the
     key is strict even when the block's primary route opted in, because the
     policy describes the answer a route accepts and not a provider family.
     """
-    enabled = _entry_flag(where, entry, _ENTRY_DISCARD_REASONING)
-    _reject_non_text_discard_reasoning(f"{where} {_ENTRY_DISCARD_REASONING!r}", enabled, block)
+    enabled = _entry_flag(where, entry, key)
+    _reject_non_text_answer_contract(f"{where} {key!r}", enabled, block, concern)
     return enabled
 
 
-def _reject_non_text_discard_reasoning(setting: str, enabled: bool, block: _Block) -> None:
+def _entry_discard_reasoning(block: _Block, where: str, entry: Mapping[str, object]) -> bool:
+    """One entry's reasoning-discard opt-in (see :class:`Route`)."""
+    return _entry_answer_contract(block, where, entry, _ENTRY_DISCARD_REASONING, "reasoning trace")
+
+
+def _reject_non_text_answer_contract(
+    setting: str, enabled: bool, block: _Block, concern: str
+) -> None:
     if enabled and block.operation is not Operation.TEXT:
         raise ConfigurationError(
-            f"{setting} is set but a reasoning trace is a text-answer concern; the "
-            f"{block.prefix} block serves the {block.operation.value} operation, which carries "
-            f"no reasoning trace to discard, so the setting is refused rather than accepted and "
-            f"ignored"
+            f"{setting} is set but {concern} is a text-answer concern; the {block.prefix} block "
+            f"serves the {block.operation.value} operation, which carries no {concern} to "
+            f"discard, so the setting is refused rather than accepted and ignored"
         )
 
 
@@ -430,6 +454,7 @@ _INERT_SETTINGS: tuple[tuple[str, Callable[[str, str], bool]], ...] = (
     (_CAPABILITIES, _inert_text),
     (_ALLOW_ABSOLUTE_PATH_URL, _inert_flag),
     (_DISCARD_REASONING, _inert_flag),
+    (_DISCARD_USAGE_DETAILS, _inert_flag),
     (_CONTEXT_WINDOW, _inert_text),
     (_MAX_OUTPUT_TOKENS, _inert_text),
     (_DIMENSIONS, _inert_text),
@@ -510,6 +535,9 @@ def _parse_entry(
         dimensions=dimensions,
         supports_dimensions_param=supports_dimensions_param,
         discard_reasoning=_entry_discard_reasoning(block, where, entry),
+        discard_usage_details=_entry_answer_contract(
+            block, where, entry, _ENTRY_DISCARD_USAGE_DETAILS, "token breakdown"
+        ),
     )
 
 

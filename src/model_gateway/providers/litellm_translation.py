@@ -291,7 +291,10 @@ def from_litellm_response(
         content=_output(message),
         finish_reason=FinishReason.coerce(raw_finish_reason),
         raw_finish_reason=raw_finish_reason,
-        usage=_usage(getattr(response, "usage", None)),
+        usage=_usage(
+            getattr(response, "usage", None),
+            discard_usage_details=route.discard_usage_details,
+        ),
     )
 
 
@@ -301,6 +304,7 @@ def from_litellm_chunk(
     invocation_id: str,
     sequence: int,
     discard_reasoning: bool = False,
+    discard_usage_details: bool = False,
 ) -> tuple[StreamEvent, ...]:
     """Translate one upstream streaming chunk into canonical stream events.
 
@@ -400,7 +404,7 @@ def from_litellm_chunk(
                 kind=StreamEventKind.USAGE,
                 sequence=sequence + len(events),
                 invocation_id=invocation_id,
-                usage=_usage(usage),
+                usage=_usage(usage, discard_usage_details=discard_usage_details),
             )
         )
     if choices and getattr(choices[0], "finish_reason", None) is not None:
@@ -718,7 +722,7 @@ def _arguments(raw: str | None) -> Mapping[str, Any] | str | None:
     return raw
 
 
-def _usage(usage: LiteLLMUsage | None) -> TokenUsage:
+def _usage(usage: LiteLLMUsage | None, *, discard_usage_details: bool = False) -> TokenUsage:
     """The upstream usage as a canonical usage record.
 
     A ``None`` usage means the provider reported nothing, which is not the same
@@ -727,6 +731,14 @@ def _usage(usage: LiteLLMUsage | None) -> TokenUsage:
     of zero beside non-zero parts is that placeholder rather than a reported
     fact, and the gateway derives the total from the parts and names it as the
     estimate it is.
+
+    ``discard_usage_details`` is the route's declared usage contract: a provider
+    that reports a token breakdown the canonical record has no field for would
+    otherwise fail every answer, so the route declares it does not use the
+    breakdown and the categories in :data:`_DISCARDABLE_PROMPT_DETAILS` and
+    :data:`_DISCARDABLE_COMPLETION_DETAILS` are dropped. The totals and the
+    cached count are still mapped exactly as the provider reported them; only the
+    breakdown is lost, and only on a route that says the loss is acceptable.
     """
     if usage is None:
         return TokenUsage()
@@ -737,7 +749,7 @@ def _usage(usage: LiteLLMUsage | None) -> TokenUsage:
     if total_tokens == 0 and (input_tokens > 0 or output_tokens > 0):
         total_tokens = input_tokens + output_tokens
         estimated.add("total_tokens")
-    _reject_unrepresentable_usage(usage)
+    _reject_unrepresentable_usage(usage, discard_usage_details=discard_usage_details)
     return TokenUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -822,7 +834,9 @@ def _cached_tokens(usage: LiteLLMUsage) -> int | None:
     return details.cached_tokens
 
 
-def _reject_unrepresentable_usage(usage: LiteLLMUsage) -> None:
+def _reject_unrepresentable_usage(
+    usage: LiteLLMUsage, *, discard_usage_details: bool = False
+) -> None:
     """Refuse usage fields the canonical model cannot carry.
 
     Only ``cached_tokens`` has a canonical target among the prompt-token
@@ -831,6 +845,11 @@ def _reject_unrepresentable_usage(usage: LiteLLMUsage) -> None:
     is rejected rather than trimmed. LiteLLM's own ``cost`` is deliberately not
     checked: cost is the gateway's, computed from configured pricing data,
     not a provider semantic the binding forwards.
+
+    The refusal is the strict reading, and a route can declare it does not want
+    the breakdown: :func:`_reject_extra_detail_fields` takes the categories such
+    a route may discard, and nothing outside them is ever discarded, so a route
+    cannot widen its own record by opting in.
 
     A refusal that recurs — extra token categories in the usage details, such
     as a reasoning-token count — is a signal that the canonical usage model
@@ -852,7 +871,10 @@ def _reject_unrepresentable_usage(usage: LiteLLMUsage) -> None:
     prompt_details = usage.prompt_tokens_details
     if prompt_details is not None:
         _reject_extra_detail_fields(
-            prompt_details, "prompt token details", frozenset({"cached_tokens"})
+            prompt_details,
+            "prompt token details",
+            frozenset({"cached_tokens"}),
+            discardable=_DISCARDABLE_PROMPT_DETAILS if discard_usage_details else frozenset(),
         )
     completion_details = usage.completion_tokens_details
     if completion_details is not None:
@@ -860,6 +882,7 @@ def _reject_unrepresentable_usage(usage: LiteLLMUsage) -> None:
             completion_details,
             "completion token details",
             frozenset(),
+            discardable=_DISCARDABLE_COMPLETION_DETAILS if discard_usage_details else frozenset(),
             completion_tokens=usage.completion_tokens,
         )
     if getattr(usage, "server_tool_use", None) is not None:
@@ -874,6 +897,7 @@ def _reject_extra_detail_fields(
     where: str,
     allowed: frozenset[str],
     *,
+    discardable: frozenset[str] = frozenset(),
     completion_tokens: int | None = None,
 ) -> None:
     """Refuse a usage-detail field with no canonical target, naming the first one found.
@@ -890,7 +914,9 @@ def _reject_extra_detail_fields(
       ``text_tokens=completion_tokens`` — the library's own arithmetic, not a
       provider report. That whole shape, and only that shape, is ignored.
     * anything else is a provider-reported count the canonical usage model
-      cannot carry, and is refused: an explicit zero — a provider that
+      cannot carry, and is refused — unless ``discardable`` names it, which
+      only a route that declared the breakdown is not part of its record
+      passes: an explicit zero — a provider that
       reports ``reasoning_tokens=0`` without the library's derived
       ``text_tokens`` stated a fact the canonical model cannot hold — a
       non-zero count, a ``text_tokens`` that does not equal the library's
@@ -913,16 +939,42 @@ def _reject_extra_detail_fields(
     """
     if _is_library_synthetic_completion_details(details, completion_tokens):
         return
-    for name in type(details).model_fields:
-        if name in allowed:
-            continue
-        value = getattr(details, name, None)
-        if value is None:
+    # ``discardable`` is non-empty only on a route that declared the breakdown is
+    # not part of the usage record it wants; the empty default is the strict
+    # reading every other route keeps.
+    for name, value in _detail_values(details).items():
+        if name in allowed or value is None or name in discardable:
             continue
         raise InternalError(
             f"the upstream usage carries {where[:-1]} field {name!r}, which the canonical "
             f"usage representation cannot carry"
         )
+
+
+def _detail_values(details: Any) -> dict[str, Any]:
+    """Every value the details object carries, declared field or extra.
+
+    Walking ``model_fields`` alone examined only the fields the pinned library
+    declares, so a value the library stored as a *pydantic extra* — it does that
+    for a usage key it has no field for — was never looked at, and an
+    unclassified token category could pass unexamined. That is the exact hole the
+    refusal exists to close, so the walk covers the instance: the declared fields
+    through ``model_dump`` and whatever else the model holds through
+    ``model_extra``.
+
+    A value of ``None`` still means *not reported* here, exactly as it does on a
+    declared field: the library writes ``None`` for a detail a provider omitted,
+    and the key's presence is the library's schema, not the provider's claim.
+    """
+    values: dict[str, Any] = {}
+    dump = getattr(details, "model_dump", None)
+    if callable(dump):
+        values.update(dump())
+    else:
+        for name in getattr(type(details), "model_fields", {}):
+            values[name] = getattr(details, name, None)
+    values.update(getattr(details, "model_extra", None) or {})
+    return values
 
 
 def _is_library_synthetic_completion_details(details: Any, completion_tokens: int | None) -> bool:
@@ -943,6 +995,11 @@ def _is_library_synthetic_completion_details(details: Any, completion_tokens: in
     refused.
     """
     if completion_tokens is None:
+        return False
+    if getattr(details, "model_extra", None):
+        # An extra field means the instance is not the library's shape, whatever
+        # its declared fields say: the exception exists for one measured shape,
+        # and a field outside that shape must not ride along on it.
         return False
     set_fields = {
         name for name in type(details).model_fields if getattr(details, name, None) is not None
@@ -985,6 +1042,31 @@ _NON_SEMANTIC_RESPONSE_FIELDS: frozenset[str] = frozenset(
 _DISCARDABLE_REASONING_FIELDS: frozenset[str] = frozenset(
     {"reasoning_content", "thinking_blocks", "reasoning_items"}
 )
+
+# The usage-detail categories a route may declare it does not use, and the exact
+# extent of a route's ``discard_usage_details`` permission. A provider that
+# reports its token breakdown -- a cache-write count, a modality count, a
+# reasoning count -- states facts the canonical usage record has no field for, so
+# the answer is refused by default. A route whose consumers only need the totals
+# declares that it wants the answer without that breakdown, and these two sets
+# are what it may drop: the categories named here and nothing else. Listing a
+# category is a decision that the record can be read without it, not a place to
+# park a semantic the canonical model cannot hold, so a field named in a
+# provider's payload but absent from these sets is still refused.
+_DISCARDABLE_PROMPT_DETAILS: frozenset[str] = frozenset(
+    {
+        "cache_write_tokens",
+        # The same fact under the library's Anthropic-shaped name: a cache write
+        # is what the canonical record has no field for, whichever name carries
+        # it, and the pinned library populates this one beside the other.
+        "cache_creation_tokens",
+        "text_tokens",
+        "audio_tokens",
+        "image_tokens",
+        "video_tokens",
+    }
+)
+_DISCARDABLE_COMPLETION_DETAILS: frozenset[str] = frozenset({"reasoning_tokens", "text_tokens"})
 
 
 def _reject_unmappable(

@@ -577,6 +577,7 @@ class LiteLLMProvider:
                         invocation_id=invocation_id,
                         sequence=sequence,
                         discard_reasoning=route.discard_reasoning,
+                        discard_usage_details=route.discard_usage_details,
                     ):
                         if event.kind is StreamEventKind.FINISH:
                             if finish is None:
