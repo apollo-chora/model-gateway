@@ -22,7 +22,7 @@ SUPPORTED_AUTH_TYPES = "'bearer', 'x-api-key', 'api-key', 'none', 'custom-header
 
 ENTRY_KEYS = (
     "'allow_absolute_path_url', 'api_key', 'auth_type', 'capabilities', 'dimensions', "
-    "'endpoint', 'extra_headers', 'format', 'model_id', 'path', "
+    "'discard_reasoning', 'endpoint', 'extra_headers', 'format', 'model_id', 'path', "
     "'supports_dimensions_param'"
 )
 
@@ -1577,3 +1577,88 @@ def test_a_complete_environment_configuration_is_accepted():
     assert [route.auth_type for route in routes] == [AuthType.BEARER] * 3
     assert routes[2].dimensions == 1024
     assert routes[2].supports_dimensions_param is False
+
+
+def test_discarding_reasoning_defaults_to_the_strict_reading():
+    """A route that did not ask for the trace refused it, as every route did before."""
+    (route,) = parse(block())
+
+    assert route.discard_reasoning is False
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "on", "TRUE", "Yes"])
+def test_a_text_route_can_declare_the_trace_is_not_part_of_the_answer(value):
+    (route,) = parse(block(TEXT_LLM_DISCARD_REASONING=value))
+
+    assert route.discard_reasoning is True
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", "off"])
+def test_a_text_route_can_decline_the_opt_in_explicitly(value):
+    (route,) = parse(block(TEXT_LLM_DISCARD_REASONING=value))
+
+    assert route.discard_reasoning is False
+
+
+def test_a_reasoning_opt_in_the_gateway_cannot_read_is_rejected():
+    assert message(block(TEXT_LLM_DISCARD_REASONING="banana")) == (
+        "TEXT_LLM_DISCARD_REASONING must be a boolean, got 'banana'; expected one of "
+        "'0', '1', 'false', 'no', 'off', 'on', 'true', 'yes'"
+    )
+
+
+@pytest.mark.parametrize("prefix", ["IMAGE_GEN", "EMBEDDINGS"])
+def test_a_non_text_route_cannot_declare_a_reasoning_policy(prefix):
+    """The image and embeddings operations carry no trace, so the setting is refused."""
+    env = {
+        f"{prefix}_ENDPOINT": "https://other.example/v1",
+        f"{prefix}_MODEL_ID": "other-model",
+        f"{prefix}_FORMAT": "openai",
+        f"{prefix}_DISCARD_REASONING": "true",
+    }
+
+    operation = Operation.IMAGE if prefix == "IMAGE_GEN" else Operation.EMBEDDINGS
+
+    assert message(env) == (
+        f"{prefix}_DISCARD_REASONING is set but a reasoning trace is a text-answer concern; the "
+        f"{prefix} block serves the {operation} operation, which carries no reasoning trace to "
+        f"discard, so the setting is refused rather than accepted and ignored"
+    )
+
+
+def test_a_fallback_entry_declares_its_own_reasoning_policy():
+    """The policy describes the answer a route accepts, so it is not inherited."""
+    routes = parse({**block(TEXT_LLM_DISCARD_REASONING="true"), **routes_json(entry())})
+
+    assert [route.discard_reasoning for route in routes] == [True, False]
+
+
+def test_a_fallback_entry_can_opt_in_while_the_primary_route_stays_strict():
+    routes = parse({**block(), **routes_json(entry(discard_reasoning=True))})
+
+    assert [route.discard_reasoning for route in routes] == [False, True]
+
+
+def test_a_fallback_entry_cannot_declare_a_reasoning_policy_for_another_operation():
+    env = {
+        "IMAGE_GEN_ENDPOINT": "https://images.example/v1",
+        "IMAGE_GEN_MODEL_ID": "image-model",
+        "IMAGE_GEN_FORMAT": "openai",
+        "IMAGE_GEN_ROUTES_JSON": json.dumps(
+            [entry(endpoint="https://images2.example/v1", discard_reasoning=True)]
+        ),
+    }
+
+    assert message(env) == (
+        "IMAGE_GEN_ROUTES_JSON entry 1 'discard_reasoning' is set but a reasoning trace is a "
+        "text-answer concern; the IMAGE_GEN block serves the image operation, which carries no "
+        "reasoning trace to discard, so the setting is refused rather than accepted and ignored"
+    )
+
+
+def test_a_fallback_entry_reasoning_policy_must_be_a_boolean():
+    env = {**block(), **routes_json(entry(discard_reasoning="true"))}
+
+    assert message(env) == (
+        "TEXT_LLM_ROUTES_JSON entry 1 'discard_reasoning' must be a boolean, got a string"
+    )

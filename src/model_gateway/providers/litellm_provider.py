@@ -573,7 +573,10 @@ class LiteLLMProvider:
                 stream = await litellm.acompletion(**params, client=client)
                 async for chunk in stream:
                     for event in from_litellm_chunk(
-                        chunk, invocation_id=invocation_id, sequence=sequence
+                        chunk,
+                        invocation_id=invocation_id,
+                        sequence=sequence,
+                        discard_reasoning=route.discard_reasoning,
                     ):
                         if event.kind is StreamEventKind.FINISH:
                             if finish is None:
