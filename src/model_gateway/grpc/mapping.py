@@ -68,7 +68,7 @@ from model_gateway.domain import (
 )
 from model_gateway.domain.json_value import JsonValue, thaw_json
 from model_gateway.domain.streaming import StreamEvent, StreamEventKind, ToolCallDelta
-from model_gateway.errors import InvalidArgumentError
+from model_gateway.errors import InvalidArgumentError, MalformedResponseError
 from model_gateway.grpc import gateway_pb2 as pb
 from model_gateway.registry import ModelInfo
 
@@ -797,9 +797,36 @@ def image_request_from_proto(request: pb.InvokeRequest, *, identity) -> ImageReq
     image URL for its own reason; neither endpoint accepts one.
 
     ``model`` is carried for the caller's correlation and never routes; the
-    operation is this entry point's, exactly as it is for text.
+    operation is this entry point's, exactly as it is for text, and the route
+    that serves it is the image operation's configured one.
+
+    Every other field the contract carries is classified rather than ignored,
+    because a field the caller stated and the gateway dropped would make the
+    answer a reply to a request that was never made. Three groups:
+
+    * **Carried** — ``messages`` (the prompt), ``model``, ``surface`` and
+      ``metadata`` build the canonical request; ``tenant_id``, ``gcid``,
+      ``actor_id`` and ``agent_id`` are identity, reconciled before this runs;
+      ``invocation_id`` is the caller's and is echoed.
+    * **Accepted as transport facts, not as request semantics** —
+      ``dispatch_idempotency_key`` and ``surface`` are stamped on every call by
+      the Go client, including the renderer's, and the canonical image request
+      has nowhere to put a dispatch key: the image operation serves no
+      idempotency store. They are accepted because refusing them would refuse
+      the only caller there is, and they are named here so the exception is a
+      decision rather than an oversight.
+    * **Refused when stated** — ``system_instruction``, ``tools``,
+      ``tool_choice``, ``generation_config``, ``fallback_models``,
+      ``action_code`` and ``idempotency_key``. None has a canonical image
+      representation, and each changes what the caller asked for: a system
+      instruction or a tool set would steer a text answer, generation settings
+      would constrain sampling, a fallback list would route, an action code
+      would meter, and an idempotency key would claim one. An image answered
+      while any of them was silently dropped would be an answer to a different
+      request.
     """
     where = "the invocation request"
+    _reject_text_only_image_fields(request, where)
     parts: list[str] = []
     for message_index, message in enumerate(request.messages):
         for part_index, part in enumerate(message.content):
@@ -854,6 +881,15 @@ def image_response_to_proto(response: ImageResponse) -> pb.InvokeResponse:
     )
     result.usage.CopyFrom(_usage_to_proto(response.usage))
     for image in response.data:
+        if image.revised_prompt is not None:
+            # The protobuf image part carries a payload or a location, and has
+            # no field for the prompt the provider says it actually used. The
+            # sentence the caller would lose is the provider's own account of
+            # what it drew, so the answer is refused instead of trimmed.
+            raise MalformedResponseError(
+                "the upstream image answer carries a revised prompt, which the canonical "
+                "protobuf image part cannot carry"
+            )
         part = pb.ContentPart()
         if image.b64_json is not None:
             part.image.data = image.b64_json
@@ -861,3 +897,47 @@ def image_response_to_proto(response: ImageResponse) -> pb.InvokeResponse:
             part.image.url = image.url or ""
         result.output.append(pb.OutputItem(content=part))
     return result
+
+
+def _reject_text_only_image_fields(request: pb.InvokeRequest, where: str) -> None:
+    """Refuse the ``Invoke`` fields an image request cannot honour, naming each.
+
+    A field is refused only when it is *stated*: the protobuf defaults are the
+    absence of a claim, and refusing those would refuse every ordinary image
+    request. ``generation_config`` is judged by its presence because every
+    member of it is a text-sampling control, and ``tools``/``fallback_models``
+    by length for the same reason.
+    """
+    if request.system_instruction:
+        raise InvalidArgumentError(
+            f"an image request has no system instruction, so {where} cannot carry one"
+        )
+    if request.tools:
+        raise InvalidArgumentError(
+            "an image request has no tool set, so the invocation request cannot carry tools"
+        )
+    if request.HasField("tool_choice"):
+        raise InvalidArgumentError(
+            "an image request has no tool choice, so the invocation request cannot carry one"
+        )
+    if request.HasField("generation_config"):
+        raise InvalidArgumentError(
+            "an image request carries no generation config: the image operation's parameters are "
+            "the prompt, its size, its count and its response format, so sampling controls stated "
+            "here would be dropped"
+        )
+    if request.fallback_models:
+        raise InvalidArgumentError(
+            "an image request cannot carry a fallback model list: the image operation's routes "
+            "are its configured ones, so a stated list would be dropped"
+        )
+    if request.HasField("action_code"):
+        raise InvalidArgumentError(
+            "an image request cannot carry an action code: the image operation prices nothing, so "
+            "a stated code would be dropped rather than billed"
+        )
+    if request.HasField("idempotency_key"):
+        raise InvalidArgumentError(
+            "an image request cannot carry an idempotency key: the image operation serves no "
+            "idempotency store, so a stated key would be dropped rather than claimed"
+        )

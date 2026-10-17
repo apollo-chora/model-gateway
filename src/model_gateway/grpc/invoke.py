@@ -1,13 +1,17 @@
 """The Invoke RPC: one request, one complete answer.
 
-``Invoke`` is the text operation's unary entry point on the gRPC transport, and
+``Invoke`` is the gRPC transport's unary entry point for a complete answer, and
 this module is the whole of it: authenticate the call, reconcile the tenant it
-claims, translate the request into the canonical invocation, hand that to
+claims, translate the request into the canonical invocation the request's
+``response_modality`` names, hand that to
 :class:`~model_gateway.inference.InferenceService` and translate the answer
-back. No policy is decided here — model resolution, capability enforcement, the
-deadline, retry, fallback and cancellation all run in the inference service,
-exactly as they do for an HTTP request, so a caller reaches the same behaviour
-over either transport.
+back. ``TEXT`` is the text operation, ``IMAGE`` the image operation, and
+``MULTIMODAL`` is refused: the gateway serves text and image answers separately,
+so a multimodal answer has no canonical representation here and approximating one
+would invent an answer nobody asked for. No policy is decided here — model
+resolution, capability enforcement, the deadline, retry, fallback and
+cancellation all run in the inference service, exactly as they do for an HTTP
+request, so a caller reaches the same behaviour over either transport.
 
 Four rules shape the handler.
 

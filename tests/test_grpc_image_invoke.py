@@ -14,7 +14,7 @@ from model_gateway.config import Settings
 from model_gateway.config.routes import Operation, Route
 from model_gateway.domain import ImageResponse, Usage
 from model_gateway.domain.images import GeneratedImage
-from model_gateway.errors import InvalidArgumentError
+from model_gateway.errors import InvalidArgumentError, MalformedResponseError
 from model_gateway.grpc import gateway_pb2 as pb
 from model_gateway.grpc import gateway_pb2_grpc, mapping
 from model_gateway.grpc.identity import Authenticator
@@ -253,3 +253,61 @@ class TestTheInvokeDispatch:
 
         assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
         assert service.calls == []
+
+
+class TestTheRefusedTextOnlyFields:
+    """Every ``Invoke`` field an image request cannot honour is refused, not dropped."""
+
+    def ident(self):
+        return identity().identity(_FakeContext())
+
+    @pytest.mark.parametrize(
+        ("field", "value", "named"),
+        [
+            ("system_instruction", "you are a painter", "system instruction"),
+            (
+                "tools",
+                (pb.ToolDefinition(name="lookup"),),
+                "tool set",
+            ),
+            (
+                "tool_choice",
+                pb.ToolChoice(mode=pb.TOOL_CHOICE_MODE_AUTO),
+                "tool choice",
+            ),
+            (
+                "generation_config",
+                pb.GenerationConfig(temperature=0.2),
+                "generation config",
+            ),
+            ("fallback_models", ("other-image",), "fallback model list"),
+            ("action_code", "image_render", "action code"),
+            ("idempotency_key", "idem-1", "idempotency key"),
+        ],
+    )
+    def test_a_stated_text_only_field_is_refused(self, field, value, named) -> None:
+        request = image_request(**{field: value})
+
+        with pytest.raises(InvalidArgumentError, match=named):
+            mapping.image_request_from_proto(request, identity=self.ident())
+
+    def test_a_dispatch_key_is_accepted_as_a_transport_fact(self) -> None:
+        """The Go client stamps one on every call; the image operation ignores it by design."""
+        request = image_request(dispatch_idempotency_key="dispatch-1")
+
+        mapped = mapping.image_request_from_proto(request, identity=self.ident())
+
+        assert mapped.prompt == "a fox on the moon"
+
+    def test_a_revised_prompt_is_refused_rather_than_dropped(self) -> None:
+        response = ImageResponse(
+            model=PUBLIC_MODEL,
+            upstream_model=UPSTREAM_MODEL,
+            created=1792232500,
+            data=(GeneratedImage(b64_json="UklGRg==", revised_prompt="a fox under a moon"),),
+            usage=Usage(),
+            invocation_id="inv-image-3",
+        )
+
+        with pytest.raises(MalformedResponseError, match="revised prompt"):
+            mapping.image_response_to_proto(response)
