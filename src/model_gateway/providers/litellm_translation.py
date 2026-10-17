@@ -88,7 +88,9 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from model_gateway.auth import AuthType
 from model_gateway.config.routes import Route
+from model_gateway.auth import AuthType
 from model_gateway.domain import (
     ContentPart,
     FinishReason,
@@ -191,6 +193,12 @@ def to_litellm_params(route: Route, request: InvocationRequest) -> dict[str, obj
         "num_retries": 0,
         "messages": _messages(request),
     }
+    if route.auth_type == AuthType.BEARER:
+        # Some anthropic-compatible upstreams (e.g. LongCat) authenticate
+        # with `Authorization: Bearer <key>` rather than the `x-api-key`
+        # header LiteLLM's anthropic handler sends. Present the same key as
+        # a Bearer token so the upstream accepts it.
+        params["extra_headers"]["Authorization"] = f"Bearer {route.api_key}"
     _add_generation_params(params, request.generation_config)
     if request.tools:
         params["tools"] = [_tool(definition) for definition in request.tools]
