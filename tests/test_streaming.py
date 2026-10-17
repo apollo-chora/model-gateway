@@ -1313,3 +1313,75 @@ class TestFromLitellmChunkRefusals:
     def test_a_negative_sequence_is_refused(self) -> None:
         with pytest.raises(ValueError, match="non-negative integer"):
             from_litellm_chunk(content_chunk("hi"), invocation_id=INVOCATION_ID, sequence=-1)
+
+
+class TestStreamingReasoningDiscardPolicy:
+    """The route's answer contract covers the stream, next to the response side."""
+
+    def reasoning_delta_chunk(self) -> ModelResponseStream:
+        return ModelResponseStream(
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(
+                        content="ok",
+                        role="assistant",
+                        reasoning_content="the trace",
+                        thinking_blocks=[{"type": "thinking", "thinking": "the trace"}],
+                    ),
+                )
+            ]
+        )
+
+    def test_a_reasoning_delta_is_refused_by_default(self) -> None:
+        with pytest.raises(InternalError) as error:
+            from_litellm_chunk(
+                self.reasoning_delta_chunk(), invocation_id=INVOCATION_ID, sequence=0
+            )
+
+        assert "cannot carry" in str(error.value)
+
+    def test_a_reasoning_delta_streams_its_text_when_the_route_discards_the_trace(self) -> None:
+        events = from_litellm_chunk(
+            self.reasoning_delta_chunk(),
+            invocation_id=INVOCATION_ID,
+            sequence=0,
+            discard_reasoning=True,
+        )
+
+        assert [event.kind for event in events] == [StreamEventKind.CONTENT]
+        assert events[0].text == "ok"
+
+    def test_a_null_citation_slot_on_a_delta_is_not_a_citation(self) -> None:
+        chunk = ModelResponseStream(
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(content="ok", provider_specific_fields={"citations": None}),
+                )
+            ]
+        )
+
+        events = from_litellm_chunk(chunk, invocation_id=INVOCATION_ID, sequence=0)
+
+        assert [event.kind for event in events] == [StreamEventKind.CONTENT]
+
+    def test_a_populated_citation_on_a_delta_is_still_refused(self) -> None:
+        chunk = ModelResponseStream(
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(
+                        content="ok",
+                        provider_specific_fields={"citations": [{"url": "https://example.com"}]},
+                    ),
+                )
+            ]
+        )
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_chunk(
+                chunk, invocation_id=INVOCATION_ID, sequence=0, discard_reasoning=True
+            )
+
+        assert "citations" in str(error.value)

@@ -90,7 +90,6 @@ from typing import Any
 
 from model_gateway.auth import AuthType
 from model_gateway.config.routes import Route
-from model_gateway.auth import AuthType
 from model_gateway.domain import (
     ContentPart,
     FinishReason,
@@ -283,7 +282,7 @@ def from_litellm_response(
         )
     choice = choices[0]
     message = choice.message
-    _reject_unmappable(response, choice, message)
+    _reject_unmappable(response, choice, message, discard_reasoning=route.discard_reasoning)
     raw_finish_reason = _raw_finish_reason(choice)
     return InvocationResponse(
         model=PUBLIC_MODEL_IDS[route.operation],
@@ -297,7 +296,11 @@ def from_litellm_response(
 
 
 def from_litellm_chunk(
-    chunk: ModelResponseStream, *, invocation_id: str, sequence: int
+    chunk: ModelResponseStream,
+    *,
+    invocation_id: str,
+    sequence: int,
+    discard_reasoning: bool = False,
 ) -> tuple[StreamEvent, ...]:
     """Translate one upstream streaming chunk into canonical stream events.
 
@@ -337,6 +340,15 @@ def from_litellm_chunk(
     a negative or fractional number would break the strictly-increasing guarantee
     a consumer relies on to detect a gap or a reordering.
 
+    ``discard_reasoning`` carries the route's answer contract onto the stream, so
+    a route that discards the provider's reasoning trace streams its answer
+    instead of failing on the first chunk that reports one, exactly as it does on
+    the response side and with the same confinement to
+    :data:`_DISCARDABLE_REASONING_FIELDS`. Because validation is per chunk, a
+    refusal on a later chunk cannot retract a text event already emitted; that is
+    the stream's existing behaviour for every refused field and not a new
+    consequence of this flag.
+
     Raises :class:`~model_gateway.errors.InternalError` naming the field when the
     chunk carries a semantic the canonical stream cannot represent, and
     :exc:`ValueError` when ``sequence`` is not a non-negative integer.
@@ -365,7 +377,7 @@ def from_litellm_chunk(
         _reject_unmappable_choice(choice)
         delta = getattr(choice, "delta", None)
         if delta is not None:
-            _reject_unmappable_delta(delta)
+            _reject_unmappable_delta(delta, discard_reasoning=discard_reasoning)
             text = _delta_text(delta)
             if text is not None:
                 events.append(
@@ -962,8 +974,26 @@ _NON_SEMANTIC_RESPONSE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
+# The provider fields that carry a reasoning trace and nothing else, and so are
+# the exact extent of a route's ``discard_reasoning`` permission. Naming them
+# here rather than allowing a pattern keeps the exception auditable: a field
+# added to this set is a decision that the field is a trace, not a place to park
+# a semantic the canonical model cannot hold. The names cover the three shapes
+# the library uses — the trace as text (``reasoning_content``), as blocks
+# (``thinking_blocks``) and as items (``reasoning_items``) — because a provider
+# reports its thinking through whichever the pinned library maps.
+_DISCARDABLE_REASONING_FIELDS: frozenset[str] = frozenset(
+    {"reasoning_content", "thinking_blocks", "reasoning_items"}
+)
 
-def _reject_unmappable(response: ModelResponse, choice: Choices, message: LiteLLMMessage) -> None:
+
+def _reject_unmappable(
+    response: ModelResponse,
+    choice: Choices,
+    message: LiteLLMMessage,
+    *,
+    discard_reasoning: bool = False,
+) -> None:
     """Refuse a response carrying a semantic the canonical model cannot represent.
 
     Each check names the field it refuses, so a drop cannot pass undetected:
@@ -977,6 +1007,17 @@ def _reject_unmappable(response: ModelResponse, choice: Choices, message: LiteLL
     the library records it in this field on the OpenAI SDK path, with ``null``
     for every answer the model did not decline. Refusing the field instead is
     what made every OpenAI-compatible answer an internal error.
+
+    ``discard_reasoning`` is the route's declared answer contract, and it is the
+    one exception to that rule: a provider that reports its thinking beside every
+    answer — some do so unconditionally, with no parameter to turn it off —
+    returns a reply the canonical model can never carry, so the route declares
+    that the trace is not part of the answer it wants and
+    :data:`_DISCARDABLE_REASONING_FIELDS` are dropped instead of failing the
+    invocation. The exception is confined to those fields by name. A reasoning
+    trace is what it covers: not annotations, audio, a legacy function call, a
+    log-probability block, a provider-specific field of any other name, or a
+    citation that actually carries something.
     """
     if getattr(choice, "logprobs", None) is not None:
         raise InternalError(
@@ -988,26 +1029,31 @@ def _reject_unmappable(response: ModelResponse, choice: Choices, message: LiteLL
         "choice",
         frozenset({"native_finish_reason"}),
     )
+    message_fields = {"refusal"}
+    if discard_reasoning:
+        message_fields |= _DISCARDABLE_REASONING_FIELDS
     _reject_extra_provider_fields(
         getattr(message, "provider_specific_fields", None),
         "message",
-        frozenset({"refusal"}),
+        frozenset(message_fields),
+        absent_when_none=frozenset({"citations"}),
     )
-    if getattr(message, "reasoning_content", None) is not None:
-        raise InternalError(
-            "the upstream message carries reasoning content, which the canonical representation "
-            "cannot carry"
-        )
-    if getattr(message, "thinking_blocks", None) is not None:
-        raise InternalError(
-            "the upstream message carries thinking blocks, which the canonical representation "
-            "cannot carry"
-        )
-    if getattr(message, "reasoning_items", None) is not None:
-        raise InternalError(
-            "the upstream message carries reasoning items, which the canonical representation "
-            "cannot carry"
-        )
+    if not discard_reasoning:
+        if getattr(message, "reasoning_content", None) is not None:
+            raise InternalError(
+                "the upstream message carries reasoning content, which the canonical "
+                "representation cannot carry"
+            )
+        if getattr(message, "thinking_blocks", None) is not None:
+            raise InternalError(
+                "the upstream message carries thinking blocks, which the canonical "
+                "representation cannot carry"
+            )
+        if getattr(message, "reasoning_items", None) is not None:
+            raise InternalError(
+                "the upstream message carries reasoning items, which the canonical "
+                "representation cannot carry"
+            )
     if getattr(message, "annotations", None) is not None:
         raise InternalError(
             "the upstream message carries content-safety annotations, which the canonical "
@@ -1026,17 +1072,33 @@ def _reject_unmappable(response: ModelResponse, choice: Choices, message: LiteLL
 
 
 def _reject_extra_provider_fields(
-    fields: Mapping[str, Any] | None, where: str, allowed: frozenset[str]
+    fields: Mapping[str, Any] | None,
+    where: str,
+    allowed: frozenset[str],
+    *,
+    absent_when_none: frozenset[str] = frozenset(),
 ) -> None:
     """Refuse provider-specific fields with no canonical target, naming the first one found.
 
     On a choice, ``native_finish_reason`` is allowed because it is the mapped
     raw finish reason; on a message nothing is. Any other key is a
     provider-specific semantic the canonical model cannot carry.
+
+    ``absent_when_none`` names the keys whose ``None`` value states nothing at
+    all, so the key is not a semantic being dropped: a provider that places a
+    ``citations`` slot on every message and leaves it null said nothing about
+    citations, and refusing that placeholder refused every ordinary answer.
+    Only ``None`` is exempt; ``[]``, ``{}`` and a populated structure are values
+    the provider chose to send and are still refused, because an empty container
+    is a claim about citations in a way a null placeholder is not.
     """
     if not fields:
         return
-    extra = sorted(set(fields) - allowed)
+    extra = sorted(
+        name
+        for name, value in fields.items()
+        if name not in allowed and not (name in absent_when_none and value is None)
+    )
     if extra:
         raise InternalError(
             f"the upstream {where} carries provider-specific field {extra[0]!r}, which the "
@@ -1065,7 +1127,10 @@ def _reject_unmappable_chunk(chunk: ModelResponseStream) -> None:
     dropped.
     """
     _reject_extra_provider_fields(
-        getattr(chunk, "provider_specific_fields", None), "chunk", frozenset()
+        getattr(chunk, "provider_specific_fields", None),
+        "chunk",
+        frozenset(),
+        absent_when_none=frozenset({"citations"}),
     )
     if getattr(chunk, "citations", None) is not None:
         raise InternalError(
@@ -1093,7 +1158,7 @@ def _reject_unmappable_choice(choice: StreamingChoices) -> None:
     )
 
 
-def _reject_unmappable_delta(delta: Delta) -> None:
+def _reject_unmappable_delta(delta: Delta, *, discard_reasoning: bool = False) -> None:
     """Refuse a delta-level semantic the canonical stream cannot carry.
 
     These are the streaming counterparts of the response-side refusals, and they
@@ -1105,6 +1170,13 @@ def _reject_unmappable_delta(delta: Delta) -> None:
     rather than refused — but only in its function-call form, which is the form
     the canonical delta represents.
 
+    ``discard_reasoning`` is the route's answer contract, read exactly as on the
+    response side: it covers :data:`_DISCARDABLE_REASONING_FIELDS` and no more,
+    so an annotation, an audio block, an image part, a legacy function call or a
+    refusal is still refused on a route that discards reasoning. A delta
+    carrying both text and a dropped trace still produces its text event, which
+    is the point: the trace is not part of the answer the route asked for.
+
     A **refusal** is refused here even though the response side maps it, and the
     asymmetry is the point: the canonical *model* carries a refusal part, so a
     whole answer's refusal is representable, while the canonical *stream* has no
@@ -1115,20 +1187,27 @@ def _reject_unmappable_delta(delta: Delta) -> None:
 
     Provider-specific fields on a delta are refused entirely, with nothing
     allowlisted: unlike a choice, a delta has no field the gateway reads from
-    there, so any entry is an annotation it would otherwise be dropping.
+    there, so any entry is an annotation it would otherwise be dropping. A
+    null ``citations`` slot is the one exception, on the same reading as the
+    response side: a provider that leaves the slot empty on every delta said
+    nothing about citations.
     """
-    if getattr(delta, "reasoning_content", None) is not None:
-        raise InternalError(
-            "the upstream chunk carries reasoning content, which the canonical stream cannot carry"
-        )
-    if getattr(delta, "thinking_blocks", None) is not None:
-        raise InternalError(
-            "the upstream chunk carries thinking blocks, which the canonical stream cannot carry"
-        )
-    if getattr(delta, "reasoning_items", None) is not None:
-        raise InternalError(
-            "the upstream chunk carries reasoning items, which the canonical stream cannot carry"
-        )
+    if not discard_reasoning:
+        if getattr(delta, "reasoning_content", None) is not None:
+            raise InternalError(
+                "the upstream chunk carries reasoning content, which the canonical stream "
+                "cannot carry"
+            )
+        if getattr(delta, "thinking_blocks", None) is not None:
+            raise InternalError(
+                "the upstream chunk carries thinking blocks, which the canonical stream "
+                "cannot carry"
+            )
+        if getattr(delta, "reasoning_items", None) is not None:
+            raise InternalError(
+                "the upstream chunk carries reasoning items, which the canonical stream "
+                "cannot carry"
+            )
     if getattr(delta, "annotations", None) is not None:
         raise InternalError(
             "the upstream chunk carries content-safety annotations, which the canonical stream "
@@ -1154,7 +1233,10 @@ def _reject_unmappable_delta(delta: Delta) -> None:
             "answer was delivered"
         )
     _reject_extra_provider_fields(
-        getattr(delta, "provider_specific_fields", None), "chunk delta", frozenset()
+        getattr(delta, "provider_specific_fields", None),
+        "chunk delta",
+        frozenset(_DISCARDABLE_REASONING_FIELDS) if discard_reasoning else frozenset(),
+        absent_when_none=frozenset({"citations"}),
     )
 
 

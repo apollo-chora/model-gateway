@@ -1313,3 +1313,212 @@ class TestTheRecordedRefusal:
         answer = from_litellm_response(make_route(), make_request(), response_from(payload))
 
         assert answer.content == (RefusalPart(text="I can't help with that."),)
+
+
+def reasoning_payload(**message_fields: object) -> dict[str, object]:
+    """A completion whose message carries the given provider fields.
+
+    Built on :func:`completion_payload` so the rest of the response is the
+    ordinary shape every other test uses, and parsed through LiteLLM's own
+    converter by :func:`response_from`, which is what makes these tests evidence
+    about the pinned library's mapping rather than about a hand-built object.
+    """
+    payload = completion_payload()
+    choices = payload["choices"]
+    assert isinstance(choices, list)
+    message_payload = choices[0]["message"]
+    assert isinstance(message_payload, dict)
+    message_payload.update(message_fields)
+    return payload
+
+
+class TestReasoningDiscardPolicy:
+    """A route's declared answer contract decides whether the trace may be dropped."""
+
+    def test_the_reported_longcat_response_is_refused_by_a_strict_route(self) -> None:
+        """A trace the canonical model cannot carry still fails the invocation by default."""
+        response = response_from(
+            reasoning_payload(
+                content="ok",
+                reasoning_content="We need to respond with ok.",
+                thinking_blocks=[{"type": "thinking", "thinking": "We need to respond with ok."}],
+                provider_specific_fields={
+                    "citations": None,
+                    "thinking_blocks": [
+                        {"type": "thinking", "thinking": "We need to respond with ok."}
+                    ],
+                },
+            )
+        )
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(), make_request(), response)
+
+        assert str(error.value) == (
+            "the upstream message carries provider-specific field 'thinking_blocks', which the "
+            "canonical representation cannot carry"
+        )
+
+    def test_the_same_response_is_answered_when_the_route_discards_the_trace(self) -> None:
+        response = response_from(
+            reasoning_payload(
+                content="ok",
+                reasoning_content="We need to respond with ok.",
+                thinking_blocks=[{"type": "thinking", "thinking": "We need to respond with ok."}],
+                provider_specific_fields={
+                    "citations": None,
+                    "thinking_blocks": [
+                        {"type": "thinking", "thinking": "We need to respond with ok."}
+                    ],
+                },
+            )
+        )
+
+        result = from_litellm_response(make_route(discard_reasoning=True), make_request(), response)
+
+        assert result.text == "ok"
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("reasoning_content", "the trace"),
+            ("thinking_blocks", [{"type": "thinking", "thinking": "the trace"}]),
+        ],
+    )
+    def test_each_dedicated_reasoning_field_is_dropped_on_a_discarding_route(
+        self, field: str, value: object
+    ) -> None:
+        response = response_from(reasoning_payload(**{field: value}))
+
+        result = from_litellm_response(make_route(discard_reasoning=True), make_request(), response)
+
+        assert result.text == "Recursion is a technique..."
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("reasoning_content", "the trace"),
+            ("thinking_blocks", [{"type": "thinking", "thinking": "the trace"}]),
+        ],
+    )
+    def test_each_dedicated_reasoning_field_is_refused_by_a_strict_route(
+        self, field: str, value: object
+    ) -> None:
+        response = response_from(reasoning_payload(**{field: value}))
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(), make_request(), response)
+
+        assert "cannot carry" in str(error.value)
+
+    def test_a_reasoning_items_field_is_refused_or_dropped_by_the_same_rule(self) -> None:
+        """The converter drops this payload key, so the field is set on the real type instead."""
+        for refused in (True, False):
+            response = ModelResponse()
+            response.choices = [
+                Choices(
+                    finish_reason="stop",
+                    index=0,
+                    message=LiteLLMMessage(
+                        content="Recursion is a technique...",
+                        role="assistant",
+                        reasoning_items=[{"type": "reasoning", "id": "rs_1"}],
+                    ),
+                )
+            ]
+
+            if refused:
+                with pytest.raises(InternalError, match="reasoning items"):
+                    from_litellm_response(make_route(), make_request(), response)
+            else:
+                result = from_litellm_response(
+                    make_route(discard_reasoning=True), make_request(), response
+                )
+                assert result.text == "Recursion is a technique..."
+
+    def test_an_absent_citation_slot_is_not_a_citation(self) -> None:
+        """A provider's null placeholder states nothing, so it fails no route."""
+        response = response_from(reasoning_payload(provider_specific_fields={"citations": None}))
+
+        result = from_litellm_response(make_route(), make_request(), response)
+
+        assert result.text == "Recursion is a technique..."
+
+    @pytest.mark.parametrize("citations", [[], [{"url": "https://example.com/source"}]])
+    def test_an_empty_or_populated_citation_is_still_refused(self, citations: list) -> None:
+        """Only the null placeholder is exempt; a value the provider chose is not."""
+        response = response_from(
+            reasoning_payload(provider_specific_fields={"citations": citations})
+        )
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(discard_reasoning=True), make_request(), response)
+
+        assert str(error.value) == (
+            "the upstream message carries provider-specific field 'citations', which the "
+            "canonical representation cannot carry"
+        )
+
+    def test_an_unknown_provider_field_is_refused_even_when_the_trace_is_discarded(self) -> None:
+        response = response_from(
+            reasoning_payload(
+                reasoning_content="the trace",
+                provider_specific_fields={"safety": "flagged"},
+            )
+        )
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(discard_reasoning=True), make_request(), response)
+
+        assert str(error.value) == (
+            "the upstream message carries provider-specific field 'safety', which the canonical "
+            "representation cannot carry"
+        )
+
+    @pytest.mark.parametrize(
+        ("field", "value", "named"),
+        [
+            ("annotations", [{"type": "url_citation"}], "content-safety annotations"),
+            (
+                "audio",
+                {"id": "audio_1", "data": "...", "expires_at": 1, "transcript": "hi"},
+                "audio content",
+            ),
+            ("function_call", {"name": "lookup", "arguments": "{}"}, "legacy function call"),
+        ],
+    )
+    def test_the_opt_in_covers_the_trace_and_nothing_else(
+        self, field: str, value: object, named: str
+    ) -> None:
+        response = response_from(reasoning_payload(**{field: value}))
+
+        with pytest.raises(InternalError, match=named):
+            from_litellm_response(make_route(discard_reasoning=True), make_request(), response)
+
+    def test_discarding_the_trace_changes_nothing_else_about_the_answer(self) -> None:
+        """Identity, finish reason and usage are the same with and without the opt-in."""
+        response = response_from(reasoning_payload(content="ok", reasoning_content="the trace"))
+
+        strict = from_litellm_response(make_route(discard_reasoning=True), make_request(), response)
+        plain = from_litellm_response(
+            make_route(),
+            make_request(),
+            response_from(
+                completion_payload(
+                    choices=[
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                )
+            ),
+        )
+
+        assert strict.model == plain.model
+        assert strict.upstream_model == plain.upstream_model
+        assert strict.invocation_id == plain.invocation_id
+        assert strict.finish_reason is plain.finish_reason
+        assert strict.raw_finish_reason == plain.raw_finish_reason
+        assert strict.usage == plain.usage

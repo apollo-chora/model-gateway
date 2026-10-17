@@ -90,6 +90,16 @@ class Route:
     refused at parse time, and it is immutable so that a validated route cannot
     acquire one afterwards.
 
+    ``discard_reasoning`` is the route's declared answer contract for the
+    provider's reasoning trace: an upstream reply that carries one is refused by
+    default, because the canonical model has no part that could hold it, and a
+    route that declares the trace is not part of the answer it wants lets the
+    binding drop it instead of failing the invocation. It is confined to the text
+    operation, where a provider that always reports its thinking would otherwise
+    make every answer unusable; on the other operations a configured value is
+    refused rather than accepted and ignored, because a setting the gateway cannot
+    act on is configuration it would otherwise discard in silence.
+
     ``dimensions`` and ``supports_dimensions_param`` are the embeddings
     operation's own route properties:
     ``dimensions`` is the vector dimensionality the route declares — ``None``
@@ -114,6 +124,7 @@ class Route:
     dimensions: int | None = None
     supports_dimensions_param: bool = False
     auth_type: AuthType | None = None
+    discard_reasoning: bool = False
 
     @property
     def litellm_model(self) -> str:
@@ -172,6 +183,7 @@ _PATH = "PATH"
 _EXTRA_HEADERS_JSON = "EXTRA_HEADERS_JSON"
 _CAPABILITIES = "CAPABILITIES"
 _ALLOW_ABSOLUTE_PATH_URL = "ALLOW_ABSOLUTE_PATH_URL"
+_DISCARD_REASONING = "DISCARD_REASONING"
 _CONTEXT_WINDOW = "CONTEXT_WINDOW"
 _MAX_OUTPUT_TOKENS = "MAX_OUTPUT_TOKENS"
 _DIMENSIONS = "DIMENSIONS"
@@ -189,6 +201,7 @@ _ENTRY_PATH = "path"
 _ENTRY_EXTRA_HEADERS = "extra_headers"
 _ENTRY_CAPABILITIES = "capabilities"
 _ENTRY_ALLOW_ABSOLUTE_PATH_URL = "allow_absolute_path_url"
+_ENTRY_DISCARD_REASONING = "discard_reasoning"
 _ENTRY_DIMENSIONS = "dimensions"
 _ENTRY_SUPPORTS_DIMENSIONS_PARAM = "supports_dimensions_param"
 
@@ -203,6 +216,7 @@ _ENTRY_KEYS: frozenset[str] = frozenset(
         _ENTRY_EXTRA_HEADERS,
         _ENTRY_CAPABILITIES,
         _ENTRY_ALLOW_ABSOLUTE_PATH_URL,
+        _ENTRY_DISCARD_REASONING,
         _ENTRY_DIMENSIONS,
         _ENTRY_SUPPORTS_DIMENSIONS_PARAM,
     }
@@ -283,6 +297,7 @@ def _parse_block(
     opt_in_variable = _variable(block, _ALLOW_ABSOLUTE_PATH_URL)
     opt_in = _read(env, opt_in_variable)
     allow_absolute_path_url = _parse_bool(opt_in_variable, opt_in) if opt_in else False
+    discard_reasoning = _singleton_discard_reasoning(block, env)
     capabilities = _singleton_capabilities(block, _read(env, _variable(block, _CAPABILITIES)))
     extra_headers = _singleton_extra_headers(
         block, _read(env, _variable(block, _EXTRA_HEADERS_JSON))
@@ -322,6 +337,7 @@ def _parse_block(
         allow_absolute_path_url=allow_absolute_path_url,
         dimensions=dimensions,
         supports_dimensions_param=supports_dimensions_param,
+        discard_reasoning=discard_reasoning,
     )
 
     sources: list[tuple[str, Route]] = [(f"the {block.prefix}_* block", primary)]
@@ -331,6 +347,44 @@ def _parse_block(
         sources.append((f"{routes_variable} entry {route.index}", route))
     _reject_duplicate_routes(block, sources)
     return [route for _, route in sources]
+
+
+def _singleton_discard_reasoning(block: _Block, env: Mapping[str, str]) -> bool:
+    """Read the block's reasoning-discard opt-in, confined to the text operation.
+
+    A reasoning trace is a text-answer concern: the image and embeddings
+    operations have no trace to discard, so an enabled value there is refused at
+    startup rather than accepted and left to do nothing.
+    """
+    variable = _variable(block, _DISCARD_REASONING)
+    raw = _read(env, variable)
+    if not raw:
+        return False
+    enabled = _parse_bool(variable, raw)
+    _reject_non_text_discard_reasoning(variable, enabled, block)
+    return enabled
+
+
+def _entry_discard_reasoning(block: _Block, where: str, entry: Mapping[str, object]) -> bool:
+    """Read one ``ROUTES_JSON`` entry's reasoning-discard opt-in.
+
+    Each entry declares its own answer contract: an entry that does not set the
+    key is strict even when the block's primary route opted in, because the
+    policy describes the answer a route accepts and not a provider family.
+    """
+    enabled = _entry_flag(where, entry, _ENTRY_DISCARD_REASONING)
+    _reject_non_text_discard_reasoning(f"{where} {_ENTRY_DISCARD_REASONING!r}", enabled, block)
+    return enabled
+
+
+def _reject_non_text_discard_reasoning(setting: str, enabled: bool, block: _Block) -> None:
+    if enabled and block.operation is not Operation.TEXT:
+        raise ConfigurationError(
+            f"{setting} is set but a reasoning trace is a text-answer concern; the "
+            f"{block.prefix} block serves the {block.operation.value} operation, which carries "
+            f"no reasoning trace to discard, so the setting is refused rather than accepted and "
+            f"ignored"
+        )
 
 
 def _orphan_configuration(block: _Block, env: Mapping[str, str]) -> list[str]:
@@ -375,6 +429,7 @@ _INERT_SETTINGS: tuple[tuple[str, Callable[[str, str], bool]], ...] = (
     (_EXTRA_HEADERS_JSON, _inert_object),
     (_CAPABILITIES, _inert_text),
     (_ALLOW_ABSOLUTE_PATH_URL, _inert_flag),
+    (_DISCARD_REASONING, _inert_flag),
     (_CONTEXT_WINDOW, _inert_text),
     (_MAX_OUTPUT_TOKENS, _inert_text),
     (_DIMENSIONS, _inert_text),
@@ -454,6 +509,7 @@ def _parse_entry(
         allow_absolute_path_url=allow_absolute_path_url,
         dimensions=dimensions,
         supports_dimensions_param=supports_dimensions_param,
+        discard_reasoning=_entry_discard_reasoning(block, where, entry),
     )
 
 
