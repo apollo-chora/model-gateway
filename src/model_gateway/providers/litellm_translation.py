@@ -914,7 +914,9 @@ def _reject_extra_detail_fields(
       ``text_tokens=completion_tokens`` — the library's own arithmetic, not a
       provider report. That whole shape, and only that shape, is ignored.
     * anything else is a provider-reported count the canonical usage model
-      cannot carry, and is refused: an explicit zero — a provider that
+      cannot carry, and is refused — unless ``discardable`` names it, which
+      only a route that declared the breakdown is not part of its record
+      passes: an explicit zero — a provider that
       reports ``reasoning_tokens=0`` without the library's derived
       ``text_tokens`` stated a fact the canonical model cannot hold — a
       non-zero count, a ``text_tokens`` that does not equal the library's
