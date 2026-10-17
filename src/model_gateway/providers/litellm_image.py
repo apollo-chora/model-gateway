@@ -358,6 +358,7 @@ def _openai_sdk_image_client(
         ),
         timeout=attempt_timeout(budget),
         max_retries=0,
+        default_headers=dict(route.extra_headers) or None,
     )
     return _AttemptClient(client, client.close)
 
@@ -616,7 +617,6 @@ def _image_params(
         "model": route.litellm_model,
         "api_base": route.base_url,
         "api_key": route.api_key,
-        "extra_headers": dict(route.extra_headers),
         "prompt": request.prompt,
         "num_retries": 0,
         "timeout": context.timeout,

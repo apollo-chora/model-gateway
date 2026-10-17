@@ -1069,7 +1069,9 @@ class TestTheRequestTranslation:
         assert params["model"] == f"{OPENAI_DIALECT}/{UPSTREAM_MODEL}"
         assert params["api_base"] == ENDPOINT
         assert params["api_key"] == SECRET_KEY
-        assert params["extra_headers"] == {"X-Custom": "value"}
+        # The image entry point rejects an extra_headers keyword, so the route's
+        # headers travel as the attempt client's default headers instead.
+        assert "extra_headers" not in params
         assert params["prompt"] == "a futuristic city at sunset"
         assert params["num_retries"] == 0
         assert params["timeout"] == 12.5
@@ -1185,3 +1187,26 @@ def _raising(error: Exception):
 class TestTheProtocol:
     def test_the_provider_satisfies_the_image_provider_protocol(self) -> None:
         assert isinstance(LiteLLMImageProvider(), ImageProvider)
+
+
+class TestTheRouteHeadersReachTheUpstream:
+    """The route's extra headers travel on the client, not as a rejected keyword.
+
+    Measured: the image entry point raises ``unknown parameter `extra_headers` ``
+    for that keyword whether it is empty or populated, so a route that declares
+    headers used to fail every image call. The OpenAI SDK reads them from the
+    client instead, which is what this pins.
+    """
+
+    async def test_a_declared_header_is_sent_and_the_keyword_is_not(self) -> None:
+        inner = RecordingAsyncTransport()
+        provider = LiteLLMImageProvider(resolver=recording_resolver, inner_factory=lambda: inner)
+
+        await provider.generate(
+            make_route(extra_headers={"X-Custom": "value"}),
+            make_request(),
+            make_context(),
+        )
+
+        assert len(inner.requests) == 1
+        assert inner.requests[0].headers["X-Custom"] == "value"
