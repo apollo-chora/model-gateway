@@ -945,6 +945,37 @@ class TestTheResponseTranslation:
         (image,) = response.data
         assert image.b64_json == "aGVsbG8="
 
+    async def test_an_unknown_scalar_provider_field_beside_a_valid_image_is_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unrecognised scalar provider field is dropped rather than failing the image.
+
+        The canonical image has no target for a provider annotation, so the route
+        is availability-first here: refusing the entry would lose the image as
+        well as the annotation, and another eligible route may not exist to
+        serve it. The policy is deliberate rather than incidental, so it is
+        pinned — a provider attaching a second scalar field must not break image
+        generation the way the blanket refusal this replaces did.
+        """
+        entry = RecordingImageGeneration(
+            ImageResponse(
+                created=1730000000,
+                data=[
+                    ImageObject(
+                        b64_json="aGVsbG8=",
+                        provider_specific_fields={"safety_decision": "blocked"},
+                    )
+                ],
+            )
+        )
+        monkeypatch.setattr(litellm, "aimage_generation", entry)
+        provider = LiteLLMImageProvider()
+
+        response = await provider.generate(make_route(), make_request(), make_context())
+
+        (image,) = response.data
+        assert image.b64_json == "aGVsbG8="
+
     async def test_an_entry_with_no_image_in_it_is_refused(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
