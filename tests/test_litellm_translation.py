@@ -1436,6 +1436,34 @@ class TestReasoningDiscardPolicy:
                 )
                 assert result.text == "Recursion is a technique..."
 
+    def test_a_thought_signature_field_is_refused_or_dropped_by_the_same_rule(self) -> None:
+        """Gemini's trace arrives as ``extra_content`` — the fourth shape the library uses.
+
+        The library surfaces Google's ``extra_content`` (which carries the thought
+        signature) as a ``provider_specific_fields`` key on the message, beside
+        the null ``refusal`` placeholder, so the strict route refuses it and a
+        route that declared ``discard_reasoning`` drops it with the other three
+        shapes. The raw upstream key is ``extra_content``; the converter is what
+        files it under provider-specific fields, which is what this payload models.
+        """
+        for refused in (True, False):
+            response = response_from(
+                reasoning_payload(
+                    provider_specific_fields={
+                        "extra_content": {"google": {"thought_signature": "sig-abc"}}
+                    }
+                )
+            )
+
+            if refused:
+                with pytest.raises(InternalError, match="extra_content"):
+                    from_litellm_response(make_route(), make_request(), response)
+            else:
+                result = from_litellm_response(
+                    make_route(discard_reasoning=True), make_request(), response
+                )
+                assert result.text == "Recursion is a technique..."
+
     def test_an_absent_citation_slot_is_not_a_citation(self) -> None:
         """A provider's null placeholder states nothing, so it fails no route."""
         response = response_from(reasoning_payload(provider_specific_fields={"citations": None}))

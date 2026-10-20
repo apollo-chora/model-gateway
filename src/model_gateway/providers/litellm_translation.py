@@ -1035,12 +1035,15 @@ _NON_SEMANTIC_RESPONSE_FIELDS: frozenset[str] = frozenset(
 # the exact extent of a route's ``discard_reasoning`` permission. Naming them
 # here rather than allowing a pattern keeps the exception auditable: a field
 # added to this set is a decision that the field is a trace, not a place to park
-# a semantic the canonical model cannot hold. The names cover the three shapes
+# a semantic the canonical model cannot hold. The names cover the four shapes
 # the library uses — the trace as text (``reasoning_content``), as blocks
-# (``thinking_blocks``) and as items (``reasoning_items``) — because a provider
-# reports its thinking through whichever the pinned library maps.
+# (``thinking_blocks``), as items (``reasoning_items``), and as the upstream's
+# own trace envelope (``extra_content``, which is where the library files a
+# provider's opaque reasoning structure, Google's thought signature inside it)
+# — because a provider reports its thinking through whichever the pinned library
+# maps.
 _DISCARDABLE_REASONING_FIELDS: frozenset[str] = frozenset(
-    {"reasoning_content", "thinking_blocks", "reasoning_items"}
+    {"reasoning_content", "thinking_blocks", "reasoning_items", "extra_content"}
 )
 
 # The usage-detail categories a route may declare it does not use, and the exact
