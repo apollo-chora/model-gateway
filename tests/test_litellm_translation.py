@@ -1511,9 +1511,7 @@ class TestReasoningDiscardPolicy:
         response = response_from(
             reasoning_payload(
                 provider_specific_fields={
-                    "extra_content": {
-                        "google": {"thought_signature": "sig-abc", "safety": None}
-                    }
+                    "extra_content": {"google": {"thought_signature": "sig-abc", "safety": None}}
                 }
             )
         )
