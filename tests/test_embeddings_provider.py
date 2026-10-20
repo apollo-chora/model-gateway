@@ -294,6 +294,31 @@ class TestTheCall:
 
         assert embedding.calls[0]["dimensions"] == 256
 
+    async def test_a_stated_dimension_is_named_as_allowed_so_the_library_forwards_it(
+        self, wire
+    ) -> None:
+        """The pinned library refuses a ``dimensions`` kwarg unless named as allowed.
+
+        The library's OpenAI-dialect embedding handler validates the kwarg
+        client-side and raises for any model name without ``text-embedding-3``,
+        which is every non-OpenAI embedding model. ``allowed_openai_params`` names
+        the parameter as allowed, so the guard steps aside and the value still
+        reaches the wire — dropping it instead would leave the provider's own
+        default dimensionality in the answer, which the gateway then refuses for
+        the wrong length.
+        """
+        provider, embedding = wire(response_from(embedding_payload()))
+
+        await provider.embed(
+            make_route(supports_dimensions_param=True),
+            make_request(dimensions=256),
+            make_context(),
+        )
+
+        call = embedding.calls[0]
+        assert call["dimensions"] == 256
+        assert "dimensions" in call["allowed_openai_params"]
+
     async def test_a_stated_dimension_is_not_forwarded_when_the_route_does_not_enable_it(
         self, wire
     ) -> None:
@@ -362,6 +387,29 @@ class TestTheCall:
         response = await provider.embed(make_route(), make_request(), make_context())
 
         assert [embedding.index for embedding in response.data] == [1, 0]
+
+    async def test_an_upstream_that_reports_no_index_still_answers_in_order(self, wire) -> None:
+        """A provider that leaves ``index`` null on every record answers in the caller's order.
+
+        Google's OpenAI-compatible embeddings answer carries ``"index": null`` on
+        each record; the only position it reports is the record's own place in
+        the answer, so that place is the index the canonical vector gets.
+        """
+        payload = embedding_payload(
+            data=[
+                {"object": "embedding", "index": None, "embedding": [0.12, -0.34, 0.56]},
+                {"object": "embedding", "index": None, "embedding": [0.7, 0.8, 0.9]},
+            ]
+        )
+        provider, _ = wire(response_from(payload))
+
+        response = await provider.embed(make_route(), make_request(), make_context())
+
+        assert [embedding.index for embedding in response.data] == [0, 1]
+        assert [embedding.values for embedding in response.data] == [
+            (0.12, -0.34, 0.56),
+            (0.7, 0.8, 0.9),
+        ]
 
     async def test_a_vector_the_library_wrapped_is_read_the_same_way(self, wire) -> None:
         """The library hands the records back as objects on one path and dicts on another."""
