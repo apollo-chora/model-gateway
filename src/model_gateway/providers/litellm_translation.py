@@ -1039,9 +1039,25 @@ _NON_SEMANTIC_RESPONSE_FIELDS: frozenset[str] = frozenset(
 # the library uses — the trace as text (``reasoning_content``), as blocks
 # (``thinking_blocks``) and as items (``reasoning_items``) — because a provider
 # reports its thinking through whichever the pinned library maps.
+#
+# The library's fourth shape is deliberately not named here. ``extra_content`` is
+# not a reasoning field but a generic vendor extension envelope, so it is
+# recognised by the member inside it rather than by its own name — see
+# :data:`_EXTRA_CONTENT_REASONING_MEMBER` and
+# :func:`_is_thought_signature_envelope`.
 _DISCARDABLE_REASONING_FIELDS: frozenset[str] = frozenset(
     {"reasoning_content", "thinking_blocks", "reasoning_items"}
 )
+
+# The one member of the generic vendor extension envelope ``extra_content`` that
+# carries a reasoning trace, and the only member a route's ``discard_reasoning``
+# permission may drop from it. ``extra_content`` is not a reasoning field: it is
+# a generic vendor extension — ``extra_content.<vendor>.<field>`` — and Google's
+# thought signature is measured to arrive as ``{"google": {"thought_signature":
+# ...}}``, so that member is what the envelope is recognised by. A sibling the
+# classifier does not know is a semantic the canonical model cannot hold, and is
+# refused like any other unclassified provider field.
+_EXTRA_CONTENT_REASONING_MEMBER: tuple[str, str] = ("google", "thought_signature")
 
 # The usage-detail categories a route may declare it does not use, and the exact
 # extent of a route's ``discard_usage_details`` permission. A provider that
@@ -1099,7 +1115,11 @@ def _reject_unmappable(
     invocation. The exception is confined to those fields by name. A reasoning
     trace is what it covers: not annotations, audio, a legacy function call, a
     log-probability block, a provider-specific field of any other name, or a
-    citation that actually carries something.
+    citation that actually carries something. The library's fourth trace shape,
+    ``extra_content``, is not a reasoning field but a generic vendor extension
+    envelope, so the permission reaches it through the member inside it — the
+    thought-signature envelope of :func:`_is_thought_signature_envelope` — and
+    an envelope carrying a sibling the classifier does not know is refused.
     """
     if getattr(choice, "logprobs", None) is not None:
         raise InternalError(
@@ -1119,6 +1139,7 @@ def _reject_unmappable(
         "message",
         frozenset(message_fields),
         absent_when_none=frozenset({"citations"}),
+        reasoning_envelope="extra_content" if discard_reasoning else None,
     )
     if not discard_reasoning:
         if getattr(message, "reasoning_content", None) is not None:
@@ -1153,12 +1174,42 @@ def _reject_unmappable(
         )
 
 
+def _is_thought_signature_envelope(value: object) -> bool:
+    """Whether ``extra_content`` carries only the thought-signature member it is dropped for.
+
+    The envelope is a generic vendor extension — ``extra_content.<vendor>.<field>``
+    — not a reasoning field, so the member inside it is what is recognised, not
+    the envelope as a name. Google's thought signature is measured to arrive as
+    ``{"google": {"thought_signature": ...}}``, so every populated member must be
+    that signature: a sibling the classifier does not know is a semantic the
+    canonical model cannot hold, and the response is refused rather than silently
+    trimmed. A ``None`` member states nothing — the reading the ``citations``
+    placeholder already has — and a signature that is not a string is not the
+    signature the classifier knows.
+    """
+    vendor, field = _EXTRA_CONTENT_REASONING_MEMBER
+    if not isinstance(value, Mapping):
+        return False
+    for name, inner in value.items():
+        if inner is None:
+            continue
+        if name != vendor or not isinstance(inner, Mapping):
+            return False
+        for sub_name, sub_value in inner.items():
+            if sub_value is None:
+                continue
+            if sub_name != field or not isinstance(sub_value, str):
+                return False
+    return True
+
+
 def _reject_extra_provider_fields(
     fields: Mapping[str, Any] | None,
     where: str,
     allowed: frozenset[str],
     *,
     absent_when_none: frozenset[str] = frozenset(),
+    reasoning_envelope: str | None = None,
 ) -> None:
     """Refuse provider-specific fields with no canonical target, naming the first one found.
 
@@ -1176,13 +1227,28 @@ def _reject_extra_provider_fields(
     collections — a provider could use an empty array to mean "no citations", and
     until that reading is classified on evidence it is refused like any other
     unexamined value.
+
+    ``reasoning_envelope`` names a field that is not a reasoning field but a
+    generic vendor extension envelope — ``extra_content`` — whose member is the
+    trace. Passing it is the route's ``discard_reasoning`` permission reaching
+    that one field, and the envelope is allowed only when it is exactly the
+    thought-signature shape of :func:`_is_thought_signature_envelope`; a sibling
+    the classifier does not know is refused like any other unclassified provider
+    field, so the envelope can never silently swallow a semantic the canonical
+    model cannot hold.
     """
     if not fields:
         return
     extra = sorted(
         name
         for name, value in fields.items()
-        if name not in allowed and not (name in absent_when_none and value is None)
+        if name not in allowed
+        and not (name in absent_when_none and value is None)
+        and not (
+            reasoning_envelope is not None
+            and name == reasoning_envelope
+            and _is_thought_signature_envelope(value)
+        )
     )
     if extra:
         raise InternalError(
@@ -1261,7 +1327,11 @@ def _reject_unmappable_delta(delta: Delta, *, discard_reasoning: bool = False) -
     so an annotation, an audio block, an image part, a legacy function call or a
     refusal is still refused on a route that discards reasoning. A delta
     carrying both text and a dropped trace still produces its text event, which
-    is the point: the trace is not part of the answer the route asked for.
+    is the point: the trace is not part of the answer the route asked for. The
+    library's fourth trace shape, ``extra_content``, is a generic vendor
+    extension envelope rather than a reasoning field, so it is reached through
+    the thought-signature member inside it — exactly as on the response side —
+    and an envelope carrying a sibling the classifier does not know is refused.
 
     A **refusal** is refused here even though the response side maps it, and the
     asymmetry is the point: the canonical *model* carries a refusal part, so a
@@ -1323,6 +1393,7 @@ def _reject_unmappable_delta(delta: Delta, *, discard_reasoning: bool = False) -
         "chunk delta",
         frozenset(_DISCARDABLE_REASONING_FIELDS) if discard_reasoning else frozenset(),
         absent_when_none=frozenset({"citations"}),
+        reasoning_envelope="extra_content" if discard_reasoning else None,
     )
 
 

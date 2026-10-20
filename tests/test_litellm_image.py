@@ -885,14 +885,46 @@ class TestTheResponseTranslation:
         assert image.url == "https://cdn.example/img.png"
         assert image.b64_json is None
 
-    async def test_a_provider_specific_field_on_an_entry_is_refused_naming_it(
+    async def test_a_content_bearing_provider_specific_field_is_refused_naming_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A structured provider-specific value is refused, and names the field.
+
+        A structure could carry an inline image, a citation or an annotation
+        block, and the canonical image has no target for any of them; a structure
+        that says nothing cannot be told from one that says something, so the
+        answer is refused and another eligible route may serve it.
+        """
+        entry = RecordingImageGeneration(
+            ImageResponse(
+                created=1730000000,
+                data=[
+                    ImageObject(
+                        b64_json="aGVsbG8=",
+                        provider_specific_fields={
+                            "inline_data": {"mime_type": "image/png", "data": "aGVsbG8="}
+                        },
+                    )
+                ],
+            )
+        )
+        monkeypatch.setattr(litellm, "aimage_generation", entry)
+        provider = LiteLLMImageProvider()
+
+        with pytest.raises(MalformedResponseError) as excinfo:
+            await provider.generate(make_route(), make_request(), make_context())
+
+        assert "inline_data" in excinfo.value.message
+
+    async def test_a_gemini_thought_signature_beside_the_image_is_tolerated(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A Gemini answer's thought_signature arrives on the entry (measured).
 
-        The canonical image has no target for it, and silently dropping it would
-        hide a content-provenance annotation the caller was never told about, so
-        the answer is refused and another eligible route may serve it.
+        It is provider metadata rather than content: it annotates the generation
+        and says nothing about the image, so it is dropped the way the response's
+        operational metadata is, and the image it sits beside is returned. The
+        blanket refusal it replaces refused every Google image model.
         """
         entry = RecordingImageGeneration(
             ImageResponse(
@@ -908,10 +940,41 @@ class TestTheResponseTranslation:
         monkeypatch.setattr(litellm, "aimage_generation", entry)
         provider = LiteLLMImageProvider()
 
-        with pytest.raises(MalformedResponseError) as excinfo:
-            await provider.generate(make_route(), make_request(), make_context())
+        response = await provider.generate(make_route(), make_request(), make_context())
 
-        assert "thought_signature" in excinfo.value.message
+        (image,) = response.data
+        assert image.b64_json == "aGVsbG8="
+
+    async def test_an_unknown_scalar_provider_field_beside_a_valid_image_is_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unrecognised scalar provider field is dropped rather than failing the image.
+
+        The canonical image has no target for a provider annotation, so the route
+        is availability-first here: refusing the entry would lose the image as
+        well as the annotation, and another eligible route may not exist to
+        serve it. The policy is deliberate rather than incidental, so it is
+        pinned — a provider attaching a second scalar field must not break image
+        generation the way the blanket refusal this replaces did.
+        """
+        entry = RecordingImageGeneration(
+            ImageResponse(
+                created=1730000000,
+                data=[
+                    ImageObject(
+                        b64_json="aGVsbG8=",
+                        provider_specific_fields={"safety_decision": "blocked"},
+                    )
+                ],
+            )
+        )
+        monkeypatch.setattr(litellm, "aimage_generation", entry)
+        provider = LiteLLMImageProvider()
+
+        response = await provider.generate(make_route(), make_request(), make_context())
+
+        (image,) = response.data
+        assert image.b64_json == "aGVsbG8="
 
     async def test_an_entry_with_no_image_in_it_is_refused(
         self, monkeypatch: pytest.MonkeyPatch

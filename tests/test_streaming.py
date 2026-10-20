@@ -1385,3 +1385,67 @@ class TestStreamingReasoningDiscardPolicy:
             )
 
         assert "citations" in str(error.value)
+
+    def test_a_thought_signature_envelope_is_dropped_on_a_discarding_route(self) -> None:
+        """Gemini's streamed trace arrives in the same ``extra_content`` envelope.
+
+        The first delta of a Gemini stream carries the assistant role and the
+        ``extra_content`` envelope beside it, so the route's ``discard_reasoning``
+        permission must cover the envelope's signature member on the stream too, or
+        every streamed answer is refused.
+        """
+        chunk = ModelResponseStream(
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(
+                        role="assistant",
+                        provider_specific_fields={
+                            "extra_content": {"google": {"thought_signature": "sig-abc"}}
+                        },
+                    ),
+                )
+            ]
+        )
+
+        events = from_litellm_chunk(
+            chunk, invocation_id=INVOCATION_ID, sequence=0, discard_reasoning=True
+        )
+
+        assert not events
+
+    @pytest.mark.parametrize(
+        "envelope",
+        [
+            {"google": {"thought_signature": "sig-abc", "safety": "flagged"}},
+            {"google": {"thought_signature": "sig-abc"}, "openai": {"refusal": "no"}},
+            {"google": {"safety": "flagged"}},
+        ],
+    )
+    def test_an_extra_content_envelope_with_an_unknown_member_is_refused(
+        self, envelope: dict[str, object]
+    ) -> None:
+        """The stream refuses an envelope whose populated member is not the signature.
+
+        The envelope is a generic vendor extension, so a sibling the classifier does
+        not know is a semantic the canonical stream cannot carry, and the delta is
+        refused rather than trimmed.
+        """
+        chunk = ModelResponseStream(
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(content="ok", provider_specific_fields={"extra_content": envelope}),
+                )
+            ]
+        )
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_chunk(
+                chunk, invocation_id=INVOCATION_ID, sequence=0, discard_reasoning=True
+            )
+
+        assert str(error.value) == (
+            "the upstream chunk delta carries provider-specific field 'extra_content', which the "
+            "canonical representation cannot carry"
+        )

@@ -1436,6 +1436,90 @@ class TestReasoningDiscardPolicy:
                 )
                 assert result.text == "Recursion is a technique..."
 
+    def test_a_thought_signature_field_is_refused_or_dropped_by_the_same_rule(self) -> None:
+        """Gemini's trace arrives inside ``extra_content``, and only that member is dropped.
+
+        The library surfaces Google's ``extra_content`` as a ``provider_specific_fields``
+        key on the message, beside the null ``refusal`` placeholder, and the raw
+        upstream key is the generic vendor extension envelope the converter files
+        there. A strict route refuses the envelope, and a route that declared
+        ``discard_reasoning`` drops it only when it is exactly the thought-signature
+        member the trace is measured to arrive in.
+        """
+        for refused in (True, False):
+            response = response_from(
+                reasoning_payload(
+                    provider_specific_fields={
+                        "extra_content": {"google": {"thought_signature": "sig-abc"}}
+                    }
+                )
+            )
+
+            if refused:
+                with pytest.raises(InternalError, match="extra_content"):
+                    from_litellm_response(make_route(), make_request(), response)
+            else:
+                result = from_litellm_response(
+                    make_route(discard_reasoning=True), make_request(), response
+                )
+                assert result.text == "Recursion is a technique..."
+
+    @pytest.mark.parametrize(
+        "envelope",
+        [
+            # An unknown populated member beside the signature, inside the vendor member.
+            {"google": {"thought_signature": "sig-abc", "safety": "flagged"}},
+            # An unknown populated vendor member beside the one the classifier knows.
+            {"google": {"thought_signature": "sig-abc"}, "openai": {"refusal": "no"}},
+            # The envelope carrying a populated member that is not the signature at all.
+            {"google": {"safety": "flagged"}},
+            # The signature itself replaced by a structure that is not a signature.
+            {"google": {"thought_signature": {"nested": "structure"}}},
+        ],
+    )
+    def test_an_extra_content_envelope_with_an_unknown_member_is_refused(
+        self, envelope: dict[str, object]
+    ) -> None:
+        """``extra_content`` is a generic vendor extension, so only its member is recognised.
+
+        The envelope is not a reasoning field but a generic vendor extension —
+        ``extra_content.<vendor>.<field>`` — and Google's thought signature is one
+        member inside it. A route that declared ``discard_reasoning`` may drop the
+        envelope only when every populated member is that signature; a sibling the
+        classifier does not know is a semantic the canonical model cannot hold, so
+        the response is refused rather than silently trimmed.
+        """
+        response = response_from(
+            reasoning_payload(provider_specific_fields={"extra_content": envelope})
+        )
+
+        with pytest.raises(InternalError) as error:
+            from_litellm_response(make_route(discard_reasoning=True), make_request(), response)
+
+        assert str(error.value) == (
+            "the upstream message carries provider-specific field 'extra_content', which the "
+            "canonical representation cannot carry"
+        )
+
+    def test_a_null_extra_content_member_is_not_a_semantic(self) -> None:
+        """A member the provider left null states nothing, so the envelope is still dropped.
+
+        The ``citations`` placeholder already has this reading on the response side,
+        and the envelope's members are read the same way: ``None`` is the provider
+        saying the feature is absent, not a value it chose to send.
+        """
+        response = response_from(
+            reasoning_payload(
+                provider_specific_fields={
+                    "extra_content": {"google": {"thought_signature": "sig-abc", "safety": None}}
+                }
+            )
+        )
+
+        result = from_litellm_response(make_route(discard_reasoning=True), make_request(), response)
+
+        assert result.text == "Recursion is a technique..."
+
     def test_an_absent_citation_slot_is_not_a_citation(self) -> None:
         """A provider's null placeholder states nothing, so it fails no route."""
         response = response_from(reasoning_payload(provider_specific_fields={"citations": None}))

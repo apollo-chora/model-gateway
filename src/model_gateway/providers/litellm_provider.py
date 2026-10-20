@@ -702,6 +702,16 @@ def _embedding_params(route: Route, request: EmbeddingRequest) -> dict[str, obje
     ``user`` and ``metadata`` are not forwarded. They are caller bookkeeping the
     canonical request carries, and the gateway forbids forwarding either to
     the model or to the provider.
+
+    For an OpenAI-dialect route, ``dimensions`` is named in
+    ``allowed_openai_params`` when it is sent: the pinned library's OpenAI
+    embedding handler validates the kwarg client-side and refuses it unless the
+    model name contains ``text-embedding-3``, which no OpenAI-compatible
+    embedding model from another vendor does. Naming the parameter as allowed
+    steps that guard aside while the value itself is still forwarded — the
+    alternative the library suggests, dropping the parameter, would leave the
+    provider's own default dimensionality in the answer, which the gateway then
+    refuses for the wrong length.
     """
     params: dict[str, object] = {
         "model": route.litellm_model,
@@ -713,6 +723,8 @@ def _embedding_params(route: Route, request: EmbeddingRequest) -> dict[str, obje
     }
     if request.dimensions is not None and route.supports_dimensions_param:
         params["dimensions"] = request.dimensions
+        if route.format == "openai":
+            params["allowed_openai_params"] = ["dimensions"]
     return params
 
 
@@ -726,7 +738,11 @@ def _from_litellm_embedding(
     """Normalise a LiteLLM embeddings answer into the canonical response.
 
     ``response`` is upstream data, never forwarded unchanged.
-    Each vector is read with the position the upstream reported. The usage is
+    Each vector is read with the position the upstream reported; an upstream
+    that reports no position — Google's OpenAI-compatible embeddings answer
+    leaves ``index`` null on every record — still answers one vector per input
+    in the caller's order, and the record's own place in the answer is the
+    position used. The usage is
     mapped by :func:`~model_gateway.providers.litellm_translation.from_litellm_embedding_usage`,
     which records a zero count as unknown: the pinned library fabricates an
     all-zero usage when the upstream reported none, and that placeholder is
@@ -758,7 +774,10 @@ def _from_litellm_embedding(
     return EmbeddingResponse(
         model=PUBLIC_MODEL_IDS[route.operation],
         upstream_model=route.model_id,
-        data=tuple(_embedding_from(item) for item in _embedding_records(response)),
+        data=tuple(
+            _embedding_from(item, position=position)
+            for position, item in enumerate(_embedding_records(response))
+        ),
         usage=from_litellm_embedding_usage(getattr(response, "usage", None)),
         invocation_id=invocation_id,
     )
@@ -783,7 +802,7 @@ def _embedding_records(response: EmbeddingResponse) -> tuple[object, ...]:
         return ()
 
 
-def _embedding_from(item: object) -> Embedding:
+def _embedding_from(item: object, *, position: int) -> Embedding:
     """One upstream embedding record as a canonical vector, position included.
 
     The pinned library hands the records back either as
@@ -791,6 +810,11 @@ def _embedding_from(item: object) -> Embedding:
     its own converter produced, so both shapes are read the same way. A record
     whose position or values the canonical type cannot carry is refused rather
     than coerced.
+
+    An upstream that reports no position — Google's OpenAI-compatible
+    embeddings answer leaves ``index`` null on every record — still answers
+    one vector per input in the caller's order, so the record's own place in
+    the answer is the position it reported, and that place is used.
     """
     index = _embedding_field(item, "index")
     values = _embedding_field(item, "embedding")
@@ -799,6 +823,8 @@ def _embedding_from(item: object) -> Embedding:
             "the upstream returned a base64-encoded embedding vector, which the canonical "
             "embedding representation cannot carry"
         )
+    if index is None:
+        index = position
     try:
         return Embedding(index=index, values=tuple(values))
     except (TypeError, ValueError) as error:

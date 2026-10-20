@@ -128,12 +128,15 @@ inspects:
   through as untrusted provider output, neither fetched nor screened here, and
   must not be treated as a gateway-fetchable URL just because it survived
   canonical parsing (:class:`~model_gateway.domain.images.GeneratedImage`
-  documents the contract). An entry carrying a
-  provider-specific field (a ``thought_signature`` from a Gemini-shaped
-  answer, say — measured arriving as ``provider_specific_fields``) or
-  carrying neither payload nor location is refused with a
-  :class:`~model_gateway.errors.MalformedResponseError` naming it, so another
-  eligible route may serve the request;
+  documents the contract). An entry's provider-specific fields are classified
+  by what they carry: a scalar value is pure provider metadata — the
+  ``thought_signature`` a Gemini-shaped answer attaches beside every image is a
+  string, and is measured arriving as ``provider_specific_fields`` — and is
+  dropped the way the response's operational metadata is, because refusing it
+  refused every Google image model; a structured value could carry a semantic
+  the canonical representation would be losing, and is refused with the field
+  named. An entry carrying neither payload nor location is refused the same
+  way, with the field named, so another eligible route may serve the request;
 * the usage is mapped with the embeddings path's discipline: a non-zero count
   is the provider-reported fact it can only be, a zero or absent count is
   recorded as unknown — the library fabricates an all-zero usage when the
@@ -709,11 +712,11 @@ def _from_litellm_image(
     Raises :class:`~model_gateway.errors.MalformedResponseError` naming the
     field when the upstream answer carries a semantic the canonical
     representation cannot carry: an image entry with no payload and no
-    location, an entry carrying a provider-specific field, a usage field with
-    no canonical target, or no image at all. The refusal is the malformed-
-    response error rather than an internal one: the upstream answered, and its
-    answer is what cannot serve the request, so another eligible route may
-    answer correctly.
+    location, an entry carrying a provider-specific field whose value is
+    structured rather than a scalar, a usage field with no canonical target, or
+    no image at all. The refusal is the malformed-response error rather than an
+    internal one: the upstream answered, and its answer is what cannot serve the
+    request, so another eligible route may answer correctly.
     """
     if not invocation_id:
         raise FailedPreconditionError(
@@ -776,13 +779,7 @@ def _generated_image_from(item: object) -> GeneratedImage:
     b64_json = _image_field(item, "b64_json")
     url = _image_field(item, "url")
     revised_prompt = _image_field(item, "revised_prompt")
-    provider_specific = _image_field(item, "provider_specific_fields")
-    if provider_specific:
-        names = ", ".join(sorted(str(name) for name in _mapping_keys(provider_specific)))
-        raise MalformedResponseError(
-            f"the upstream image entry carries a provider-specific field the canonical "
-            f"representation cannot carry: {names}"
-        )
+    _reject_content_bearing_entry_fields(_image_field(item, "provider_specific_fields"))
     try:
         return GeneratedImage(b64_json=b64_json, url=url, revised_prompt=revised_prompt)
     except ValueError as error:
@@ -798,11 +795,57 @@ def _image_field(item: object, name: str) -> object:
     return getattr(item, name, None)
 
 
-def _mapping_keys(value: object) -> tuple[object, ...]:
-    """The keys of a mapping, or the value itself when it is not one."""
-    if isinstance(value, Mapping):
-        return tuple(value)
-    return (value,)
+def _reject_content_bearing_entry_fields(fields: object) -> None:
+    """Refuse a provider-specific image-entry field whose value could carry content.
+
+    A provider attaches fields here that the canonical image has no target for,
+    and they are not all one kind of thing. A field whose value is a scalar is
+    pure provider metadata: the ``thought_signature`` a Gemini-shaped answer
+    attaches beside every image is a string (measured arriving here), and it
+    annotates the generation rather than saying anything about the image, so it
+    is dropped the way the response's operational metadata is
+    (:data:`_IGNORED_RESPONSE_FIELDS`) and cannot fail an otherwise valid entry.
+
+    A structured value is a different thing and is refused with the field named:
+    it could carry a semantic the canonical representation would be losing — an
+    inline image, a citation, an annotation block — and a structure that says
+    nothing cannot be told from one that says something.
+    """
+    names = sorted(
+        str(name)
+        for name, value in _provider_field_items(fields)
+        if not _is_provider_metadata(value)
+    )
+    if names:
+        raise MalformedResponseError(
+            "the upstream image entry carries a provider-specific field the canonical "
+            f"representation cannot carry: {', '.join(names)}"
+        )
+
+
+def _provider_field_items(fields: object) -> tuple[tuple[object, object], ...]:
+    """The provider-specific fields as name/value pairs, whichever shape they arrived in.
+
+    The library types the field as a mapping and fills it with one; a value that
+    is not a mapping at all is read as a single unnamed field, so it is still
+    classified rather than ignored.
+    """
+    if isinstance(fields, Mapping):
+        return tuple(fields.items())
+    if fields is None:
+        return ()
+    return ((fields, fields),)
+
+
+def _is_provider_metadata(value: object) -> bool:
+    """Whether a provider-specific field's value is pure metadata rather than content.
+
+    A scalar — a string, a number, a boolean or ``None`` — names, identifies or
+    annotates something, and cannot carry an image, a citation or an annotation
+    block of its own. Anything structured can, so it is not metadata here and the
+    entry carrying it is refused rather than trimmed.
+    """
+    return value is None or isinstance(value, str | int | float | bool)
 
 
 _IMAGE_RESPONSE_FIELDS: Final[frozenset[str]] = frozenset(
